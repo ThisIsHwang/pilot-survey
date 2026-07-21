@@ -41,7 +41,7 @@ During evaluation:
 
 Change GPU assignments through environment variables in the scripts. BM25 indexing requires OpenJDK 21 for Pyserini.
 If a complete JDK 21 is not already available, the scripts download a verified
-Eclipse Temurin JDK into `.bootstrap-tools/jdk-21` and export `JAVA_HOME`
+Amazon Corretto JDK into `.bootstrap-tools/jdk-21` and export `JAVA_HOME`
 automatically. A JRE without `javac` is not sufficient.
 
 ## Run

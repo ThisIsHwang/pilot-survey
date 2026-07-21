@@ -13,17 +13,20 @@ _jdk_is_compatible() {
 
 # Export a complete JDK for Pyserini/PyJNIus. A JRE is insufficient because
 # PyJNIus uses javac to locate the JVM. If no suitable system JDK is available,
-# install a verified Eclipse Temurin JDK 21 under .bootstrap-tools.
+# install a verified Amazon Corretto JDK 21 under .bootstrap-tools. Corretto's
+# permanent download URLs avoid the GitHub release-asset redirects used by
+# Adoptium, which are often blocked or stale behind cluster egress proxies.
 ensure_java() {
   local project_root=$1
   local tools_dir=${JAVA_BOOTSTRAP_DIR:-$project_root/.bootstrap-tools}
   local install_dir=$tools_dir/jdk-21
   local javac_path=""
-  local adoptium_arch
-  local api_url
+  local jdk_arch
+  local download_url
+  local checksum_url
   local download_dir
   local archive
-  local fetch_url
+  local install_stage
   local expected_sha
   local actual_sha
 
@@ -41,10 +44,10 @@ ensure_java() {
       return 1
     fi
     case "$(uname -m)" in
-      x86_64) adoptium_arch=x64 ;;
-      aarch64|arm64) adoptium_arch=aarch64 ;;
+      x86_64) jdk_arch=x64 ;;
+      aarch64|arm64) jdk_arch=aarch64 ;;
       *)
-        echo "Unsupported architecture for the Temurin JDK: $(uname -m)" >&2
+        echo "Unsupported architecture for the Corretto JDK: $(uname -m)" >&2
         return 1
         ;;
     esac
@@ -55,32 +58,59 @@ ensure_java() {
       fi
     done
 
-    mkdir -p "$tools_dir" "$install_dir"
+    mkdir -p "$tools_dir"
     download_dir=$(mktemp -d "$tools_dir/jdk-download.XXXXXX")
-    archive=$download_dir/temurin-jdk.tar.gz
-    api_url="https://api.adoptium.net/v3/binary/latest/21/ga/linux/${adoptium_arch}/jdk/hotspot/normal/eclipse"
+    archive=$download_dir/corretto-jdk.tar.gz
+    install_stage=$download_dir/jdk
+    download_url=${JAVA_BOOTSTRAP_URL:-https://corretto.aws/downloads/latest/amazon-corretto-21-${jdk_arch}-linux-jdk.tar.gz}
+    checksum_url=${JAVA_BOOTSTRAP_SHA256_URL:-https://corretto.aws/downloads/latest_sha256/amazon-corretto-21-${jdk_arch}-linux-jdk.tar.gz}
 
-    echo "Downloading Eclipse Temurin JDK 21 into $install_dir"
-    fetch_url=$(curl -fsS --retry 3 \
-      -o /dev/null \
-      -w '%{redirect_url}' \
-      "$api_url")
-    if [[ -z "$fetch_url" ]]; then
-      echo "Adoptium API did not return a JDK download URL." >&2
-      rmdir "$download_dir"
+    echo "Downloading Amazon Corretto JDK 21 into $install_dir"
+    if ! expected_sha=$(curl -fsSL --retry 5 --retry-delay 2 \
+      --connect-timeout 30 \
+      -H 'Cache-Control: no-cache' \
+      -A 'pilot-survey-jdk-bootstrap/1.0' \
+      "$checksum_url" | awk 'NR == 1 { print $1 }'); then
+      echo "Unable to download the Corretto JDK checksum: $checksum_url" >&2
+      rm -rf -- "$download_dir"
       return 1
     fi
-    curl -fsSL --retry 3 -o "$archive" "$fetch_url"
-    expected_sha=$(curl -fsSL --retry 3 "${fetch_url}.sha256.txt" | awk 'NR == 1 { print $1 }')
+    if [[ ! "$expected_sha" =~ ^[0-9a-fA-F]{64}$ ]]; then
+      echo "The Corretto JDK checksum response was invalid." >&2
+      rm -rf -- "$download_dir"
+      return 1
+    fi
+    if ! curl -fsSL --retry 5 --retry-delay 2 \
+      --connect-timeout 30 \
+      -H 'Cache-Control: no-cache' \
+      -A 'pilot-survey-jdk-bootstrap/1.0' \
+      -o "$archive" \
+      "$download_url"; then
+      echo "Unable to download the Corretto JDK archive: $download_url" >&2
+      rm -rf -- "$download_dir"
+      return 1
+    fi
     actual_sha=$(sha256sum "$archive" | awk '{ print $1 }')
-    if [[ -z "$expected_sha" || "$actual_sha" != "$expected_sha" ]]; then
-      echo "Temurin JDK checksum verification failed." >&2
-      rm -f -- "$archive"
-      rmdir "$download_dir"
+    if [[ "${actual_sha,,}" != "${expected_sha,,}" ]]; then
+      echo "Corretto JDK checksum verification failed." >&2
+      rm -rf -- "$download_dir"
       return 1
     fi
 
-    tar -xzf "$archive" -C "$install_dir" --strip-components=1
+    mkdir -p "$install_stage"
+    if ! tar -xzf "$archive" -C "$install_stage" --strip-components=1; then
+      echo "Unable to extract the Corretto JDK archive." >&2
+      rm -rf -- "$download_dir"
+      return 1
+    fi
+    if ! _jdk_is_compatible "$install_stage/bin/javac"; then
+      echo "The downloaded archive does not contain a compatible JDK 21." >&2
+      rm -rf -- "$download_dir"
+      return 1
+    fi
+
+    rm -rf -- "$install_dir"
+    mv "$install_stage" "$install_dir"
     rm -f -- "$archive"
     rmdir "$download_dir"
     JAVA_HOME=$install_dir
