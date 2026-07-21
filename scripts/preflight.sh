@@ -7,7 +7,8 @@ echo '== GPU =='
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
 
 echo '== Java =='
-java -version 2>&1 | head -2 || { echo 'OpenJDK 21 is required for Pyserini BM25 indexing.'; exit 1; }
+source "$ROOT/scripts/lib/bootstrap_java.sh"
+ensure_java "$ROOT"
 
 echo '== Python environments =='
 [[ -x .venv-pilot/bin/python ]] && .venv-pilot/bin/python -V || echo 'missing .venv-pilot'

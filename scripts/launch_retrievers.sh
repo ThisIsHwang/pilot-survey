@@ -3,6 +3,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 source .venv-pilot/bin/activate
+source "$ROOT/scripts/lib/bootstrap_java.sh"
+ensure_java "$ROOT"
 mkdir -p logs work/pids
 
 CORPUS=$ROOT/work/data/corpus.jsonl
