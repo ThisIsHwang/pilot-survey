@@ -6,7 +6,8 @@ from typing import List, Optional
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
-from ragatouille import RAGPretrainedModel
+
+from stackpilot.ragatouille_compat import install_langchain_retriever_compat
 
 
 class QueryRequest(BaseModel):
@@ -16,6 +17,9 @@ class QueryRequest(BaseModel):
 
 
 def main() -> None:
+    install_langchain_retriever_compat()
+    from ragatouille import RAGPretrainedModel
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--index-path", required=True)
     parser.add_argument("--port", type=int, default=8003)
