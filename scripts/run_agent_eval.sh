@@ -1,7 +1,34 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-source .venv-pilot/bin/activate
-python -m stackpilot.react_agent_eval --config configs/pilot.yaml "$@"
-python -m stackpilot.make_report --config configs/pilot.yaml
+source "$ROOT/.venv-pilot/bin/activate"
+source "$ROOT/scripts/lib/runtime.sh"
+ensure_local_no_proxy
+
+CONFIG=${CONFIG:-configs/pilot.yaml}
+ARGS=()
+while (( $# )); do
+  case "$1" in
+    --config)
+      if (( $# < 2 )); then
+        echo "--config requires a path" >&2
+        exit 2
+      fi
+      CONFIG=$2
+      shift 2
+      ;;
+    --config=*)
+      CONFIG=${1#--config=}
+      shift
+      ;;
+    *)
+      ARGS+=("$1")
+      shift
+      ;;
+  esac
+done
+
+python -m stackpilot.react_agent_eval --config "$CONFIG" "${ARGS[@]}"
+python -m stackpilot.make_report --config "$CONFIG"

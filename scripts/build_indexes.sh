@@ -1,36 +1,47 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-source .venv-pilot/bin/activate
+
+if [[ ! -x "$ROOT/.venv-pilot/bin/python" ]]; then
+  echo "Missing .venv-pilot. Run: bash scripts/bootstrap.sh" >&2
+  exit 1
+fi
+source "$ROOT/.venv-pilot/bin/activate"
 source "$ROOT/scripts/lib/bootstrap_java.sh"
 ensure_java "$ROOT"
 
+PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
+TORCH_EXTENSIONS_DIR=$ROOT/.cache/torch_extensions
+export TORCH_EXTENSIONS_DIR
+mkdir -p "$TORCH_EXTENSIONS_DIR"
 CORPUS=$ROOT/work/data/corpus.jsonl
 INDEX_ROOT=$ROOT/work/indexes
 mkdir -p "$INDEX_ROOT"
 
-if [[ ! -f "$CORPUS" ]]; then
+if [[ ! -s "$CORPUS" ]]; then
   echo "Missing corpus: $CORPUS" >&2
   echo "Run bash scripts/prepare_data.sh first." >&2
   exit 1
 fi
 
+index_state() {
+  "$PILOT_PYTHON" -m stackpilot.index_state "$@"
+}
+
 BM25_INDEX=$INDEX_ROOT/bm25/bm25
-BM25_TEMP=$BM25_INDEX/temp
-BM25_DONE=$INDEX_ROOT/bm25/.pilot-complete
-if [[ -f "$BM25_DONE" ]] && compgen -G "$BM25_INDEX/segments_*" >/dev/null; then
-  echo "Reusing completed BM25 index: $BM25_INDEX"
+BM25_MANIFEST=$INDEX_ROOT/bm25/.pilot-manifest.json
+if index_state check --kind bm25 --corpus "$CORPUS" --index "$BM25_INDEX" \
+  --manifest "$BM25_MANIFEST" --model "pyserini-0.25.0:DefaultEnglishAnalyzer"; then
+  :
 else
-  # The upstream wrapper ignores Pyserini's subprocess return code and prints
-  # "Finish!" after a JVM failure. Run Pyserini directly so set -e can stop on
-  # an actual indexing error, and rebuild only this derived index directory.
+  BM25_TEMP=$INDEX_ROOT/bm25/input
   echo "Building BM25 index: $BM25_INDEX"
-  rm -f -- "$BM25_DONE"
-  rm -rf -- "$BM25_INDEX"
+  rm -rf -- "$INDEX_ROOT/bm25"
   mkdir -p "$BM25_TEMP"
   cp "$CORPUS" "$BM25_TEMP/corpus.jsonl"
-  if ! python -m pyserini.index.lucene \
+  if ! "$PILOT_PYTHON" -m pyserini.index.lucene \
     --collection JsonCollection \
     --input "$BM25_TEMP" \
     --index "$BM25_INDEX" \
@@ -41,27 +52,26 @@ else
     exit 1
   fi
   rm -rf -- "$BM25_TEMP"
-  if ! compgen -G "$BM25_INDEX/segments_*" >/dev/null; then
-    echo "BM25 command exited successfully but no Lucene segments were created." >&2
-    exit 1
-  fi
-  touch "$BM25_DONE"
+  index_state record --kind bm25 --corpus "$CORPUS" --index "$BM25_INDEX" \
+    --manifest "$BM25_MANIFEST" --model "pyserini-0.25.0:DefaultEnglishAnalyzer"
 fi
 
+E5_MODEL=${E5_MODEL:-intfloat/e5-base-v2}
 E5_INDEX=$INDEX_ROOT/e5/e5_Flat.index
-if [[ -s "$E5_INDEX" ]]; then
-  echo "Reusing completed E5 index: $E5_INDEX"
+E5_MANIFEST=$INDEX_ROOT/e5/.pilot-manifest.json
+E5_SIGNATURE="$E5_MODEL:mean:max256:flat:fp16"
+if index_state check --kind e5 --corpus "$CORPUS" --index "$E5_INDEX" \
+  --manifest "$E5_MANIFEST" --model "$E5_SIGNATURE"; then
+  :
 else
-  # Search-R1 uses torch.nn.DataParallel whenever more than one GPU is
-  # visible. One H100 is ample for this 33k-document corpus. The stackpilot
-  # wrapper also forces eager attention to avoid cuDNN SDPA initialization
-  # failures in this CUDA 12.9 environment.
   DENSE_GPUS=${DENSE_GPUS:-0}
   E5_BATCH_SIZE=${E5_BATCH_SIZE:-256}
   echo "Building E5 index on CUDA_VISIBLE_DEVICES=$DENSE_GPUS"
-  CUDA_VISIBLE_DEVICES=$DENSE_GPUS python -m stackpilot.build_e5 \
+  rm -rf -- "$INDEX_ROOT/e5"
+  mkdir -p "$INDEX_ROOT/e5"
+  CUDA_VISIBLE_DEVICES=$DENSE_GPUS "$PILOT_PYTHON" -m stackpilot.build_e5 \
     --retrieval_method e5 \
-    --model_path intfloat/e5-base-v2 \
+    --model_path "$E5_MODEL" \
     --corpus_path "$CORPUS" \
     --save_dir "$INDEX_ROOT/e5" \
     --use_fp16 \
@@ -71,15 +81,32 @@ else
     --faiss_type Flat \
     --faiss_gpu \
     --save_embedding
-  if [[ ! -s "$E5_INDEX" ]]; then
-    echo "E5 command exited successfully but no FAISS index was created." >&2
-    exit 1
-  fi
+  index_state record --kind e5 --corpus "$CORPUS" --index "$E5_INDEX" \
+    --manifest "$E5_MANIFEST" --model "$E5_SIGNATURE"
 fi
 
-COLBERT_GPU=${COLBERT_GPU:-4}
-CUDA_VISIBLE_DEVICES=$COLBERT_GPU python -m stackpilot.build_colbert \
-  --corpus "$CORPUS" \
-  --index-root "$INDEX_ROOT/colbert" \
-  --index-name hotpot_pilot_colbert \
-  --model colbert-ir/colbertv2.0
+COLBERT_MODEL=${COLBERT_MODEL:-colbert-ir/colbertv2.0}
+COLBERT_NAME=hotpot_pilot_colbert
+COLBERT_INDEX=$INDEX_ROOT/colbert/colbert/indexes/$COLBERT_NAME
+COLBERT_MANIFEST=$INDEX_ROOT/colbert/.pilot-manifest.json
+COLBERT_SIGNATURE="$COLBERT_MODEL:doc256:nbits2:faiss"
+if index_state check --kind colbert --corpus "$CORPUS" --index "$COLBERT_INDEX" \
+  --manifest "$COLBERT_MANIFEST" --model "$COLBERT_SIGNATURE"; then
+  :
+else
+  COLBERT_GPU=${COLBERT_GPU:-4}
+  COLBERT_BATCH_SIZE=${COLBERT_BATCH_SIZE:-32}
+  echo "Building and warming ColBERT index on CUDA_VISIBLE_DEVICES=$COLBERT_GPU"
+  rm -rf -- "$INDEX_ROOT/colbert"
+  mkdir -p "$INDEX_ROOT/colbert"
+  CUDA_VISIBLE_DEVICES=$COLBERT_GPU "$PILOT_PYTHON" -m stackpilot.build_colbert \
+    --corpus "$CORPUS" \
+    --index-root "$INDEX_ROOT/colbert" \
+    --index-name "$COLBERT_NAME" \
+    --model "$COLBERT_MODEL" \
+    --batch-size "$COLBERT_BATCH_SIZE"
+  index_state record --kind colbert --corpus "$CORPUS" --index "$COLBERT_INDEX" \
+    --manifest "$COLBERT_MANIFEST" --model "$COLBERT_SIGNATURE"
+fi
+
+echo "All indexes are complete and validated."

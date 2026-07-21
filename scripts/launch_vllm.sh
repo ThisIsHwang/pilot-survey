@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-source .venv-vllm/bin/activate
+source "$ROOT/scripts/lib/runtime.sh"
+source "$ROOT/scripts/lib/vllm_launch.sh"
+ensure_local_no_proxy
+configure_vllm_launch "$ROOT"
+require_free_port "$VLLM_PYTHON" "$LLM_PORT"
 
-MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
-LLM_GPUS=${LLM_GPUS:-0,1,2,3}
-TP=${TP:-4}
-CUDA_VISIBLE_DEVICES=$LLM_GPUS python -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL" \
-  --served-model-name "$MODEL" \
-  --tensor-parallel-size "$TP" \
-  --gpu-memory-utilization 0.88 \
-  --max-model-len 16384 \
-  --port 9000
+echo "Serving $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP)."
+exec env CUDA_VISIBLE_DEVICES="$LLM_GPUS" "$VLLM_BIN" "${VLLM_ARGS[@]}"

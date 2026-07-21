@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llama-index"
+version = "0.14.23"
+description = "Metadata-only compatibility shim backed by llama-index-core"
+requires-python = ">=3.12,<3.13"
+dependencies = ["llama-index-core==0.14.23"]
+
+[tool.setuptools]
+packages = []

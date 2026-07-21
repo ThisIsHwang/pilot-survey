@@ -1,14 +1,50 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 
 
 STOPWORDS = {
-    "a", "an", "the", "is", "are", "was", "were", "who", "what", "when", "where", "why", "how",
-    "which", "of", "in", "on", "at", "to", "for", "from", "with", "and", "or", "did", "does",
-    "do", "has", "have", "had", "be", "been", "being", "that", "this", "these", "those", "by",
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "who",
+    "what",
+    "when",
+    "where",
+    "why",
+    "how",
+    "which",
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "from",
+    "with",
+    "and",
+    "or",
+    "did",
+    "does",
+    "do",
+    "has",
+    "have",
+    "had",
+    "be",
+    "been",
+    "being",
+    "that",
+    "this",
+    "these",
+    "those",
+    "by",
 }
 
 
@@ -27,7 +63,14 @@ def exact_query(question: str) -> str:
     candidates = []
     for p in phrases + capitalized:
         p = p.strip()
-        if len(p) > 2 and p.lower() not in {"what", "who", "when", "where", "which", "how"}:
+        if len(p) > 2 and p.lower() not in {
+            "what",
+            "who",
+            "when",
+            "where",
+            "which",
+            "how",
+        }:
             candidates.append(p)
     quoted = " ".join(f'"{x}"' for x in list(dict.fromkeys(candidates))[:3])
     tail = keyword_query(question)
@@ -57,10 +100,17 @@ class LLMQueryGenerator:
     model: str
     temperature: float = 0.1
     max_tokens: int = 300
+    seed: int = 42
 
     def __post_init__(self) -> None:
         from openai import OpenAI
-        self.client = OpenAI(base_url=self.api_base, api_key=self.api_key)
+
+        self.client = OpenAI(
+            base_url=self.api_base,
+            api_key=self.api_key,
+            timeout=180.0,
+            max_retries=5,
+        )
 
     def generate(self, question: str) -> dict[str, str]:
         prompt = f"""Create four search-engine queries for the question below.
@@ -76,12 +126,24 @@ Question: {question}
             messages=[{"role": "user", "content": prompt}],
             temperature=self.temperature,
             max_tokens=self.max_tokens,
+            seed=(
+                self.seed
+                + int.from_bytes(
+                    hashlib.sha256(question.encode("utf-8")).digest()[:4], "big"
+                )
+            )
+            % (2**31),
         )
         content = response.choices[0].message.content or "{}"
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", content, flags=re.S)
-            parsed = json.loads(match.group(0)) if match else {}
+            try:
+                parsed = json.loads(match.group(0)) if match else {}
+            except json.JSONDecodeError:
+                parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
         fallback = heuristic_candidates(question)
         return {key: str(parsed.get(key) or fallback[key]).strip() for key in fallback}

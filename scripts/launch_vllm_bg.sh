@@ -1,23 +1,53 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
+
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-source .venv-vllm/bin/activate
-mkdir -p logs work/pids
-MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
-LLM_GPUS=${LLM_GPUS:-0,1,2,3}
-TP=${TP:-4}
-CUDA_VISIBLE_DEVICES=$LLM_GPUS nohup python -m vllm.entrypoints.openai.api_server \
-  --model "$MODEL" --served-model-name "$MODEL" \
-  --tensor-parallel-size "$TP" --gpu-memory-utilization 0.88 \
-  --max-model-len 16384 --port 9000 > logs/vllm.log 2>&1 &
-echo $! > work/pids/vllm.pid
-for _ in $(seq 1 120); do
-  if curl -fsS http://127.0.0.1:9000/v1/models >/dev/null 2>&1; then
-    echo "vLLM ready"
-    exit 0
-  fi
-  sleep 5
-done
-echo "vLLM did not become ready. Check logs/vllm.log" >&2
-exit 1
+source "$ROOT/scripts/lib/runtime.sh"
+source "$ROOT/scripts/lib/vllm_launch.sh"
+ensure_local_no_proxy
+configure_vllm_launch "$ROOT"
+mkdir -p "$ROOT/logs" "$ROOT/work/pids"
+
+PID_FILE=$ROOT/work/pids/vllm.pid
+LOG_FILE=$ROOT/logs/vllm.log
+stop_managed_pid "$PID_FILE" "$ROOT/.venv-vllm/bin/vllm" "$ROOT" 1
+require_free_port "$VLLM_PYTHON" "$LLM_PORT"
+
+VLLM_PID=$(CUDA_VISIBLE_DEVICES=$LLM_GPUS start_managed_process \
+  "$VLLM_PYTHON" "$LOG_FILE" "$VLLM_BIN" "${VLLM_ARGS[@]}")
+echo "$VLLM_PID" > "$PID_FILE"
+
+cleanup_vllm() {
+  local status=$?
+  trap - ERR INT TERM
+  stop_managed_pid "$PID_FILE" "$ROOT/.venv-vllm/bin/vllm" "$ROOT" 1 || true
+  exit "$status"
+}
+trap cleanup_vllm ERR INT TERM
+
+echo "Loading $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP)."
+wait_for_http "$VLLM_PID" "http://127.0.0.1:${LLM_PORT}/v1/models" \
+  "${VLLM_READY_TIMEOUT:-900}" "$LOG_FILE"
+
+models_response=$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 30 \
+  "http://127.0.0.1:${LLM_PORT}/v1/models")
+"$VLLM_PYTHON" -c \
+  'import json,sys; ids={str(x.get("id")) for x in json.loads(sys.argv[1]).get("data", [])}; expected=sys.argv[2]; assert expected in ids, (expected, sorted(ids))' \
+  "$models_response" "$SERVED_MODEL_NAME"
+
+# Exercise one generation so model loading, NCCL, kernels, and the API model
+# name are all verified before a long evaluation begins.
+probe_payload=$("$VLLM_PYTHON" -c \
+  'import json,sys; print(json.dumps({"model":sys.argv[1],"messages":[{"role":"user","content":"Reply with OK"}],"max_tokens":8,"temperature":0}))' \
+  "$SERVED_MODEL_NAME")
+response=$(curl --noproxy '*' -fsS --connect-timeout 3 \
+  --max-time "${VLLM_PROBE_TIMEOUT:-300}" \
+  -X POST "http://127.0.0.1:${LLM_PORT}/v1/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d "$probe_payload")
+"$VLLM_PYTHON" -c \
+  'import json,sys; p=json.loads(sys.argv[1]); assert p.get("choices"), p' "$response"
+
+trap - ERR INT TERM
+echo "vLLM ready on port $LLM_PORT (PID $VLLM_PID)."

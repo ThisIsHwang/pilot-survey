@@ -1,143 +1,210 @@
-# Retrieval-Stack Adaptation Pilot
+# Retrieval-stack adaptation pilot
 
-This is a **go/no-go experiment** for the paper idea: a search agent trained or prompted on one retrieval stack may fail when attached to another stack. It deliberately reuses the official [`PeterGriffinJin/Search-R1`](https://github.com/PeterGriffinJin/Search-R1) implementation for BM25/E5 indexing and retrieval, and uses RAGatouille for ColBERT.
+This repository runs the zero-shot retrieval-stack pilot on one Linux node with
+8 full NVIDIA H100 GPUs and CUDA 12.9. It compares BM25, E5, and ColBERT on a
+controlled HotpotQA corpus, then evaluates the same Qwen 2.5 search agent against
+all three backends.
 
-It does **not** yet implement the proposed latent-belief robust RL. First establish that the problem is real and not solved by a fixed query ensemble.
+Search-R1 is pinned to commit
+`598e61bd1d36895726d28a8d06b3a15bed19f5d3`. BM25 and E5 reuse its official
+indexing/retrieval implementation; ColBERT uses pinned RAGatouille/ColBERT
+packages.
 
-## What it measures
+## Required node
 
-1. **Retrieval-only query-style matrix**
-   - Backends: BM25, E5, ColBERT
-   - Styles: semantic, keyword, exact phrase, decomposed first-hop
-   - Metric: HotpotQA supporting-title recall
-   - Output: best fixed style and per-question style oracle
-2. **Blind search-agent evaluation**
-   - The same ReAct-style Qwen agent is connected to each hidden backend.
-3. **Backend-guideline oracle**
-   - The model is told the backend-specific query guideline.
-   - The gap estimates whether online stack adaptation has useful headroom.
-4. **Stage-2 Search-R1 specialists**
-   - Scripts are included to train BM25/E5/ColBERT specialist baselines after the pilot passes.
+- Linux x86_64 with glibc 2.31 or newer
+- exactly 8 full (non-MIG) H100 GPUs, with at least 60 GiB free on each
+- Python 3.12 available as `python3.12`, including its development headers
+  (`Python.h`; commonly provided by `python3.12-dev`)
+- an NVIDIA driver capable of running CUDA 12.9 binaries
+- the CUDA 12.9 toolkit, including `nvcc`, on `PATH`
+- `g++`, `git`, and `curl`
+- at least 1 GiB free in `/dev/shm`
 
-## Upstream reuse
+On a module-based cluster, load its CUDA 12.9 toolkit before running the pilot,
+for example `module load cuda/12.9`. Confirm that `nvcc --version` reports
+release 12.9. A driver alone is insufficient because the preflight and ColBERT
+warm-up compile CUDA extensions.
 
-- Search-R1 is pinned to commit `598e61bd1d36895726d28a8d06b3a15bed19f5d3`.
-- Search-R1 already supports BM25 and dense local retrievers behind a FastAPI endpoint and GRPO on one 8-GPU node.
-- This package adds a port-configurable wrapper, ColBERT-compatible endpoint, controlled HotpotQA corpus, and cross-stack evaluation.
+## Recommended one-command run
 
-## Hardware layout for 8×H100
-
-During index construction:
-
-- GPU 0: E5 encoding and GPU FAISS (single GPU by default for reliability)
-- GPU 4: ColBERT indexing
-
-During evaluation:
-
-- GPU 5: E5 query encoder and GPU FAISS search
-- GPU 6: ColBERT server
-- GPUs 0–3: vLLM Qwen-7B, tensor parallel 4
-- GPU 7: free / monitoring / larger vLLM TP if desired
-
-Change GPU assignments through environment variables in the scripts. BM25 indexing requires OpenJDK 21 for Pyserini.
-If Java 21 is not already available, the scripts install the `jdk4py` Java 21
-runtime wheel from PyPI into `.venv-pilot` and export `JAVA_HOME` and `JVM_PATH`
-automatically. This avoids direct JDK archive downloads that cluster egress
-proxies may block.
-
-## Run
+Point `MODEL_PATH` directly at the Qwen directory that already contains
+`config.json` and the `*.safetensors` files. For a Hugging Face cache, this is
+the concrete `snapshots/<revision>` directory, not the parent
+`models--Qwen--...` directory.
 
 ```bash
-unzip stack_adapt_pilot.zip
-cd stack_adapt_pilot
+cd /group-volume/teo.hwang/pilot-survey
+git pull origin main
+
+MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
+  bash scripts/run_all.sh
+```
+
+This is the single recommended model-cache method. The local filesystem path is
+used to load weights, while the API name remains
+`Qwen/Qwen2.5-7B-Instruct`, matching `configs/pilot.yaml`. Therefore a local
+path cannot accidentally cause an OpenAI API `model not found` error.
+
+`run_all.sh` performs both bootstraps, strict hardware/runtime preflight, data
+preparation, all three indexes, real server warm-ups, the retrieval matrix, the
+agent evaluation, report generation, and server cleanup. It stops immediately
+with the relevant log tail when a service dies. Set `KEEP_SERVERS=1` only when
+the servers should remain running after completion.
+
+For a quick evaluation code-path run:
+
+```bash
+MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
+RETRIEVAL_LIMIT=20 AGENT_LIMIT=5 \
+  bash scripts/run_all.sh
+```
+
+This still prepares the configured 3,000/500 examples and builds the full pilot
+indexes when they are not cached; only the retrieval and agent-evaluation
+limits are shortened.
+
+After a successful bootstrap, avoid recreating the environments on a rerun:
+
+```bash
+MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
+SKIP_BOOTSTRAP=1 \
+  bash scripts/run_all.sh
+```
+
+## Manual run
+
+Use this sequence when observing each phase separately:
+
+```bash
+export MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct
 
 bash scripts/bootstrap.sh
 bash scripts/bootstrap_vllm.sh
-source .venv-pilot/bin/activate
 
-bash scripts/prepare_data.sh
+bash scripts/preflight.sh
+
+bash scripts/prepare_data.sh --config configs/pilot.yaml
 bash scripts/build_indexes.sh
 bash scripts/launch_retrievers.sh
 
-# Fastest experiment; no LLM server required.
+bash scripts/launch_vllm_bg.sh
+
 bash scripts/run_retrieval_matrix.sh --limit 500
-
-# In a second terminal, start the LLM server.
-# This script activates the separate .venv-vllm environment.
-bash scripts/launch_vllm.sh
-# Or background mode: bash scripts/launch_vllm_bg.sh
-
-# Then evaluate the blind agent and oracle-guidance upper bound.
 bash scripts/run_agent_eval.sh --limit 200
 
 cat work/results/REPORT.md
+bash scripts/stop_servers.sh
 ```
 
-Both bootstrap scripts target CUDA 12.9 (`cu129`) and recreate their virtual
-environment on each run so an incomplete install cannot leak into the next one.
-They use the `python` command by default; select a specific interpreter with, for
-example, `PYTHON_BIN=python3.12 bash scripts/bootstrap_vllm.sh`.
-Virtual environments are created by `uv`, without relying on the system
-`venv`/`ensurepip` packages. If `uv` is absent, a standalone binary is installed
-under `.bootstrap-tools/` automatically.
+The foreground vLLM alternative is:
 
-The pilot environment installs GPU-enabled FAISS. E5 index construction defaults
-to one H100 (`DENSE_GPUS=0`) and writes the resulting portable CPU index to disk;
-the E5 server moves that index onto the GPU selected by `E5_GPU` at startup.
-Multiple encoding GPUs can still be selected explicitly, but Search-R1 then uses
-PyTorch `DataParallel`. E5 encoding uses eager attention instead of cuDNN SDPA
-for compatibility with the CUDA 12.9 environment; tune its batch size with
-`E5_BATCH_SIZE` (default `256`).
+```bash
+MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
+  bash scripts/launch_vllm.sh
+```
 
-Stop retrieval servers:
+## CUDA and dependency choices
+
+The pilot environment uses PyTorch 2.11.0 with its CUDA 12.9 wheel and
+GPU-enabled FAISS. The vLLM environment is separate and pins vLLM 0.19.0. That
+release's normal PyPI wheel is built for CUDA 12.9; newer vLLM releases switched
+their default PyPI binary starting with 0.20 to CUDA 13 and place their alternate
+CUDA 12.9 wheel on GitHub release storage, which this cluster's egress proxy
+returns as HTTP 403. The pinned version avoids that URL entirely.
+
+Both virtual environments are created by `uv`; neither script calls
+`ensurepip`. If `uv` is absent, its pinned Linux wheel is fetched directly from
+PyPI into `.bootstrap-tools`. Package installation uses copy mode so a cache on
+a different filesystem from the group volume does not emit hard-link failures.
+
+Python/RAGatouille/LangChain/ColBERT versions are pinned. Java 21 comes from the
+`jdk4py` PyPI wheel, so no Temurin or Corretto archive download is needed.
+
+## GPU layout
+
+Index construction is sequential:
+
+- GPU 0: E5 encoding and GPU FAISS construction
+- GPU 4: ColBERT indexing, GPU FAISS clustering, and warm-up search
+
+Evaluation uses:
+
+- GPUs 0-3: Qwen 2.5 vLLM, tensor parallel size 4
+- GPU 5: E5 encoder and GPU FAISS search
+- GPU 6: ColBERT search
+- GPUs 4 and 7: free
+- CPU: BM25/Lucene
+
+The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
+`TP`. `LLM_GPUS` must contain exactly `TP` unique GPU IDs.
+
+## Cache and restart behavior
+
+- Hugging Face datasets/models retain their normal cache behavior. `HF_HOME`
+  may point at an existing shared cache before running the scripts.
+- Prepared data has a configuration-and-SHA-256 manifest and is reused only
+  when its counts, settings, and output files match. Existing valid pilot data
+  is upgraded to the stronger manifest without downloading it again. Use
+  `FORCE_PREPARE=1` to regenerate it.
+- BM25, E5, and ColBERT each store a corpus/model manifest. Reuse requires a
+  matching SHA-256 corpus fingerprint and an actual index document-count check;
+  ColBERT also verifies every codec, IVF, and chunk artifact.
+- ColBERT runs one real search before it is marked complete, so compiler/runtime
+  failures cannot leave a false-success cache.
+- Retrieval-matrix and agent-evaluation JSONL files are append-only checkpoints.
+  A rerun resumes completed backend/episode units instead of losing hours of
+  work after a transient request failure. Interrupted tail writes are repaired
+  before appending, and reports refuse to combine different run signatures.
+
+## Logs and cleanup
+
+Runtime logs are written to:
+
+```text
+logs/bm25.log
+logs/e5.log
+logs/colbert.log
+logs/vllm.log
+```
+
+Stop only the processes recorded by this checkout:
 
 ```bash
 bash scripts/stop_servers.sh
 ```
 
-## Faster smoke test
+PID command lines are verified before signals are sent, so a stale PID file
+cannot kill an unrelated process. Launchers also refuse an unknown process
+already occupying ports 8001, 8002, 8003, or 9000.
 
-Edit `configs/pilot.yaml`:
+## Outputs
 
-```yaml
-data:
-  train_examples: 500
-  eval_examples: 100
-agent:
-  eval_examples: 30
-```
+- `work/results/retrieval_matrix_summary.csv`
+- `work/results/retrieval_style_oracle.csv`
+- `work/results/agent_eval_summary.csv`
+- `work/results/REPORT.md`
 
-Then run the same commands.
+The query-style oracle excludes the RRF ensemble; the ensemble remains a
+separate fixed baseline.
 
-## Full query generation with the LLM
+## What the pilot measures
 
-The default query-style matrix uses deterministic heuristics so it can run before vLLM. After the server is up, set:
+1. Supporting-title recall for semantic, keyword, exact-phrase, decomposed, and
+   RRF-fused queries across BM25, E5, and ColBERT.
+2. Blind ReAct-style search-agent performance on each hidden backend.
+3. The gain from backend-specific query guidance as an adaptation upper bound.
 
-```yaml
-query_generation:
-  source: vllm
-```
+Proceed to the separate Stage-2 Search-R1 specialist work only if at least two
+of these hold:
 
-and rerun `scripts/run_retrieval_matrix.sh`.
+- blind answer/support performance differs by at least 5 percentage points
+  across backends;
+- backend guidance improves the weakest backend by at least 3 points;
+- the best fixed query style differs by backend and the per-question style
+  oracle is materially stronger;
+- the fixed RRF ensemble does not already close most of the gap.
 
-## Go / no-go
-
-Proceed to the RL method only when at least two conditions hold:
-
-- Blind answer/support performance differs by at least 5 percentage points across backends.
-- Backend-guideline oracle improves the weakest backend by at least 3 points.
-- The best query style differs by backend and per-question style oracle clearly beats the best fixed style.
-- A fixed query ensemble does not already close most of the gap.
-
-If these fail, the latent stack-belief contribution is unlikely to justify a top-conference paper.
-
-## Important limitations of this pilot
-
-- It uses a global corpus aggregated from HotpotQA distractor contexts, not the full Wikipedia corpus. This is intentional for a fast first run.
-- The backend-guideline oracle is a cheap upper bound, not a trained specialist.
-- RAGatouille dependency compatibility can vary. If ColBERT installation fails, run BM25/E5 first and address ColBERT separately.
-- The final paper must repeat the study on a fixed full-corpus benchmark such as BrowseComp-Plus or BEIR HotpotQA.
-
-## Smoke configuration
-
-A tiny configuration is included at `configs/smoke.yaml`. All Python commands accept `--config configs/smoke.yaml`. The launch scripts use the main config paths, so for the first full end-to-end run prefer `configs/pilot.yaml`; the smoke config is most useful for data preparation and code-level validation.
+Stage 2 is deliberately not part of `run_all.sh`: it requires Search-R1's
+separate training environment and a different GPU allocation from the zero-shot
+pilot.

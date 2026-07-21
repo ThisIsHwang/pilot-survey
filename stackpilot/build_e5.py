@@ -3,29 +3,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import torch
-from transformers import AutoConfig, AutoModel, AutoTokenizer
-
-
-def _load_model_with_eager_attention(model_path: str, use_fp16: bool = False):
-    """Match Search-R1's loader while avoiding cuDNN-backed SDPA."""
-    config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-    model = AutoModel.from_pretrained(
-        model_path,
-        config=config,
-        trust_remote_code=True,
-        attn_implementation="eager",
-    )
-    model.eval()
-    model.cuda()
-    if use_fp16:
-        model = model.half()
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        use_fast=True,
-        trust_remote_code=True,
-    )
-    return model, tokenizer
+from stackpilot.cuda_compat import (
+    configure_cuda_attention,
+    load_e5_with_eager_attention,
+)
 
 
 def main() -> None:
@@ -40,9 +21,8 @@ def main() -> None:
     # The model is loaded with eager attention below. Disabling cuDNN SDPA as
     # well prevents a future upstream model change from selecting the failing
     # backend implicitly.
-    torch.backends.cuda.enable_cudnn_sdp(False)
-    torch.backends.cuda.enable_math_sdp(True)
-    index_builder.load_model = _load_model_with_eager_attention
+    configure_cuda_attention()
+    index_builder.load_model = load_e5_with_eager_attention
     print("E5 attention backend: eager (cuDNN SDPA disabled)")
     index_builder.main()
 

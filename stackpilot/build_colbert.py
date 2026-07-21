@@ -4,10 +4,12 @@ import argparse
 import json
 from pathlib import Path
 
+from stackpilot.cuda_compat import configure_cuda_attention
 from stackpilot.ragatouille_compat import install_langchain_retriever_compat
 
 
 def main() -> None:
+    configure_cuda_attention()
     install_langchain_retriever_compat()
     from ragatouille import RAGPretrainedModel
 
@@ -16,6 +18,7 @@ def main() -> None:
     parser.add_argument("--index-name", default="hotpot_pilot_colbert")
     parser.add_argument("--model", default="colbert-ir/colbertv2.0")
     parser.add_argument("--index-root", required=True)
+    parser.add_argument("--batch-size", type=int, default=32)
     args = parser.parse_args()
 
     documents, ids, metadata = [], [], []
@@ -35,7 +38,14 @@ def main() -> None:
         document_metadatas=metadata,
         split_documents=False,
         overwrite_index=True,
+        bsize=args.batch_size,
+        use_faiss=True,
     )
+    # Loading and searching exercises the CUDA/C++ extensions now, rather than
+    # letting the first evaluation request discover a compiler/runtime error.
+    warmed = rag.search("pilot index warmup", k=1)
+    if not warmed:
+        raise RuntimeError("ColBERT warmup search returned no result")
     print(path)
 
 

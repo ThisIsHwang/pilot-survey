@@ -10,6 +10,7 @@ def install_langchain_retriever_compat() -> None:
         from langchain.retrievers.document_compressors.base import (  # noqa: F401
             BaseDocumentCompressor,
         )
+
         return
     except ModuleNotFoundError as exc:
         if not (exc.name or "").startswith("langchain.retrievers"):

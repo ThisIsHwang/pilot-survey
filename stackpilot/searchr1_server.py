@@ -9,6 +9,11 @@ import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from stackpilot.cuda_compat import (
+    configure_cuda_attention,
+    load_e5_with_eager_attention,
+)
+
 
 class QueryRequest(BaseModel):
     queries: List[str]
@@ -29,9 +34,14 @@ def main() -> None:
     args = parser.parse_args()
 
     sys.path.insert(0, str(Path(args.search_r1_root).resolve()))
-    from search_r1.search.retrieval_server import Config, get_retriever
+    from search_r1.search import retrieval_server
 
-    config = Config(
+    if args.retriever_name.lower() == "e5":
+        configure_cuda_attention()
+        retrieval_server.load_model = load_e5_with_eager_attention
+        print("E5 attention backend: eager (cuDNN SDPA disabled)")
+
+    config = retrieval_server.Config(
         retrieval_method=args.retriever_name,
         index_path=args.index_path,
         corpus_path=args.corpus_path,
@@ -43,8 +53,16 @@ def main() -> None:
         retrieval_use_fp16=True,
         retrieval_batch_size=256,
     )
-    retriever = get_retriever(config)
+    retriever = retrieval_server.get_retriever(config)
     app = FastAPI()
+
+    @app.get("/health")
+    def health():
+        return {
+            "status": "ok",
+            "backend": args.retriever_name,
+            "index_path": str(Path(args.index_path).resolve()),
+        }
 
     @app.post("/retrieve")
     def retrieve(request: QueryRequest):
@@ -58,7 +76,7 @@ def main() -> None:
             payload.append(combined)
         return {"result": payload}
 
-    uvicorn.run(app, host="0.0.0.0", port=args.port)
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
 
 
 if __name__ == "__main__":
