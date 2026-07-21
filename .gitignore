@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+build/
+dist/
+
+# Local environments and secrets
+.venv/
+.venv-pilot/
+.venv-vllm/
+.env
+.env.*
+!.env.example
+
+# Generated experiment data and external checkouts
+upstream/
+work/
+work_smoke/
+logs/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

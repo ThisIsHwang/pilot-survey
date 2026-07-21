@@ -1,0 +1,30 @@
+seed: 42
+work_dir: ./work_smoke
+search_r1_root: ./upstream/Search-R1
+data:
+  dataset_name: hotpotqa/hotpot_qa
+  dataset_config: distractor
+  train_examples: 300
+  eval_examples: 50
+  split_train: train
+  split_eval: validation
+retrieval:
+  topk: 10
+  e5_model: intfloat/e5-base-v2
+  colbert_model: colbert-ir/colbertv2.0
+  bm25_port: 8101
+  e5_port: 8102
+  colbert_port: 8103
+llm:
+  model: Qwen/Qwen2.5-7B-Instruct
+  api_base: http://127.0.0.1:9000/v1
+  api_key: EMPTY
+  temperature: 0.2
+  max_tokens: 512
+agent:
+  max_search_turns: 3
+  eval_examples: 20
+  result_snippet_chars: 900
+query_generation:
+  source: heuristic
+  cache_file: ./work_smoke/query_candidates.jsonl

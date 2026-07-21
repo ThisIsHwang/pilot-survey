@@ -1,0 +1,12 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "stack-adapt-pilot"
+version = "0.1.0"
+description = "Retrieval-stack shift pilot for agentic search"
+requires-python = ">=3.10"
+
+[tool.setuptools.packages.find]
+include = ["stackpilot*"]

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+cd "$ROOT"
+source .venv-pilot/bin/activate
+python -m stackpilot.prepare_hotpot --config configs/pilot.yaml
