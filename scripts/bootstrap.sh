@@ -74,11 +74,8 @@ if not hasattr(faiss, "StandardGpuResources"):
 print(f"FAISS {faiss.__version__}; GPU resources visible: {faiss.get_num_gpus()}")
 PY
 
-if ! command -v java >/dev/null 2>&1; then
-  echo "WARNING: Java is missing. Install OpenJDK 21 before building the BM25 index." >&2
-else
-  java -version 2>&1 | head -1
-fi
+source "$ROOT/scripts/lib/bootstrap_java.sh"
+ensure_java "$ROOT"
 
 cat <<MSG
 Bootstrap complete.
