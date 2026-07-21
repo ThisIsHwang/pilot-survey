@@ -40,9 +40,10 @@ During evaluation:
 - GPU 7: free / monitoring / larger vLLM TP if desired
 
 Change GPU assignments through environment variables in the scripts. BM25 indexing requires OpenJDK 21 for Pyserini.
-If a complete JDK 21 is not already available, the scripts download a verified
-Amazon Corretto JDK into `.bootstrap-tools/jdk-21` and export `JAVA_HOME`
-automatically. A JRE without `javac` is not sufficient.
+If Java 21 is not already available, the scripts install the `jdk4py` Java 21
+runtime wheel from PyPI into `.venv-pilot` and export `JAVA_HOME` and `JVM_PATH`
+automatically. This avoids direct JDK archive downloads that cluster egress
+proxies may block.
 
 ## Run
 
