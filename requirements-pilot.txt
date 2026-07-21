@@ -2,7 +2,10 @@
 datasets>=3.0,<4
 transformers>=4.45,<5
 sentence-transformers>=3.0,<4
-faiss-cpu>=1.8,<2
+# The faiss-cpu metadata requirement from RAGatouille is satisfied by the
+# local compatibility shim installed in bootstrap.sh. The actual `faiss`
+# module comes from this CUDA-enabled wheel.
+faiss-gpu==1.14.3
 pyserini==0.25.0
 fastapi>=0.110,<1
 uvicorn[standard]>=0.30,<1

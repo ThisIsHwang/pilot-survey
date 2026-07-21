@@ -27,7 +27,7 @@ CUDA_VISIBLE_DEVICES=${E5_GPU:-5} nohup python -m stackpilot.searchr1_server \
   --search-r1-root upstream/Search-R1 \
   --index-path "$E5_INDEX" --corpus-path "$CORPUS" \
   --retriever-name e5 --retriever-model intfloat/e5-base-v2 \
-  --topk 10 --port 8002 \
+  --faiss-gpu --topk 10 --port 8002 \
   > logs/e5.log 2>&1 & echo $! > work/pids/e5.pid
 
 CUDA_VISIBLE_DEVICES=${COLBERT_GPU:-6} nohup python -m stackpilot.colbert_server \

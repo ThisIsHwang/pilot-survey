@@ -13,6 +13,17 @@ echo '== Python environments =='
 [[ -x .venv-pilot/bin/python ]] && .venv-pilot/bin/python -V || echo 'missing .venv-pilot'
 [[ -x .venv-vllm/bin/python ]] && .venv-vllm/bin/python -V || echo 'missing .venv-vllm'
 
+echo '== FAISS GPU =='
+if [[ -x .venv-pilot/bin/python ]]; then
+  .venv-pilot/bin/python - <<'PY'
+import faiss
+
+if not hasattr(faiss, "StandardGpuResources"):
+    raise SystemExit("FAISS was installed without GPU support")
+print(f"FAISS {faiss.__version__}; visible GPUs: {faiss.get_num_gpus()}")
+PY
+fi
+
 echo '== Upstream =='
 if [[ -d upstream/Search-R1/.git ]]; then
   git -C upstream/Search-R1 rev-parse HEAD

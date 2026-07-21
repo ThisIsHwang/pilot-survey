@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "faiss-cpu"
+version = "1.14.3"
+description = "Metadata-only compatibility shim that provides faiss-cpu through faiss-gpu"
+requires-python = ">=3.10"
+dependencies = ["faiss-gpu==1.14.3"]
+
+[tool.setuptools]
+packages = []

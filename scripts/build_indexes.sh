@@ -25,6 +25,7 @@ CUDA_VISIBLE_DEVICES=$DENSE_GPUS python upstream/Search-R1/search_r1/search/inde
   --batch_size 512 \
   --pooling_method mean \
   --faiss_type Flat \
+  --faiss_gpu \
   --save_embedding
 
 COLBERT_GPU=${COLBERT_GPU:-4}

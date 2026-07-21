@@ -34,7 +34,7 @@ During index construction:
 
 During evaluation:
 
-- GPU 5: E5 query encoder; its small pilot FAISS index remains on CPU
+- GPU 5: E5 query encoder and GPU FAISS search
 - GPU 6: ColBERT server
 - GPUs 0–3: vLLM Qwen-7B, tensor parallel 4
 - GPU 7: free / monitoring / larger vLLM TP if desired
@@ -68,6 +68,18 @@ bash scripts/run_agent_eval.sh --limit 200
 
 cat work/results/REPORT.md
 ```
+
+Both bootstrap scripts target CUDA 12.9 (`cu129`) and recreate their virtual
+environment on each run so an incomplete install cannot leak into the next one.
+They use the `python` command by default; select a specific interpreter with, for
+example, `PYTHON_BIN=python3.12 bash scripts/bootstrap_vllm.sh`.
+Virtual environments are created by `uv`, without relying on the system
+`venv`/`ensurepip` packages. If `uv` is absent, a standalone binary is installed
+under `.bootstrap-tools/` automatically.
+
+The pilot environment installs GPU-enabled FAISS. E5 index construction uses
+all GPUs listed in `DENSE_GPUS` and writes the resulting portable CPU index to
+disk; the E5 server moves that index onto the GPU selected by `E5_GPU` at startup.
 
 Stop retrieval servers:
 
