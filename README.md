@@ -29,7 +29,7 @@ It does **not** yet implement the proposed latent-belief robust RL. First establ
 
 During index construction:
 
-- GPUs 0–3: E5 encoding
+- GPU 0: E5 encoding and GPU FAISS (single GPU by default for reliability)
 - GPU 4: ColBERT indexing
 
 During evaluation:
@@ -81,9 +81,11 @@ Virtual environments are created by `uv`, without relying on the system
 `venv`/`ensurepip` packages. If `uv` is absent, a standalone binary is installed
 under `.bootstrap-tools/` automatically.
 
-The pilot environment installs GPU-enabled FAISS. E5 index construction uses
-all GPUs listed in `DENSE_GPUS` and writes the resulting portable CPU index to
-disk; the E5 server moves that index onto the GPU selected by `E5_GPU` at startup.
+The pilot environment installs GPU-enabled FAISS. E5 index construction defaults
+to one H100 (`DENSE_GPUS=0`) and writes the resulting portable CPU index to disk;
+the E5 server moves that index onto the GPU selected by `E5_GPU` at startup.
+Multiple encoding GPUs can still be selected explicitly, but Search-R1 then uses
+PyTorch `DataParallel`.
 
 Stop retrieval servers:
 

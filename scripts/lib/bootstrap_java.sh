@@ -54,7 +54,7 @@ ensure_java() {
       fi
 
       echo "Installing bundled Java 21 from PyPI into .venv-pilot"
-      UV_DEFAULT_INDEX=https://pypi.org/simple \
+      UV_DEFAULT_INDEX=https://pypi.org/simple UV_LINK_MODE=copy \
         "$uv_bin" pip install \
           --python "$python_bin" \
           'jdk4py==21.0.8.2'
@@ -77,6 +77,17 @@ ensure_java() {
   export PATH="$JAVA_HOME/bin:$PATH"
   export LD_LIBRARY_PATH="$JAVA_HOME/lib/server${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+  # Pyserini 0.25 bundles Lucene 9.9 in an assembled JAR that omits Lucene's
+  # Java 21 multi-release MemorySegment provider. Use Lucene's documented
+  # ByteBuffer fallback. JAVA_TOOL_OPTIONS also applies to PyJNIus' embedded
+  # JVM because it is read by JNI_CreateJavaVM.
+  local lucene_mmap_option=-Dorg.apache.lucene.store.MMapDirectory.enableMemorySegments=false
+  if [[ " ${JAVA_TOOL_OPTIONS:-} " != *" $lucene_mmap_option "* ]]; then
+    JAVA_TOOL_OPTIONS="${JAVA_TOOL_OPTIONS:+$JAVA_TOOL_OPTIONS }$lucene_mmap_option"
+  fi
+  export JAVA_TOOL_OPTIONS
+
   "$JAVA_HOME/bin/java" -version
   echo "JAVA_HOME=$JAVA_HOME"
+  echo "JAVA_TOOL_OPTIONS=$JAVA_TOOL_OPTIONS"
 }
