@@ -53,12 +53,13 @@ if [[ -s "$E5_INDEX" ]]; then
   echo "Reusing completed E5 index: $E5_INDEX"
 else
   # Search-R1 uses torch.nn.DataParallel whenever more than one GPU is
-  # visible. One H100 is ample for this 33k-document corpus and avoids cuDNN
-  # initialization failures in worker replicas. Override DENSE_GPUS if needed.
+  # visible. One H100 is ample for this 33k-document corpus. The stackpilot
+  # wrapper also forces eager attention to avoid cuDNN SDPA initialization
+  # failures in this CUDA 12.9 environment.
   DENSE_GPUS=${DENSE_GPUS:-0}
-  E5_BATCH_SIZE=${E5_BATCH_SIZE:-512}
+  E5_BATCH_SIZE=${E5_BATCH_SIZE:-256}
   echo "Building E5 index on CUDA_VISIBLE_DEVICES=$DENSE_GPUS"
-  CUDA_VISIBLE_DEVICES=$DENSE_GPUS python upstream/Search-R1/search_r1/search/index_builder.py \
+  CUDA_VISIBLE_DEVICES=$DENSE_GPUS python -m stackpilot.build_e5 \
     --retrieval_method e5 \
     --model_path intfloat/e5-base-v2 \
     --corpus_path "$CORPUS" \

@@ -85,7 +85,9 @@ The pilot environment installs GPU-enabled FAISS. E5 index construction defaults
 to one H100 (`DENSE_GPUS=0`) and writes the resulting portable CPU index to disk;
 the E5 server moves that index onto the GPU selected by `E5_GPU` at startup.
 Multiple encoding GPUs can still be selected explicitly, but Search-R1 then uses
-PyTorch `DataParallel`.
+PyTorch `DataParallel`. E5 encoding uses eager attention instead of cuDNN SDPA
+for compatibility with the CUDA 12.9 environment; tune its batch size with
+`E5_BATCH_SIZE` (default `256`).
 
 Stop retrieval servers:
 
