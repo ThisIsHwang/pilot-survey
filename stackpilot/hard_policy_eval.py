@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -26,13 +27,42 @@ from stackpilot.react_agent_eval import SYSTEM_PROMPT, format_results, parse_act
 from stackpilot.retrieval_clients import RetrievalClient
 from stackpilot.service_checks import check_vllm, effective_model_name
 
-RESULT_SCHEMA = 1
+RESULT_SCHEMA = 2
+TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 
 
 def normalize_title(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value)).replace("_", " ").strip()
     text = text.strip('"\'')
     return " ".join(text.lower().split())
+
+
+def token_set(value: str) -> set[str]:
+    return {token.lower() for token in TOKEN_RE.findall(value)}
+
+
+def query_features(question: str, query: str, previous_query: str | None) -> dict[str, float]:
+    tokens = TOKEN_RE.findall(query)
+    question_tokens = token_set(question)
+    query_tokens = {token.lower() for token in tokens}
+    previous_tokens = token_set(previous_query or "")
+    overlap = len(question_tokens & query_tokens) / max(1, len(question_tokens))
+    change = 1.0
+    if previous_query is not None:
+        change = 1.0 - len(query_tokens & previous_tokens) / max(1, len(query_tokens | previous_tokens))
+    return {
+        "query_token_count": float(len(tokens)),
+        "query_question_overlap": float(overlap),
+        "query_has_quotes": float('"' in query or "'" in query),
+        "query_capitalized_ratio": float(
+            sum(token[:1].isupper() for token in tokens) / max(1, len(tokens))
+        ),
+        "query_numeric_ratio": float(
+            sum(any(character.isdigit() for character in token) for token in tokens)
+            / max(1, len(tokens))
+        ),
+        "query_lexical_change": float(change),
+    }
 
 
 def file_sha256(path: Path) -> str:
@@ -103,6 +133,10 @@ def best_answer_scores(prediction: str, answers: list[str]) -> tuple[float, floa
     )
 
 
+def value_at(values: list[float], index: int) -> float:
+    return values[index] if len(values) > index else 0.0
+
+
 def run_episode(
     client: OpenAI,
     model: str,
@@ -148,6 +182,7 @@ def run_episode(
             continue
 
         results = retriever.search(value, topk)
+        previous_query = searches[-1] if searches else None
         searches.append(value)
         retrieved_titles = [str(result["title"]) for result in results]
         normalized_retrieved = {normalize_title(title) for title in retrieved_titles}
@@ -164,6 +199,7 @@ def run_episode(
                 "support_recall": recall,
                 "evidence_gain": gain,
                 "new_support_titles": new_support,
+                **query_features(str(item["question"]), value, previous_query),
             }
         )
         previously_seen_titles.update(normalized_retrieved)
@@ -192,12 +228,16 @@ def run_episode(
     em, f1 = best_answer_scores(prediction, answers)
     recalls = [float(record["support_recall"]) for record in turn_records]
     gains = [float(record["evidence_gain"]) for record in turn_records]
-    turn1_recall = recalls[0] if recalls else 0.0
-    turn2_gain = gains[1] if len(gains) > 1 else 0.0
+    turn1_recall = value_at(recalls, 0)
+    turn2_recall = value_at(recalls, 1)
+    turn3_recall = value_at(recalls, 2)
+    turn2_gain = value_at(gains, 1)
+    turn3_gain = value_at(gains, 2)
     final_recall = recalls[-1] if recalls else 0.0
     first_miss = turn1_recall < 1.0
     return {
         "question_id": str(item["id"]),
+        "question": str(item["question"]),
         "dataset": str(item["dataset"]),
         "backend": retriever.name,
         "topk": topk,
@@ -207,10 +247,15 @@ def run_episode(
         "f1": f1,
         "support_recall": final_recall,
         "turn1_support_recall": turn1_recall,
+        "turn2_support_recall": turn2_recall,
+        "turn3_support_recall": turn3_recall,
         "turn2_evidence_gain": turn2_gain,
+        "turn3_evidence_gain": turn3_gain,
         "search_count": len(searches),
-        "recovered_after_first_miss": float(first_miss and final_recall > turn1_recall),
-        "fully_recovered_after_first_miss": float(first_miss and final_recall >= 1.0),
+        "recovery_at_2": float(first_miss and turn2_recall > turn1_recall),
+        "recovery_at_3": float(first_miss and turn3_recall > turn1_recall),
+        "full_recovery_at_2": float(first_miss and turn2_recall >= 1.0),
+        "full_recovery_at_3": float(first_miss and turn3_recall >= 1.0),
         "queries": searches,
         "turns": turn_records,
     }
@@ -305,9 +350,14 @@ def main() -> None:
         "f1",
         "support_recall",
         "turn1_support_recall",
+        "turn2_support_recall",
+        "turn3_support_recall",
         "turn2_evidence_gain",
-        "recovered_after_first_miss",
-        "fully_recovered_after_first_miss",
+        "turn3_evidence_gain",
+        "recovery_at_2",
+        "recovery_at_3",
+        "full_recovery_at_2",
+        "full_recovery_at_3",
         "search_count",
     ]
     summary = frame.groupby(["dataset", "backend", "topk"])[metrics].mean().reset_index()
