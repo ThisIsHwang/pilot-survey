@@ -16,6 +16,8 @@ jdk4py==21.0.8.2
 ragatouille==0.0.9.post2
 colbert-ai==0.2.22
 fast-pytorch-kmeans==0.2.2
+# fast-pytorch-kmeans imports psutil but omits it from Requires-Dist.
+psutil==7.2.2
 llama-index-core==0.14.23
 onnx==1.22.0
 srsly==2.5.3

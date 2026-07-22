@@ -150,13 +150,26 @@ echo "== Java / retriever imports =="
 source "$ROOT/scripts/lib/bootstrap_java.sh"
 ensure_java "$ROOT"
 "$PILOT_PYTHON" - <<'PY'
+import sys
+from pathlib import Path
+
 from stackpilot.ragatouille_compat import install_langchain_retriever_compat
 
 install_langchain_retriever_compat()
+import psutil  # noqa: F401
+from fast_pytorch_kmeans import KMeans  # noqa: F401
+from colbert import Indexer, Searcher  # noqa: F401
 from pyserini.index.lucene import IndexReader  # noqa: F401
+from pyserini.search.lucene import LuceneSearcher  # noqa: F401
 from ragatouille import RAGPretrainedModel  # noqa: F401
 
-print("Pyserini and RAGatouille imports passed")
+sys.path.insert(0, str(Path.cwd() / "upstream" / "Search-R1"))
+from search_r1.search import index_builder, retrieval_server  # noqa: E402,F401
+
+print(
+    "Pyserini, psutil, fast-pytorch-kmeans, ColBERT, RAGatouille, "
+    "and Search-R1 imports passed"
+)
 PY
 
 EXPECTED_SEARCH_R1=598e61bd1d36895726d28a8d06b3a15bed19f5d3
