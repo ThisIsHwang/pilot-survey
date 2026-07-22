@@ -98,21 +98,37 @@ def model_identity(cfg: dict) -> dict:
     return identity
 
 
-def run_identity(cfg: dict, work_dir: Path) -> tuple[str, dict]:
+def run_identity(
+    cfg: dict,
+    work_dir: Path,
+    backends: tuple[str, ...] | list[str] | None = None,
+    evaluation_context: dict | None = None,
+) -> tuple[str, dict]:
+    selected = tuple(
+        sorted(backends) if backends is not None else ("bm25", "e5", "colbert")
+    )
+    unknown = set(selected) - {"bm25", "e5", "colbert"}
+    if unknown:
+        raise ValueError(f"Unknown retriever backends: {sorted(unknown)}")
     artifacts = {
         "corpus": work_dir / "data" / "corpus.jsonl",
         "queries_eval": work_dir / "data" / "queries_eval.jsonl",
         "data_manifest": work_dir / "data" / ".pilot-manifest.json",
-        "bm25_manifest": work_dir / "indexes" / "bm25" / ".pilot-manifest.json",
-        "e5_manifest": work_dir / "indexes" / "e5" / ".pilot-manifest.json",
-        "colbert_manifest": work_dir / "indexes" / "colbert" / ".pilot-manifest.json",
     }
+    for backend in selected:
+        artifacts[f"{backend}_manifest"] = (
+            work_dir / "indexes" / backend / ".pilot-manifest.json"
+        )
     payload = {
         "schema": RESULT_SCHEMA,
         "config": cfg,
         "artifacts": {name: file_digest(path) for name, path in artifacts.items()},
         "model": model_identity(cfg),
     }
+    if backends is not None:
+        payload["retriever_backends"] = list(selected)
+    if evaluation_context is not None:
+        payload["evaluation_context"] = evaluation_context
     canonical = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )

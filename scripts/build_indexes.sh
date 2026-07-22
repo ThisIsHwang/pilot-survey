@@ -56,7 +56,18 @@ else
     --manifest "$BM25_MANIFEST" --model "pyserini-0.25.0:DefaultEnglishAnalyzer"
 fi
 
-E5_MODEL=${E5_MODEL:-intfloat/e5-base-v2}
+DEFAULT_E5_MODEL=intfloat/e5-base-v2
+DEFAULT_E5_MODEL_REVISION=f52bf8ec8c7124536f0efb74aca902b2995e5bcd
+E5_MODEL_SOURCE=${E5_MODEL:-$DEFAULT_E5_MODEL}
+if [[ -z ${E5_MODEL_REVISION:-} ]]; then
+  if [[ "$E5_MODEL_SOURCE" == "$DEFAULT_E5_MODEL" ]]; then
+    E5_MODEL_REVISION=$DEFAULT_E5_MODEL_REVISION
+  else
+    E5_MODEL_REVISION=main
+  fi
+fi
+E5_MODEL=$(bash "$ROOT/scripts/resolve_hf_model.sh" \
+  "$E5_MODEL_SOURCE" "$E5_MODEL_REVISION" "$PILOT_PYTHON")
 E5_INDEX=$INDEX_ROOT/e5/e5_Flat.index
 E5_MANIFEST=$INDEX_ROOT/e5/.pilot-manifest.json
 E5_SIGNATURE="$E5_MODEL:mean:max256:flat:fp16"
@@ -85,7 +96,18 @@ else
     --manifest "$E5_MANIFEST" --model "$E5_SIGNATURE"
 fi
 
-COLBERT_MODEL=${COLBERT_MODEL:-colbert-ir/colbertv2.0}
+DEFAULT_COLBERT_MODEL=colbert-ir/colbertv2.0
+DEFAULT_COLBERT_MODEL_REVISION=c1e84128e85ef755c096a95bdb06b47793b13acf
+COLBERT_MODEL_SOURCE=${COLBERT_MODEL:-$DEFAULT_COLBERT_MODEL}
+if [[ -z ${COLBERT_MODEL_REVISION:-} ]]; then
+  if [[ "$COLBERT_MODEL_SOURCE" == "$DEFAULT_COLBERT_MODEL" ]]; then
+    COLBERT_MODEL_REVISION=$DEFAULT_COLBERT_MODEL_REVISION
+  else
+    COLBERT_MODEL_REVISION=main
+  fi
+fi
+COLBERT_MODEL=$(bash "$ROOT/scripts/resolve_hf_model.sh" \
+  "$COLBERT_MODEL_SOURCE" "$COLBERT_MODEL_REVISION" "$PILOT_PYTHON")
 COLBERT_NAME=hotpot_pilot_colbert
 COLBERT_INDEX=$INDEX_ROOT/colbert/colbert/indexes/$COLBERT_NAME
 COLBERT_MANIFEST=$INDEX_ROOT/colbert/.pilot-manifest.json

@@ -162,6 +162,7 @@ from colbert import Indexer, Searcher  # noqa: F401
 from pyserini.index.lucene import IndexReader  # noqa: F401
 from pyserini.search.lucene import LuceneSearcher  # noqa: F401
 from ragatouille import RAGPretrainedModel  # noqa: F401
+from stackpilot import policy_eval, query_stats, rq0_report  # noqa: F401
 
 sys.path.insert(0, str(Path.cwd() / "upstream" / "Search-R1"))
 from search_r1.search import index_builder, retrieval_server  # noqa: E402,F401
@@ -205,16 +206,25 @@ for port in 8001 8002 8003 9000; do
 done
 
 MODEL_PATH_WAS_SET=0
-if [[ -n "${MODEL_PATH+x}" ]]; then
+if [[ -n ${MODEL_PATH+x} ]]; then
   MODEL_PATH_WAS_SET=1
 fi
 MODEL_PATH=${MODEL_PATH:-${MODEL:-Qwen/Qwen2.5-7B-Instruct}}
-if [[ $MODEL_PATH_WAS_SET -eq 1 || "$MODEL_PATH" == /* || "$MODEL_PATH" == ./* || -e "$MODEL_PATH" ]]; then
+if [[ "$MODEL_PATH" == \~/* ]]; then
+  MODEL_PATH="$HOME/${MODEL_PATH#\~/}"
+fi
+if [[ -d "$MODEL_PATH" ]]; then
   if [[ ! -f "$MODEL_PATH/config.json" ]]; then
     echo "MODEL_PATH is not a valid local Hugging Face model directory: $MODEL_PATH" >&2
     exit 1
   fi
   echo "Local Qwen model: $MODEL_PATH"
+elif [[ "$MODEL_PATH" == /* || "$MODEL_PATH" == ./* || "$MODEL_PATH" == ../* || -e "$MODEL_PATH" ]]; then
+  echo "Local model path does not exist or is not a directory: $MODEL_PATH" >&2
+  exit 1
+elif [[ $MODEL_PATH_WAS_SET -eq 1 && ${MODEL_LOCAL_ONLY:-0} == 1 ]]; then
+  echo "MODEL_LOCAL_ONLY=1 but MODEL_PATH is not local: $MODEL_PATH" >&2
+  exit 1
 else
   echo "Qwen will be resolved from Hugging Face: $MODEL_PATH"
 fi

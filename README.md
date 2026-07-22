@@ -19,7 +19,9 @@ packages.
 - an NVIDIA driver capable of running CUDA 12.9 binaries
 - the CUDA 12.9 toolkit, including `nvcc`, on `PATH`
 - `g++`, `git`, and `curl`
-- at least 1 GiB free in `/dev/shm`
+- at least 8 GiB free in `/dev/shm`; keep at least 60 GiB free when Stage 2
+  starts, and plan roughly 100 GiB for a completely uncached full bootstrap,
+  model download, and four specialist checkpoints
 
 On a module-based cluster, load its CUDA 12.9 toolkit before running the pilot,
 for example `module load cuda/12.9`. Confirm that `nvcc --version` reports
@@ -28,51 +30,86 @@ warm-up compile CUDA extensions.
 
 ## Recommended one-command run
 
-Point `MODEL_PATH` directly at the Qwen directory that already contains
-`config.json` and the `*.safetensors` files. For a Hugging Face cache, this is
-the concrete `snapshots/<revision>` directory, not the parent
-`models--Qwen--...` directory.
+The full runner executes the zero-shot Stage 0 and the newly merged Search-R1
+Stage 2 in sequence. By default it downloads the 7B Stage-0 model, the 3B base
+model, and the official Search-R1 policy from Hugging Face while the relevant
+step is starting.
 
 ```bash
 cd /group-volume/teo.hwang/pilot-survey
-git pull origin main
+git pull --ff-only origin main
 
-MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
-  bash scripts/run_all.sh
+HF_HOME=/group-volume/teo.hwang/huggingface-cache \
+  bash scripts/run_full_pipeline.sh
 ```
 
-This is the single recommended model-cache method. The local filesystem path is
-used to load weights, while the API name remains
-`Qwen/Qwen2.5-7B-Instruct`, matching `configs/pilot.yaml`. Therefore a local
-path cannot accidentally cause an OpenAI API `model not found` error.
+`HF_HOME` is optional; without it the runner uses
+`$PWD/.cache/huggingface`. Before a service or trainer starts, each remote
+branch/tag is downloaded to its concrete Hugging Face snapshot directory. The
+download progress is therefore visible and is not hidden behind vLLM's old
+900-second readiness limit. Subsequent runs reuse the Hugging Face, dataset,
+index, policy-evaluation, and completed-training caches. A direct remote
+`launch_vllm_bg.sh` call still has a four-hour first-load fallback.
 
-`run_all.sh` performs both bootstraps, strict hardware/runtime preflight, data
-preparation, all three indexes, real server warm-ups, the retrieval matrix, the
-agent evaluation, report generation, and server cleanup. It stops immediately
-with the relevant log tail when a service dies. Set `KEEP_SERVERS=1` only when
-the servers should remain running after completion.
+The three entry points are deliberately explicit:
 
-For a quick evaluation code-path run:
+- `scripts/run_all.sh`: Stage 0 only
+- `searchr1_stage2/run_all.sh`: Stage 2 only
+- `scripts/run_full_pipeline.sh`: Stage 0 followed by Stage 2
+
+The full runner performs all three environment bootstraps, strict preflights,
+data preparation, all indexes, server warm-ups, Stage-0 evaluations, two
+Search-R1 specialist trainings and cross-evaluations, both reports, and final
+cleanup. It always proceeds to Stage 2; inspect the Stage-0 report separately
+if a manual go/no-go decision is required first.
+
+To use existing local model snapshots, point each role at its concrete Hugging
+Face model directory containing `config.json`, tokenizer files, and weight
+files:
 
 ```bash
-MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
-RETRIEVAL_LIMIT=20 AGENT_LIMIT=5 \
-  bash scripts/run_all.sh
+STAGE0_MODEL_REF=/models/Qwen2.5-7B-Instruct \
+BASE_POLICY_MODEL=/models/Qwen2.5-3B-Instruct \
+OFFICIAL_POLICY_MODEL=/models/SearchR1-official \
+TRAIN_BASE_MODEL=/models/Qwen2.5-3B-Instruct \
+  bash scripts/run_full_pipeline.sh
+```
+
+The bundled Qwen/Search-R1, E5, and ColBERT models are pinned to concrete Hub
+commits. A custom remote model defaults to `main`, which is resolved once to an
+immutable commit at run start. To select another exact policy-model revision, set
+`STAGE0_MODEL_REVISION`, `BASE_POLICY_MODEL_REVISION`,
+`OFFICIAL_POLICY_MODEL_REVISION`, and `TRAIN_BASE_MODEL_REVISION` to full Hub
+commit hashes. Local directories ignore these revision controls.
+Retriever overrides use `E5_MODEL`/`E5_MODEL_REVISION` and
+`COLBERT_MODEL`/`COLBERT_MODEL_REVISION` in the same way.
+
+For a quick end-to-end smoke/code-path run:
+
+```bash
+RETRIEVAL_LIMIT=20 AGENT_LIMIT=5 POLICY_LIMIT=20 SMOKE_ONLY=1 \
+  bash scripts/run_full_pipeline.sh
 ```
 
 This still prepares the configured 3,000/500 examples and builds the full pilot
-indexes when they are not cached; only the retrieval and agent-evaluation
-limits are shortened.
+indexes when they are not cached. It shortens all evaluation limits, runs only
+the two one-update smoke trainings, and intentionally skips pilot training,
+specialist cross-evaluation, and the Stage-2 report. It is not a complete
+experiment.
 
-After a successful bootstrap, avoid recreating the environments on a rerun:
+After all three bootstraps have succeeded once, avoid recreating the
+environments on a rerun:
 
 ```bash
-MODEL_PATH=/absolute/path/to/Qwen2.5-7B-Instruct \
 SKIP_BOOTSTRAP=1 \
-  bash scripts/run_all.sh
+  bash scripts/run_full_pipeline.sh
 ```
 
-## Manual run
+Useful Stage-2 controls are `RUN_STAGE0=0`, `RUN_SMOKE=0`, `SMOKE_ONLY=1`,
+`POLICY_LIMIT=<n>`, and `FORCE_TRAIN=1`. The last option archives a completed
+checkpoint directory and trains again; it does not delete it.
+
+## Manual Stage-0 run
 
 Use this sequence when observing each phase separately:
 
@@ -113,10 +150,16 @@ their default PyPI binary starting with 0.20 to CUDA 13 and place their alternat
 CUDA 12.9 wheel on GitHub release storage, which this cluster's egress proxy
 returns as HTTP 403. The pinned version avoids that URL entirely.
 
-Both virtual environments are created by `uv`; neither script calls
+All three virtual environments are created by `uv`; none of the scripts calls
 `ensurepip`. If `uv` is absent, its pinned Linux wheel is fetched directly from
 PyPI into `.bootstrap-tools`. Package installation uses copy mode so a cache on
 a different filesystem from the group volume does not emit hard-link failures.
+
+Stage 2 uses a third, isolated `.venv-searchr1`. The pinned Search-R1/veRL code
+requires vLLM 0.6.3 and PyTorch 2.4.0's CUDA 12.1 compatibility wheel. This is
+expected: the host driver and `nvcc`, `.venv-pilot`, and `.venv-vllm` remain
+CUDA 12.9. `flash-attn` is built against the host CUDA 12.9 toolkit after
+PyTorch is installed, so the first Stage-2 bootstrap can take a while.
 
 Python/RAGatouille/LangChain/ColBERT versions are pinned. Java 21 comes from the
 `jdk4py` PyPI wheel, so no Temurin or Corretto archive download is needed.
@@ -136,13 +179,24 @@ Evaluation uses:
 - GPUs 4 and 7: free
 - CPU: BM25/Lucene
 
+Stage-2 policy evaluation starts only BM25 and E5: vLLM uses GPUs 0-3, E5 and
+GPU FAISS use GPU 5, and BM25 remains on CPU. BM25-specialist training uses all
+eight GPUs for Search-R1 with the CPU BM25 service. E5-specialist training also
+uses all eight GPUs and intentionally shares GPU 7 with the comparatively small
+E5/FAISS service; its rollout memory utilization is reduced to 0.50. Override
+that service GPU with `STAGE2_E5_GPU` only when the replacement remains visible
+and has enough free memory. These phases run sequentially.
+
 The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
 `TP`. `LLM_GPUS` must contain exactly `TP` unique GPU IDs.
 
 ## Cache and restart behavior
 
 - Hugging Face datasets/models retain their normal cache behavior. `HF_HOME`
-  may point at an existing shared cache before running the scripts.
+  may point at an existing shared cache before running the scripts. Remote
+  model refs are converted to concrete `snapshots/<commit>` directories before
+  evaluation or training, so a moved `main` cannot reuse results from different
+  weights.
 - Prepared data has a configuration-and-SHA-256 manifest and is reused only
   when its counts, settings, and output files match. Existing valid pilot data
   is upgraded to the stronger manifest without downloading it again. Use
@@ -156,6 +210,11 @@ The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
   A rerun resumes completed backend/episode units instead of losing hours of
   work after a transient request failure. Interrupted tail writes are repaired
   before appending, and reports refuse to combine different run signatures.
+- Stage-2 policy JSONL files use the same signature-based resume behavior.
+  Matching GRPO runs are reused only when `.complete.json` and the final actor
+  checkpoint both validate. The pinned trainer does not save optimizer state,
+  so an interrupted run is moved to `.incomplete.<timestamp>` and restarted
+  from the base model instead of pretending to resume.
 
 ## Logs and cleanup
 
@@ -166,12 +225,17 @@ logs/bm25.log
 logs/e5.log
 logs/colbert.log
 logs/vllm.log
+logs/hotpot-bm25-smoke-grpo.log
+logs/hotpot-e5-smoke-grpo.log
+logs/hotpot-bm25-pilot-grpo.log
+logs/hotpot-e5-pilot-grpo.log
 ```
 
 Stop only the processes recorded by this checkout:
 
 ```bash
 bash scripts/stop_servers.sh
+.venv-searchr1/bin/ray stop --force
 ```
 
 PID command lines are verified before signals are sent, so a stale PID file
@@ -184,6 +248,10 @@ already occupying ports 8001, 8002, 8003, or 9000.
 - `work/results/retrieval_style_oracle.csv`
 - `work/results/agent_eval_summary.csv`
 - `work/results/REPORT.md`
+- `work/checkpoints/hotpot-{bm25,e5}-pilot-grpo/actor/global_step_*`
+- `work/merged/hotpot-{bm25,e5}-pilot-grpo` (validated model symlinks)
+- `work/results/policies/*.jsonl` and `*_summary.csv`
+- `work/results/rq0/RQ0_REPORT.md`
 
 The query-style oracle excludes the RRF ensemble; the ensemble remains a
 separate fixed baseline.
@@ -205,6 +273,6 @@ of these hold:
   oracle is materially stronger;
 - the fixed RRF ensemble does not already close most of the gap.
 
-Stage 2 is deliberately not part of `run_all.sh`: it requires Search-R1's
-separate training environment and a different GPU allocation from the zero-shot
-pilot.
+Stage 2 remains outside the Stage-0-only `scripts/run_all.sh` because it needs a
+separate runtime and GPU allocation. Use `scripts/run_full_pipeline.sh` to run
+both stages, or `searchr1_stage2/run_all.sh` to run only the new stage.

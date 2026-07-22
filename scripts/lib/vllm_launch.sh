@@ -4,7 +4,9 @@ configure_vllm_launch() {
   local root=$1
   local physical_gpus
   local id
-  local require_local_model=0
+  local model_path_was_set=0
+  local default_model_ref=Qwen/Qwen2.5-7B-Instruct
+  local default_model_revision=a09a35458c702b33eeacc393d103063234e8bc28
 
   VLLM_PYTHON=$root/.venv-vllm/bin/python
   VLLM_BIN=$root/.venv-vllm/bin/vllm
@@ -14,15 +16,29 @@ configure_vllm_launch() {
   fi
 
   if [[ -n "${MODEL_PATH+x}" ]]; then
-    require_local_model=1
+    model_path_was_set=1
   fi
-  MODEL_PATH=${MODEL_PATH:-${MODEL:-Qwen/Qwen2.5-7B-Instruct}}
+  MODEL_PATH=${MODEL_PATH:-${MODEL:-$default_model_ref}}
+  if [[ "$MODEL_PATH" == \~/* ]]; then
+    MODEL_PATH="$HOME/${MODEL_PATH#\~/}"
+  fi
   SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
   LLM_GPUS=${LLM_GPUS:-0,1,2,3}
   TP=${TP:-4}
   LLM_PORT=${LLM_PORT:-9000}
   GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
   MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+  if [[ -z ${MODEL_REVISION:-} ]]; then
+    if [[ "$MODEL_PATH" == "$default_model_ref" ]]; then
+      MODEL_REVISION=$default_model_revision
+    else
+      MODEL_REVISION=main
+    fi
+  fi
+  if [[ -z "$MODEL_REVISION" ]]; then
+    echo "MODEL_REVISION must not be empty." >&2
+    return 2
+  fi
 
   validate_gpu_list "$LLM_GPUS" "$TP" "vLLM tensor parallelism" || return 1
   if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -38,7 +54,18 @@ configure_vllm_launch() {
     fi
   done
 
-  if [[ $require_local_model -eq 1 || "$MODEL_PATH" == /* || "$MODEL_PATH" == ./* || -e "$MODEL_PATH" ]]; then
+  VLLM_MODEL_IS_LOCAL=0
+  if [[ -d "$MODEL_PATH" ]]; then
+    VLLM_MODEL_IS_LOCAL=1
+  elif [[ "$MODEL_PATH" == /* || "$MODEL_PATH" == ./* || "$MODEL_PATH" == ../* || -e "$MODEL_PATH" ]]; then
+    echo "Local model path does not exist or is not a directory: $MODEL_PATH" >&2
+    return 1
+  elif [[ $model_path_was_set -eq 1 && ${MODEL_LOCAL_ONLY:-0} == 1 ]]; then
+    echo "MODEL_LOCAL_ONLY=1 but MODEL_PATH is not a local directory: $MODEL_PATH" >&2
+    return 1
+  fi
+
+  if [[ $VLLM_MODEL_IS_LOCAL -eq 1 ]]; then
     if [[ ! -d "$MODEL_PATH" || ! -f "$MODEL_PATH/config.json" ]]; then
       echo "Local MODEL_PATH must be a Hugging Face model directory with config.json: $MODEL_PATH" >&2
       return 1
@@ -82,10 +109,14 @@ PY
     HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1}
     TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
     export HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+  else
+    # An explicit Hugging Face repository ID is allowed in MODEL_PATH as well
+    # as MODEL. Do not let stale offline flags turn it into a silent timeout.
+    unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
   fi
 
   VLLM_NO_USAGE_STATS=${VLLM_NO_USAGE_STATS:-1}
-  export MODEL_PATH SERVED_MODEL_NAME LLM_GPUS TP LLM_PORT VLLM_NO_USAGE_STATS
+  export MODEL_PATH MODEL_REVISION SERVED_MODEL_NAME LLM_GPUS TP LLM_PORT VLLM_NO_USAGE_STATS VLLM_MODEL_IS_LOCAL
   # Consumed by the launcher scripts after this helper is sourced.
   # shellcheck disable=SC2034
   VLLM_ARGS=(
@@ -99,4 +130,7 @@ PY
     --max-model-len "$MAX_MODEL_LEN"
     --port "$LLM_PORT"
   )
+  if [[ $VLLM_MODEL_IS_LOCAL -eq 0 ]]; then
+    VLLM_ARGS+=(--revision "$MODEL_REVISION" --tokenizer-revision "$MODEL_REVISION")
+  fi
 }

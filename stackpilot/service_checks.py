@@ -25,10 +25,16 @@ def configure_local_no_proxy() -> None:
     os.environ["no_proxy"] = value
 
 
-def check_retrievers(cfg: dict) -> None:
+def check_retrievers(
+    cfg: dict, backends: tuple[str, ...] | list[str] | None = None
+) -> None:
     configure_local_no_proxy()
     retrieval = cfg["retrieval"]
     work_dir = Path(cfg["work_dir"]).resolve()
+    selected = tuple(backends or ("bm25", "e5", "colbert"))
+    unknown = set(selected) - {"bm25", "e5", "colbert"}
+    if unknown:
+        raise ValueError(f"Unknown retriever backends: {sorted(unknown)}")
     expected_indexes = {
         "bm25": work_dir / "indexes" / "bm25" / "bm25",
         "e5": work_dir / "indexes" / "e5" / "e5_Flat.index",
@@ -39,7 +45,7 @@ def check_retrievers(cfg: dict) -> None:
         / "indexes"
         / "hotpot_pilot_colbert",
     }
-    for name in ("bm25", "e5", "colbert"):
+    for name in selected:
         port = int(retrieval[f"{name}_port"])
         health_url = f"http://127.0.0.1:{port}/health"
         try:
@@ -69,9 +75,10 @@ def check_retrievers(cfg: dict) -> None:
         except Exception as exc:
             raise RuntimeError(
                 f"{name} retriever on port {port} is not ready; "
-                "run bash scripts/launch_retrievers.sh"
+                f"run RETRIEVER_BACKENDS='{' '.join(selected)}' "
+                "bash scripts/launch_retrievers.sh"
             ) from exc
-    print("Retriever readiness checks passed.")
+    print(f"Retriever readiness checks passed: {', '.join(selected)}")
 
 
 def check_vllm(cfg: dict) -> None:

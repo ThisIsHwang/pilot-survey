@@ -1,14 +1,28 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import re
 from pathlib import Path
 
 import pandas as pd
 from openai import OpenAI
 from tqdm import tqdm
 
-from stackpilot.common import append_jsonl, ensure_dir, load_config, read_jsonl, read_jsonl_tolerant
-from stackpilot.react_agent_eval import RESULT_SCHEMA, run_episode, run_identity
+from stackpilot.common import (
+    append_jsonl,
+    ensure_dir,
+    load_config,
+    read_jsonl,
+    read_jsonl_tolerant,
+)
+from stackpilot.react_agent_eval import (
+    RESULT_SCHEMA,
+    file_digest,
+    run_episode,
+    run_identity,
+)
 from stackpilot.retrieval_clients import RetrievalClient
 from stackpilot.service_checks import check_retrievers, check_vllm, effective_model_name
 
@@ -37,8 +51,16 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if re.fullmatch(r"[A-Za-z0-9._-]+", args.tag) is None:
+        raise ValueError(f"Invalid policy tag: {args.tag!r}")
+    if args.limit is not None and args.limit < 1:
+        raise ValueError(f"--limit must be positive; got {args.limit}")
+    if len(set(args.backends)) != len(args.backends):
+        raise ValueError(f"Duplicate backends are not allowed: {args.backends}")
+    if len(set(args.variants)) != len(args.variants):
+        raise ValueError(f"Duplicate variants are not allowed: {args.variants}")
     cfg = load_config(args.config)
-    check_retrievers(cfg)
+    check_retrievers(cfg, args.backends)
     check_vllm(cfg)
 
     work_dir = Path(cfg["work_dir"]).resolve()
@@ -46,14 +68,64 @@ def main() -> None:
     output_path = out_dir / f"{args.tag}.jsonl"
     summary_path = out_dir / f"{args.tag}_summary.csv"
 
-    run_signature, _ = run_identity(cfg, work_dir)
     queries = read_jsonl(work_dir / "data" / "queries_eval.jsonl")
     limit = int(cfg["agent"]["eval_examples"]) if args.limit is None else args.limit
+    if limit < 1:
+        raise ValueError(f"Evaluation limit must be positive; got {limit}")
     queries = queries[:limit]
+    if not queries:
+        raise RuntimeError("The selected policy-evaluation question set is empty")
+    question_ids = [str(item["id"]) for item in queries]
+    if len(set(question_ids)) != len(question_ids):
+        raise RuntimeError("Policy-evaluation question IDs must be unique")
+    evaluation_context = {
+        "schema": 1,
+        "queries_eval_sha256": file_digest(work_dir / "data" / "queries_eval.jsonl"),
+        "corpus_sha256": file_digest(work_dir / "data" / "corpus.jsonl"),
+        "data_manifest_sha256": file_digest(work_dir / "data" / ".pilot-manifest.json"),
+        "index_manifests": {
+            backend: file_digest(
+                work_dir / "indexes" / backend / ".pilot-manifest.json"
+            )
+            for backend in sorted(args.backends)
+        },
+        "evaluator_files": {
+            name: file_digest(Path(__file__).with_name(name))
+            for name in (
+                "common.py",
+                "policy_eval.py",
+                "react_agent_eval.py",
+                "retrieval_clients.py",
+            )
+        },
+        "question_ids": question_ids,
+        "backends": sorted(args.backends),
+        "variants": sorted(args.variants),
+        "protocol": {
+            "seed": cfg["seed"],
+            "retrieval_topk": cfg["retrieval"]["topk"],
+            "agent": cfg["agent"],
+            "llm_generation": {
+                "temperature": cfg["llm"]["temperature"],
+                "max_tokens": cfg["llm"]["max_tokens"],
+            },
+        },
+    }
+    evaluation_canonical = json.dumps(
+        evaluation_context, sort_keys=True, separators=(",", ":")
+    )
+    evaluation_signature = hashlib.sha256(
+        evaluation_canonical.encode("utf-8")
+    ).hexdigest()
+    run_signature, _ = run_identity(
+        cfg, work_dir, args.backends, evaluation_context=evaluation_context
+    )
 
     r_cfg = cfg["retrieval"]
     clients = {
-        "bm25": RetrievalClient("bm25", f"http://127.0.0.1:{r_cfg['bm25_port']}/retrieve"),
+        "bm25": RetrievalClient(
+            "bm25", f"http://127.0.0.1:{r_cfg['bm25_port']}/retrieve"
+        ),
         "e5": RetrievalClient("e5", f"http://127.0.0.1:{r_cfg['e5_port']}/retrieve"),
         "colbert": RetrievalClient(
             "colbert", f"http://127.0.0.1:{r_cfg['colbert_port']}/retrieve"
@@ -78,7 +150,11 @@ def main() -> None:
         for row in existing
         if row.get("schema") == RESULT_SCHEMA
         and row.get("run_signature") == run_signature
+        and row.get("evaluation_signature") == evaluation_signature
+        and row.get("policy_tag") == args.tag
         and str(row.get("question_id")) in selected_ids
+        and str(row.get("backend")) in args.backends
+        and str(row.get("variant")) in args.variants
     }
 
     total = len(queries) * len(args.backends) * len(args.variants)
@@ -101,6 +177,7 @@ def main() -> None:
                         {
                             "schema": RESULT_SCHEMA,
                             "run_signature": run_signature,
+                            "evaluation_signature": evaluation_signature,
                             "policy_tag": args.tag,
                             "served_model": model,
                         }
@@ -111,8 +188,10 @@ def main() -> None:
     progress.close()
 
     rows = list(row_by_key.values())
-    if not rows:
-        raise RuntimeError("No policy-evaluation rows were produced")
+    if len(rows) != total:
+        raise RuntimeError(
+            f"Expected {total} policy-evaluation rows, found {len(rows)}"
+        )
 
     frame = pd.DataFrame(rows)
     summary = (
@@ -124,7 +203,8 @@ def main() -> None:
     )
     summary.insert(0, "policy_tag", args.tag)
     summary.insert(1, "run_signature", run_signature)
-    summary.insert(2, "n_questions", len(queries))
+    summary.insert(2, "evaluation_signature", evaluation_signature)
+    summary.insert(3, "n_questions", len(queries))
     summary.to_csv(summary_path, index=False)
     print(summary.round(4).to_string(index=False))
     print(f"Episode results: {output_path}")

@@ -1,0 +1,13 @@
+diff --git a/search_r1/llm_agent/generation.py b/search_r1/llm_agent/generation.py
+index 50e7cef..2bb0af4 100644
+--- a/search_r1/llm_agent/generation.py
++++ b/search_r1/llm_agent/generation.py
+@@ -458 +458,7 @@ class LLMGenerationManager:
+-        return requests.post(self.config.search_url, json=payload).json()
++        response = requests.post(
++            self.config.search_url,
++            json=payload,
++            timeout=float(os.environ.get("SEARCH_R1_RETRIEVER_TIMEOUT", "120")),
++        )
++        response.raise_for_status()
++        return response.json()

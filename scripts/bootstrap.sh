@@ -165,13 +165,14 @@ from colbert import Indexer, Searcher  # noqa: F401
 from pyserini.index.lucene import IndexReader  # noqa: F401
 from pyserini.search.lucene import LuceneSearcher  # noqa: F401
 from ragatouille import RAGPretrainedModel  # noqa: F401
+from stackpilot import policy_eval, query_stats, rq0_report  # noqa: F401
 
 sys.path.insert(0, str(Path.cwd() / "upstream" / "Search-R1"))
 from search_r1.search import index_builder, retrieval_server  # noqa: E402,F401
 
 print(
     "Pyserini, psutil, fast-pytorch-kmeans, ColBERT, RAGatouille, "
-    "and Search-R1 imports passed."
+    "policy/RQ0 modules, and Search-R1 imports passed."
 )
 PY
 
@@ -180,6 +181,6 @@ Bootstrap complete.
 Activate with: source $ROOT/.venv-pilot/bin/activate
 Search-R1 pinned at: $SEARCH_R1_COMMIT
 
-For Search-R1's native GRPO stage, create its official separate environment later;
-the zero-shot pilot deliberately keeps the dependency surface smaller.
+For Search-R1's native GRPO stage, run: bash scripts/bootstrap_searchr1.sh
+The zero-shot pilot deliberately keeps that legacy training stack isolated.
 MSG

@@ -1,0 +1,30 @@
+# Native environment for the Search-R1 commit pinned by scripts/bootstrap.sh.
+# This legacy training stack must remain isolated from the CUDA 12.9 pilot and
+# vLLM serving environments. vLLM 0.6.3 requires this exact PyTorch release.
+torch==2.4.0
+vllm==0.6.3
+transformers==4.47.1
+tensordict==0.5.0
+
+# Versions exercised by the pinned veRL/Search-R1 code path.
+accelerate==1.2.1
+codetiming==1.4.0
+datasets==3.6.0
+dill==0.3.8
+hydra-core==1.3.2
+ipython==8.32.0
+matplotlib==3.10.0
+numpy==1.26.4
+pandas==2.2.3
+pyarrow==20.0.0
+pybind11==2.13.6
+ray==2.42.1
+wandb==0.19.7
+
+# flash-attn==2.8.3 is installed separately after torch so its local CUDA
+# extension build can see torch. These are its build/runtime prerequisites.
+ninja==1.13.0
+packaging==24.2
+psutil==7.2.2
+setuptools==75.8.2
+wheel==0.45.1

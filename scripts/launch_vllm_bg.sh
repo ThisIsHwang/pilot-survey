@@ -26,9 +26,18 @@ cleanup_vllm() {
 }
 trap cleanup_vllm ERR INT TERM
 
+if [[ $VLLM_MODEL_IS_LOCAL -eq 1 ]]; then
+  READY_TIMEOUT_DEFAULT=900
+  MODEL_SOURCE="local filesystem"
+else
+  READY_TIMEOUT_DEFAULT=14400
+  MODEL_SOURCE="Hugging Face; cache=${HF_HOME:-$HOME/.cache/huggingface}"
+fi
+READY_TIMEOUT=${VLLM_READY_TIMEOUT:-$READY_TIMEOUT_DEFAULT}
 echo "Loading $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP)."
+echo "Model source: $MODEL_SOURCE; readiness timeout: ${READY_TIMEOUT}s."
 wait_for_http "$VLLM_PID" "http://127.0.0.1:${LLM_PORT}/v1/models" \
-  "${VLLM_READY_TIMEOUT:-900}" "$LOG_FILE"
+  "$READY_TIMEOUT" "$LOG_FILE"
 
 models_response=$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 30 \
   "http://127.0.0.1:${LLM_PORT}/v1/models")
