@@ -16,7 +16,9 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 def cosine_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     left_norm = np.linalg.norm(left, axis=1, keepdims=True)
     right_norm = np.linalg.norm(right, axis=1, keepdims=True)
-    return (left * right).sum(axis=1) / np.maximum(1e-12, left_norm[:, 0] * right_norm[:, 0])
+    return (left * right).sum(axis=1) / np.maximum(
+        1e-12, left_norm[:, 0] * right_norm[:, 0]
+    )
 
 
 def load_turns(results_dir: Path) -> pd.DataFrame:
@@ -35,17 +37,25 @@ def load_turns(results_dir: Path) -> pd.DataFrame:
                         "question_id": episode.get("question_id"),
                         "dataset": episode.get("dataset"),
                         "backend": episode.get("backend"),
-                        "topk": episode.get("topk"),
+                        "topk": int(episode.get("topk")),
                         "turn": int(turn.get("turn", 0)),
                         "question": question,
                         "query": query,
                         "previous_query": previous_query or "",
                         "query_token_count": len(tokens),
-                        "query_question_overlap": float(turn.get("query_question_overlap", 0.0)),
+                        "query_question_overlap": float(
+                            turn.get("query_question_overlap", 0.0)
+                        ),
                         "query_has_quotes": float(turn.get("query_has_quotes", 0.0)),
-                        "query_capitalized_ratio": float(turn.get("query_capitalized_ratio", 0.0)),
-                        "query_numeric_ratio": float(turn.get("query_numeric_ratio", 0.0)),
-                        "query_lexical_change": float(turn.get("query_lexical_change", 0.0)),
+                        "query_capitalized_ratio": float(
+                            turn.get("query_capitalized_ratio", 0.0)
+                        ),
+                        "query_numeric_ratio": float(
+                            turn.get("query_numeric_ratio", 0.0)
+                        ),
+                        "query_lexical_change": float(
+                            turn.get("query_lexical_change", 0.0)
+                        ),
                         "support_recall": float(turn.get("support_recall", 0.0)),
                         "evidence_gain": float(turn.get("evidence_gain", 0.0)),
                     }
@@ -56,11 +66,42 @@ def load_turns(results_dir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def add_subsets(turns: pd.DataFrame, difficulty_file: Path | None) -> pd.DataFrame:
+    all_turns = turns.copy()
+    all_turns["subset"] = "all"
+    if difficulty_file is None:
+        return all_turns
+    difficulty = pd.read_csv(difficulty_file)
+    required = {"question_id", "dataset", "topk", "matched_hard"}
+    missing = required - set(difficulty.columns)
+    if missing:
+        raise RuntimeError(
+            f"{difficulty_file} is missing difficulty columns: {sorted(missing)}"
+        )
+    matched = difficulty[difficulty["matched_hard"].astype(bool)][
+        ["question_id", "dataset", "topk"]
+    ].copy()
+    matched["question_id"] = matched["question_id"].astype(str)
+    hard_turns = turns.copy()
+    hard_turns["question_id"] = hard_turns["question_id"].astype(str)
+    hard_turns = hard_turns.merge(
+        matched,
+        on=["question_id", "dataset", "topk"],
+        how="inner",
+        validate="many_to_one",
+    )
+    hard_turns["subset"] = "matched-hard"
+    return pd.concat([all_turns, hard_turns], ignore_index=True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--results-dir", default="work/hard_rq0/results/policies")
     parser.add_argument("--output-dir", default="work/hard_rq0/results/report")
-    parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
+    parser.add_argument("--difficulty-file", default=None)
+    parser.add_argument(
+        "--model", default="sentence-transformers/all-MiniLM-L6-v2"
+    )
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=256)
     args = parser.parse_args()
@@ -91,8 +132,13 @@ def main() -> None:
             normalize_embeddings=True,
             show_progress_bar=True,
         )
-        semantic_change[previous_mask] = 1.0 - cosine_rows(queries[previous_mask], previous)
+        semantic_change[previous_mask] = 1.0 - cosine_rows(
+            queries[previous_mask], previous
+        )
     turns["query_semantic_change"] = semantic_change
+    turns = add_subsets(
+        turns, Path(args.difficulty_file) if args.difficulty_file else None
+    )
 
     turns.to_csv(output_dir / "query_turns.csv", index=False)
     metric_columns = [
@@ -109,16 +155,26 @@ def main() -> None:
     ]
     summary = (
         turns.groupby(
-            ["policy_tag", "seed", "dataset", "backend", "topk", "turn"],
+            [
+                "subset",
+                "policy_tag",
+                "seed",
+                "dataset",
+                "backend",
+                "topk",
+                "turn",
+            ],
             as_index=False,
         )[metric_columns]
         .mean()
-        .sort_values(["dataset", "topk", "policy_tag", "backend", "seed", "turn"])
+        .sort_values(
+            ["subset", "dataset", "topk", "policy_tag", "backend", "seed", "turn"]
+        )
     )
     summary.to_csv(output_dir / "query_turn_summary.csv", index=False)
 
     turn_pivot = summary.pivot_table(
-        index=["policy_tag", "seed", "dataset", "backend", "topk"],
+        index=["subset", "policy_tag", "seed", "dataset", "backend", "topk"],
         columns="turn",
         values=[
             "query_question_semantic_similarity",
@@ -129,8 +185,12 @@ def main() -> None:
         ],
         aggfunc="mean",
     )
-    turn_pivot.columns = [f"{metric}_turn{turn}" for metric, turn in turn_pivot.columns]
-    turn_pivot.reset_index().to_csv(output_dir / "query_shift_by_turn.csv", index=False)
+    turn_pivot.columns = [
+        f"{metric}_turn{turn}" for metric, turn in turn_pivot.columns
+    ]
+    turn_pivot.reset_index().to_csv(
+        output_dir / "query_shift_by_turn.csv", index=False
+    )
     print(summary.round(4).to_string(index=False))
 
 
