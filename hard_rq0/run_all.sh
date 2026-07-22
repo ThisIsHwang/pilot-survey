@@ -6,6 +6,7 @@ cd "$ROOT"
 BASE_MODEL_PATH=${BASE_MODEL_PATH:?Set BASE_MODEL_PATH to the base Qwen2.5-3B-Instruct checkpoint}
 PROFILE=${PROFILE:-pilot}
 LIMIT=${LIMIT:-}
+RUN_REPORT=${RUN_REPORT:-1}
 
 if [[ ${SKIP_ASSETS:-0} != 1 ]]; then
   bash hard_rq0/download_assets.sh
@@ -24,5 +25,9 @@ env "${base_eval[@]}" bash hard_rq0/eval_policy.sh
 PROFILE=$PROFILE BASE_MODEL=$BASE_MODEL_PATH LIMIT=$LIMIT \
   bash hard_rq0/run_three_seed_specialists.sh
 
-bash hard_rq0/make_report.sh
+if [[ "$RUN_REPORT" == 1 ]]; then
+  bash hard_rq0/make_report.sh
+else
+  echo "RUN_REPORT=0: skipped the three-seed interaction report."
+fi
 bash hard_rq0/stop_retrievers.sh
