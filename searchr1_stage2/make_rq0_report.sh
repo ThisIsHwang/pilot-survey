@@ -15,6 +15,9 @@ PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
 "$PILOT_PYTHON" -m stackpilot.rq0_report \
   --results-dir work/results/policies \
   --output-dir work/results/rq0
+"$PILOT_PYTHON" -m stackpilot.rq0_gain_analysis \
+  --results-dir work/results/policies \
+  --output-dir work/results/rq0
 
 [[ -s "$ROOT/work/results/rq0/RQ0_REPORT.md" ]] || {
   echo "RQ0 report was not produced." >&2
