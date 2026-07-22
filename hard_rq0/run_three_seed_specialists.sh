@@ -31,6 +31,7 @@ for backend in bm25 e5; do
       TAG=${backend}-specialist
       SEED=$seed
       MODEL_PATH=$model_path
+      RESULT_SET=$PROFILE
     )
     if [[ -n "$LIMIT" ]]; then
       eval_args+=(LIMIT=$LIMIT)
