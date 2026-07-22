@@ -80,6 +80,7 @@ E5:   http://127.0.0.1:8102/health
 ```bash
 TAG=base-qwen \
 SEED=0 \
+RESULT_SET=smoke \
 MODEL_PATH=/absolute/path/to/Qwen2.5-3B-Instruct \
 LIMIT=20 \
   bash hard_rq0/eval_policy.sh
@@ -107,18 +108,20 @@ BACKEND=bm25 SEED=13 PROFILE=smoke \
 
 TAG=bm25-specialist \
 SEED=13 \
+RESULT_SET=smoke \
 MODEL_PATH=$PWD/work/hard_rq0/merged/hard-rq0-bm25-seed13-smoke \
 LIMIT=20 \
   bash hard_rq0/eval_policy.sh
 ```
 
-Smoke checkpoints are only pipeline checks and must not be mixed with pilot/full results.
+Smoke checkpoints are only pipeline checks and must not be mixed with pilot/full results. `RESULT_SET` gives each profile a separate output directory and the report validator rejects mixed model signatures.
 
 ## 7. Evaluate the deterministic base policy
 
 ```bash
 TAG=base-qwen \
 SEED=0 \
+RESULT_SET=pilot \
 MODEL_PATH=/absolute/path/to/Qwen2.5-3B-Instruct \
   bash hard_rq0/eval_policy.sh
 ```
@@ -129,12 +132,13 @@ The base policy is evaluated on exactly the same questions and backends. These r
 
 ```bash
 PROFILE=pilot \
+RESULT_SET=pilot \
 SEEDS="13 42 87" \
 BASE_MODEL=/absolute/path/to/Qwen2.5-3B-Instruct \
   bash hard_rq0/run_three_seed_specialists.sh
 ```
 
-`pilot` uses 200 optimizer steps. After the pipeline is stable, use `PROFILE=full` for 500 steps or override `TOTAL_STEPS` explicitly.
+`pilot` uses 200 optimizer steps. After the pipeline is stable, use `PROFILE=full RESULT_SET=full` for 500 steps or override `TOTAL_STEPS` explicitly.
 
 The loop performs, sequentially:
 
@@ -150,11 +154,11 @@ E5 seed 87   -> merge -> BM25/E5 cross-evaluation
 ## 9. Generate query and interaction reports
 
 ```bash
-bash hard_rq0/make_report.sh
-cat work/hard_rq0/results/report/HARD_RQ0_REPORT.md
+RESULT_SET=pilot bash hard_rq0/make_report.sh
+cat work/hard_rq0/runs/pilot/results/report/HARD_RQ0_REPORT.md
 ```
 
-Outputs:
+Outputs under `work/hard_rq0/runs/<result-set>/results/report/`:
 
 ```text
 absolute_summary.csv
@@ -179,7 +183,7 @@ For each dataset and top-k, a question enters the matched-hard subset when:
 2. base Qwen turn-1 support recall is at most 0.5 on E5; and
 3. at least one evaluated policy improves support recall by turn 3.
 
-This removes questions that E5 already solves immediately and questions for which none of the policies can recover evidence.
+This removes questions that E5 already solves immediately and questions for which none of the policies can recover evidence. Because recoverability uses evaluated-policy outcomes, matched-hard is an explicit diagnostic subset; the all-question results remain in every report.
 
 ## Go / no-go rule
 
@@ -197,7 +201,7 @@ After the two environments are installed and the base model is available locally
 
 ```bash
 BASE_MODEL_PATH=/absolute/path/to/Qwen2.5-3B-Instruct \
-PROFILE=pilot \
+PROFILE=pilot RESULT_SET=pilot \
   bash hard_rq0/run_all.sh
 ```
 
@@ -205,9 +209,9 @@ For a quick code-path check, prepare assets and data first, then use:
 
 ```bash
 BASE_MODEL_PATH=/absolute/path/to/Qwen2.5-3B-Instruct \
-SKIP_ASSETS=1 SKIP_DATA=1 \
-PROFILE=smoke LIMIT=20 SEEDS="13" \
+SKIP_ASSETS=1 SKIP_DATA=1 RUN_REPORT=0 \
+PROFILE=smoke RESULT_SET=smoke LIMIT=20 SEEDS="13" \
   bash hard_rq0/run_all.sh
 ```
 
-The one-seed smoke command will exercise training and evaluation, but the final report intentionally requires all three specialist seeds.
+The one-seed smoke command exercises training and evaluation without producing the final report. The final report intentionally requires all three specialist seeds.
