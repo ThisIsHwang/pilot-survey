@@ -10,6 +10,7 @@ BASE_MODEL=${BASE_MODEL:-Qwen/Qwen2.5-3B-Instruct}
 TRAIN_GPUS=${TRAIN_GPUS:-0,1,2,3,4,5,6}
 N_GPUS=${N_GPUS:-7}
 TOPK=${TOPK:-3}
+LOGGER=${LOGGER:-"['console']"}
 
 case "$BACKEND" in
   bm25) PORT=${PORT:-8101} ;;
@@ -62,6 +63,9 @@ curl --noproxy '*' -fsS "http://127.0.0.1:${PORT}/health" >/dev/null || {
   exit 1
 }
 
+"$ROOT/.venv-pilot/bin/python" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$SEARCH_R1"
+
 cd "$SEARCH_R1"
 export CUDA_VISIBLE_DEVICES=$TRAIN_GPUS
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
@@ -104,7 +108,7 @@ python3 -m verl.trainer.main_ppo \
   actor_rollout_ref.ref.fsdp_config.param_offload=true \
   actor_rollout_ref.actor.state_masking=true \
   algorithm.no_think_rl=false \
-  trainer.logger="['console','wandb']" \
+  trainer.logger="$LOGGER" \
   +trainer.val_only=false \
   +trainer.val_before_train=true \
   trainer.n_gpus_per_node="$N_GPUS" \
