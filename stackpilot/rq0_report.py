@@ -62,7 +62,16 @@ def main() -> None:
     lines.append("")
 
     for metric, matrix in matrices.items():
-        lines.extend([f"## Blind-policy {metric}", "", matrix.round(4).to_markdown(), ""])
+        lines.extend(
+            [
+                f"## Blind-policy {metric}",
+                "",
+                "```text",
+                matrix.round(4).to_string(),
+                "```",
+                "",
+            ]
+        )
 
     support_d = diagonal_score(matrices["support_recall"])
     answer_d = diagonal_score(matrices["f1"])
