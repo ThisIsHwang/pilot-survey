@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -29,12 +30,37 @@ def unique_strings(values: Iterable[Any]) -> list[str]:
     return result
 
 
+def titles_from_supporting_facts(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        titles = value.get("title") or value.get("titles")
+        if isinstance(titles, list):
+            return unique_strings(titles)
+        if isinstance(titles, str):
+            return [titles.strip()] if titles.strip() else []
+    if isinstance(value, list):
+        titles = []
+        for fact in value:
+            if isinstance(fact, dict):
+                title = fact.get("title") or fact.get("wikipedia_title")
+                if title:
+                    titles.append(str(title))
+            elif isinstance(fact, (list, tuple)) and fact:
+                titles.append(str(fact[0]))
+        return unique_strings(titles)
+    return []
+
+
 def extract_support_titles(metadata: dict[str, Any]) -> list[str]:
-    supporting = metadata.get("supporting_facts") or {}
-    if isinstance(supporting, dict) and isinstance(supporting.get("title"), list):
-        titles = unique_strings(supporting["title"])
-        if titles:
-            return titles
+    for key in ("supporting_titles", "support_titles", "gold_titles"):
+        value = metadata.get(key)
+        if isinstance(value, list):
+            titles = unique_strings(value)
+            if titles:
+                return titles
+
+    titles = titles_from_supporting_facts(metadata.get("supporting_facts"))
+    if titles:
+        return titles
 
     paragraphs = metadata.get("paragraphs")
     if isinstance(paragraphs, list):
@@ -46,9 +72,14 @@ def extract_support_titles(metadata: dict[str, Any]) -> list[str]:
                 paragraph.get("is_supporting")
                 or paragraph.get("supporting")
                 or paragraph.get("is_support")
+                or paragraph.get("is_gold")
             )
             if is_supporting:
-                title = paragraph.get("title") or paragraph.get("wikipedia_title")
+                title = (
+                    paragraph.get("title")
+                    or paragraph.get("wikipedia_title")
+                    or paragraph.get("page_title")
+                )
                 if title:
                     titles.append(str(title))
         titles = unique_strings(titles)
@@ -56,16 +87,31 @@ def extract_support_titles(metadata: dict[str, Any]) -> list[str]:
             return titles
 
     context = metadata.get("context")
+    if isinstance(context, dict):
+        context_titles = context.get("title") or context.get("titles")
+        support_flags = (
+            context.get("is_supporting")
+            or context.get("supporting")
+            or context.get("is_support")
+        )
+        if isinstance(context_titles, list) and isinstance(support_flags, list):
+            return unique_strings(
+                title for title, flag in zip(context_titles, support_flags) if bool(flag)
+            )
     if isinstance(context, list):
         titles = []
         for paragraph in context:
             if isinstance(paragraph, dict) and bool(
-                paragraph.get("is_supporting") or paragraph.get("supporting")
+                paragraph.get("is_supporting")
+                or paragraph.get("supporting")
+                or paragraph.get("is_support")
             ):
-                title = paragraph.get("title")
+                title = paragraph.get("title") or paragraph.get("wikipedia_title")
                 if title:
                     titles.append(str(title))
-        return unique_strings(titles)
+        titles = unique_strings(titles)
+        if titles:
+            return titles
     return []
 
 
@@ -142,11 +188,16 @@ def prepare(config_path: str) -> None:
 
         train_rows = [to_query(dict(row), dataset_name, "train") for row in train_selected]
         eval_rows = [to_query(dict(row), dataset_name, "eval") for row in eval_selected]
-        missing_support = sum(not row["support_titles"] for row in eval_rows)
-        if missing_support:
+        missing_rows = [row for row in eval_rows if not row["support_titles"]]
+        if missing_rows:
+            diagnostic_path = data_root / f"{dataset_name}_missing_support_examples.json"
+            diagnostic_path.write_text(
+                json.dumps(missing_rows[:10], indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
             raise RuntimeError(
-                f"{dataset_name}: {missing_support}/{len(eval_rows)} evaluation rows have "
-                "no supporting-title metadata. Inspect the dataset schema before running."
+                f"{dataset_name}: {len(missing_rows)}/{len(eval_rows)} evaluation rows have "
+                f"no supporting-title metadata. Examples: {diagnostic_path}"
             )
 
         dataset_dir = ensure_dir(data_root / dataset_name)
@@ -155,10 +206,14 @@ def prepare(config_path: str) -> None:
         all_eval_rows.extend(eval_rows)
 
         train_datasets.append(
-            Dataset.from_list([to_searchr1_row(row, idx) for idx, row in enumerate(train_rows)])
+            Dataset.from_list(
+                [to_searchr1_row(row, idx) for idx, row in enumerate(train_rows)]
+            )
         )
         eval_datasets.append(
-            Dataset.from_list([to_searchr1_row(row, idx) for idx, row in enumerate(eval_rows)])
+            Dataset.from_list(
+                [to_searchr1_row(row, idx) for idx, row in enumerate(eval_rows)]
+            )
         )
         summary_lines.append(
             f"{dataset_name}: train={len(train_rows)}, eval={len(eval_rows)}, "
@@ -169,8 +224,12 @@ def prepare(config_path: str) -> None:
     concatenate_datasets(train_datasets).shuffle(seed=int(cfg["seed"])).to_parquet(
         str(searchr1_root / "train.parquet")
     )
-    concatenate_datasets(eval_datasets).to_parquet(str(searchr1_root / "test.parquet"))
-    (data_root / "SUMMARY.txt").write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+    concatenate_datasets(eval_datasets).to_parquet(
+        str(searchr1_root / "test.parquet")
+    )
+    (data_root / "SUMMARY.txt").write_text(
+        "\n".join(summary_lines) + "\n", encoding="utf-8"
+    )
     print("\n".join(summary_lines))
     print(f"Search-R1 parquet: {searchr1_root}")
 
