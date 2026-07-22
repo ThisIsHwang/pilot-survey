@@ -6,11 +6,18 @@ cd "$ROOT"
 source "$ROOT/.venv-pilot/bin/activate"
 
 RESULT_SET=${RESULT_SET:-pilot}
+SEEDS=${SEEDS:-"13 42 87"}
 BOOTSTRAP_SAMPLES=${BOOTSTRAP_SAMPLES:-10000}
 THRESHOLD=${THRESHOLD:-0.05}
 QUERY_DEVICE=${QUERY_DEVICE:-cpu}
 QUERY_MODEL=${QUERY_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
 RESULT_ROOT=work/hard_rq0/runs/$RESULT_SET/results
+
+# shellcheck disable=SC2206
+SEED_ARGS=($SEEDS)
+python -m stackpilot.validate_hard_results \
+  --results-dir "$RESULT_ROOT/policies" \
+  --seeds "${SEED_ARGS[@]}"
 
 python -m stackpilot.normalize_hard_results \
   --results-dir "$RESULT_ROOT/policies"
