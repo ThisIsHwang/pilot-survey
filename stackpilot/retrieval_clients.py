@@ -7,6 +7,26 @@ from typing import Any
 import requests
 
 
+def normalize_document(doc: dict[str, Any]) -> tuple[str, str]:
+    metadata = doc.get("document_metadata") or {}
+    title = str(doc.get("title") or metadata.get("title") or "").strip()
+    contents = str(doc.get("contents") or "")
+    text = str(doc.get("text") or doc.get("content") or contents)
+
+    # Search-R1's wiki-18 dense corpus commonly stores only `contents` as
+    # '"Wikipedia title"\npassage text'. Recover the title so BM25 and E5 use
+    # the same supporting-title evaluation rather than silently scoring E5 as
+    # title-less.
+    if not title and contents:
+        first_line, separator, remainder = contents.partition("\n")
+        candidate = first_line.strip().strip('"').strip()
+        if candidate:
+            title = candidate
+            if separator and remainder.strip():
+                text = remainder.strip()
+    return title, text
+
+
 @dataclass
 class RetrievalClient:
     name: str
@@ -39,22 +59,14 @@ class RetrievalClient:
             else:
                 doc = item
                 score = item.get("score")
+            title, text = normalize_document(doc)
             results.append(
                 {
                     "rank": rank,
                     "score": score,
                     "id": str(doc.get("id") or doc.get("document_id") or ""),
-                    "title": str(
-                        doc.get("title")
-                        or doc.get("document_metadata", {}).get("title")
-                        or ""
-                    ),
-                    "text": str(
-                        doc.get("text")
-                        or doc.get("content")
-                        or doc.get("contents")
-                        or ""
-                    ),
+                    "title": title,
+                    "text": text,
                 }
             )
         return results
