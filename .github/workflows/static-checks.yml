@@ -9,18 +9,24 @@ jobs:
   python-syntax:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          show-progress: false
+      - name: Fetch source quietly
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
       - name: Compile Python sources
         run: python3 -m compileall -q stackpilot tests
 
   bash-syntax:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          show-progress: false
+      - name: Fetch source quietly
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
       - name: Check shell scripts
         run: |
           find scripts searchr1_stage2 hard_rq0 -type f -name '*.sh' -print0 \
@@ -29,9 +35,12 @@ jobs:
   unit-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          show-progress: false
+      - name: Fetch source quietly
+        run: |
+          git init -q .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch -q --depth=1 origin "$GITHUB_REF"
+          git checkout -q FETCH_HEAD
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
