@@ -35,4 +35,9 @@ python -m stackpilot.hard_query_analysis \
   --model "$QUERY_MODEL" \
   --device "$QUERY_DEVICE"
 
+python -m stackpilot.hard_query_report \
+  --summary "$RESULT_ROOT/report/query_turn_summary.csv" \
+  --output "$RESULT_ROOT/report/QUERY_BEHAVIOR.md"
+
 echo "Hard-RQ0 report: $ROOT/$RESULT_ROOT/report/HARD_RQ0_REPORT.md"
+echo "Query report: $ROOT/$RESULT_ROOT/report/QUERY_BEHAVIOR.md"
