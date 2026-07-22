@@ -4,6 +4,7 @@ torch==2.11.0
 datasets==3.6.0
 transformers==4.57.6
 sentence-transformers==3.4.1
+huggingface-hub==0.36.0
 
 # RAGatouille declares faiss-cpu. bootstrap.sh installs a metadata-only local
 # shim for that name while this package supplies the actual CUDA implementation.
