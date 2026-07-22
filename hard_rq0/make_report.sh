@@ -10,6 +10,9 @@ THRESHOLD=${THRESHOLD:-0.05}
 QUERY_DEVICE=${QUERY_DEVICE:-cpu}
 QUERY_MODEL=${QUERY_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
 
+python -m stackpilot.normalize_hard_results \
+  --results-dir work/hard_rq0/results/policies
+
 python -m stackpilot.hard_query_analysis \
   --results-dir work/hard_rq0/results/policies \
   --output-dir work/hard_rq0/results/report \
