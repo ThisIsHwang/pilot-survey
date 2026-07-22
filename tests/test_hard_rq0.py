@@ -71,6 +71,7 @@ class HardRQ0Tests(unittest.TestCase):
                 "turn1_support_recall": 0.0,
                 "turn3_support_recall": 1.0,
             }
+        )
         matched = matched_hard_question_ids(pd.DataFrame(rows))
         self.assertTrue(bool(matched.loc[0, "base_hard"]))
         self.assertTrue(bool(matched.loc[0, "recoverable"]))
