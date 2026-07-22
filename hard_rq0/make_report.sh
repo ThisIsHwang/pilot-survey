@@ -22,16 +22,17 @@ python -m stackpilot.validate_hard_results \
 python -m stackpilot.normalize_hard_results \
   --results-dir "$RESULT_ROOT/policies"
 
-python -m stackpilot.hard_query_analysis \
-  --results-dir "$RESULT_ROOT/policies" \
-  --output-dir "$RESULT_ROOT/report" \
-  --model "$QUERY_MODEL" \
-  --device "$QUERY_DEVICE"
-
 python -m stackpilot.hard_rq0_report \
   --results-dir "$RESULT_ROOT/policies" \
   --output-dir "$RESULT_ROOT/report" \
   --bootstrap-samples "$BOOTSTRAP_SAMPLES" \
   --threshold "$THRESHOLD"
+
+python -m stackpilot.hard_query_analysis \
+  --results-dir "$RESULT_ROOT/policies" \
+  --output-dir "$RESULT_ROOT/report" \
+  --difficulty-file "$RESULT_ROOT/report/difficulty_matching.csv" \
+  --model "$QUERY_MODEL" \
+  --device "$QUERY_DEVICE"
 
 echo "Hard-RQ0 report: $ROOT/$RESULT_ROOT/report/HARD_RQ0_REPORT.md"
