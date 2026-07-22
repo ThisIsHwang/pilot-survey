@@ -9,7 +9,8 @@ assets:
   e5_index_path: ./work/hard_rq0/assets/wiki18/e5_Flat.index
 
 retrieval:
-  topks: [3, 5]
+  # top-k 10 is the easy control; 3 and 5 are the hard settings.
+  topks: [3, 5, 10]
   bm25_port: 8101
   e5_port: 8102
   e5_model: intfloat/e5-base-v2
