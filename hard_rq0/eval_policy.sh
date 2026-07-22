@@ -10,7 +10,7 @@ LIMIT=${LIMIT:-}
 RESULT_SET=${RESULT_SET:-pilot}
 DATA_FILE=${DATA_FILE:-$ROOT/work/hard_rq0/data/eval_all.jsonl}
 BACKENDS=${BACKENDS:-"bm25 e5"}
-TOPKS=${TOPKS:-"3 5"}
+TOPKS=${TOPKS:-"3 5 10"}
 
 [[ "$RESULT_SET" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "Invalid RESULT_SET=$RESULT_SET" >&2; exit 2; }
 EVAL_CONFIG=$ROOT/work/hard_rq0/configs/${RESULT_SET}.yaml
