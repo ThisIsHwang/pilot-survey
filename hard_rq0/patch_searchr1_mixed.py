@@ -40,13 +40,28 @@ def patch(search_r1_root: Path) -> None:
         self._episode_backend_ids = [None] * batch_size
         if mixed_mode:
             if mixed_mode == "blind":
-                # Search-R1 expands each question into multiple rollouts. Alternating
-                # by rollout row gives an exact balanced mixture while keeping a
-                # trajectory on one backend for every later search turn.
-                self._episode_backend_ids = [
-                    "bm25" if index % 2 == 0 else "e5"
-                    for index in range(batch_size)
-                ]
+                n_agent = int(os.environ.get("SEARCH_R1_N_AGENT", "0"))
+                seed = int(os.environ.get("RQ0_SEED", "0"))
+                if n_agent <= 0 or n_agent % 2 != 0:
+                    raise ValueError(
+                        "blind mixed routing requires an even positive SEARCH_R1_N_AGENT"
+                    )
+                if batch_size % n_agent != 0:
+                    raise ValueError(
+                        f"rollout batch size {batch_size} is not divisible by n_agent={n_agent}"
+                    )
+                backend_ids = []
+                for group_start in range(0, batch_size, n_agent):
+                    # Every GRPO group receives the same number of BM25 and E5
+                    # rollouts. The starting backend varies by prompt and seed so
+                    # backend identity is not confounded with rollout sample index.
+                    prompt_sum = int(initial_input_ids[group_start].long().sum().item())
+                    offset = (prompt_sum + seed) % 2
+                    backend_ids.extend(
+                        "bm25" if (rollout_index + offset) % 2 == 0 else "e5"
+                        for rollout_index in range(n_agent)
+                    )
+                self._episode_backend_ids = backend_ids
             elif mixed_mode == "oracle":
                 prompts = self.tokenizer.batch_decode(
                     initial_input_ids, skip_special_tokens=True
