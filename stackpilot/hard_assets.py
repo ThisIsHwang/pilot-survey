@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import tarfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator
@@ -44,6 +45,11 @@ CORPUS_ARCHIVE_SIZE = 5_123_307_260
 CORPUS_ARCHIVE_SHA256 = (
     "7abd929223399cd63c52b499f289bf4f9039be1e9f8c43e1cb3938305b2317db"
 )
+CORPUS_TAR_MEMBER = (
+    "data00/jiajie_jin/flashrag_indexes/wiki_dpr_100w/wiki_dump.jsonl"
+)
+CORPUS_JSONL_SIZE = 14_393_573_105
+CORPUS_TAR_SIZE = 14_393_579_520
 EXPECTED_DOCUMENTS = 21_015_324
 
 BM25_REPO = "PeterJinGo/wiki-18-bm25-index"
@@ -689,81 +695,149 @@ def count_jsonl_file(path: Path) -> tuple[int, int]:
         return _count_jsonl_stream(source)
 
 
-def _trim_known_unindexed_final_row(path: Path, rows: int) -> int:
-    """Remove the known extra Wiki-18 tail row when it is safe to do so.
+def _document_id(raw: bytes, label: str, path: Path) -> int:
+    _validate_corpus_row(raw, label, path)
+    row = json.loads(raw.decode("utf-8"))
+    value = row.get("id")
+    if isinstance(value, bool):
+        raise RuntimeError(f"wiki-18 corpus has an invalid {label} id: {path}")
+    if isinstance(value, int):
+        document_id = value
+    elif isinstance(value, str) and re.fullmatch(r"0|[1-9][0-9]*", value):
+        document_id = int(value)
+    else:
+        raise RuntimeError(f"wiki-18 corpus has an invalid {label} id: {path}")
+    return document_id
 
-    The pinned archive contains one final, unterminated JSON object after the
-    21,015,324 passages represented by both pinned indexes.  Only trim that
-    object when its shape and the last indexed row's zero-based IDs prove that
-    this is the exact upstream boundary, rather than a general count mismatch.
-    """
-    if rows != EXPECTED_DOCUMENTS + 1:
-        return rows
 
-    def document_id(raw: bytes) -> int | None:
-        try:
-            row = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        if not isinstance(row, dict) or not (
-            row.get("contents") or row.get("text") or row.get("content")
-        ):
-            return None
-        value = row.get("id")
-        if isinstance(value, bool):
-            return None
-        if isinstance(value, int):
-            return value if value >= 0 else None
-        if not isinstance(value, str) or re.fullmatch(r"0|[1-9][0-9]*", value) is None:
-            return None
-        return int(value)
+def _validate_expected_corpus(path: Path, rows: int) -> dict[str, Any]:
+    if rows != EXPECTED_DOCUMENTS:
+        raise RuntimeError(
+            f"wiki-18 corpus has {rows:,} documents; expected {EXPECTED_DOCUMENTS:,}"
+        )
+    with path.open("rb") as handle:
+        first = handle.readline().strip()
+    last = _last_nonempty_line(path).strip()
+    first_id = _document_id(first, "first", path)
+    last_id = _document_id(last, "last", path)
+    if first_id != 0 or last_id != EXPECTED_DOCUMENTS - 1:
+        raise RuntimeError(
+            "wiki-18 corpus IDs do not align with the pinned indexes: "
+            f"first={first_id}, last={last_id}, "
+            f"expected=0..{EXPECTED_DOCUMENTS - 1}: {path}"
+        )
+    return {
+        **validate_corpus(path),
+        "documents": rows,
+        "source_archive": source_identity()["corpus"]["archive"],
+    }
 
-    with path.open("r+b") as handle:
-        first_raw = handle.readline().strip()
-        handle.seek(0, os.SEEK_END)
-        end = handle.tell()
-        if end == 0:
-            return rows
-        handle.seek(end - 1)
-        if handle.read(1) == b"\n":
-            return rows
 
-        position = end
-        tail = b""
-        while position > 0 and tail.count(b"\n") < 2:
-            amount = min(EDGE_BYTES, position)
-            position -= amount
-            handle.seek(position)
-            tail = handle.read(amount) + tail
+def _validate_tar_member(member: tarfile.TarInfo, path: Path) -> None:
+    if not member.isreg():
+        raise RuntimeError(f"wiki-18 tar member is not a regular file: {path}")
+    if member.name != CORPUS_TAR_MEMBER:
+        raise RuntimeError(
+            f"wiki-18 tar member is {member.name!r}; "
+            f"expected {CORPUS_TAR_MEMBER!r}: {path}"
+        )
+    if member.size != CORPUS_JSONL_SIZE:
+        raise RuntimeError(
+            f"wiki-18 JSONL member has size {member.size:,}; "
+            f"expected {CORPUS_JSONL_SIZE:,}: {path}"
+        )
 
-        final_separator = tail.rfind(b"\n")
-        if final_separator < 0:
-            return rows
-        previous_separator = tail.rfind(b"\n", 0, final_separator)
-        previous_start = previous_separator + 1
-        previous_raw = tail[previous_start:final_separator].strip()
-        final_raw = tail[final_separator + 1 :].strip()
-        if not previous_raw or not final_raw:
-            return rows
 
-        if (
-            document_id(first_raw) != 0
-            or document_id(previous_raw) != EXPECTED_DOCUMENTS - 1
-            or document_id(final_raw) != EXPECTED_DOCUMENTS
-        ):
-            return rows
+def _legacy_tar_member(path: Path) -> tarfile.TarInfo | None:
+    """Recognize the complete tar payload produced by the old gzip-only code."""
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(tarfile.BLOCKSIZE)
+        return tarfile.TarInfo.frombuf(
+            header, encoding="utf-8", errors="surrogateescape"
+        )
+    except (OSError, tarfile.HeaderError):
+        return None
 
-        final_start = position + final_separator + 1
-        handle.truncate(final_start)
-        handle.flush()
-        os.fsync(handle.fileno())
 
+def _copy_exact_counted(
+    source: BinaryIO, target: BinaryIO, expected_bytes: int
+) -> tuple[int, int]:
+    copied = 0
+    rows = 0
+    final_byte = b""
+    while copied < expected_bytes:
+        chunk = source.read(min(HASH_CHUNK_SIZE, expected_bytes - copied))
+        if not chunk:
+            raise RuntimeError(
+                f"wiki-18 tar member ended after {copied:,} bytes; "
+                f"expected {expected_bytes:,}"
+            )
+        target.write(chunk)
+        copied += len(chunk)
+        rows += chunk.count(b"\n")
+        final_byte = chunk[-1:]
+    if copied == 0:
+        raise RuntimeError("wiki-18 JSONL member is empty")
+    if final_byte != b"\n":
+        rows += 1
+    return copied, rows
+
+
+def _recover_legacy_tar_corpus(path: Path, member: tarfile.TarInfo) -> int:
+    """Atomically recover JSONL from a complete, already-inflated tar payload."""
+    _validate_tar_member(member, path)
+    actual_size = path.stat().st_size
+    if actual_size != CORPUS_TAR_SIZE:
+        raise RuntimeError(
+            f"legacy wiki-18 tar has size {actual_size:,}; "
+            f"expected {CORPUS_TAR_SIZE:,}: {path}"
+        )
+
+    extracting = path.with_name(".wiki-18.jsonl.extracting")
+    with path.open("rb") as source, extracting.open("wb") as destination:
+        source.seek(tarfile.BLOCKSIZE)
+        _, rows = _copy_exact_counted(source, destination, member.size)
+        while trailer := source.read(HASH_CHUNK_SIZE):
+            if trailer.strip(b"\0"):
+                raise RuntimeError(
+                    f"legacy wiki-18 tar has nonzero trailing data: {path}"
+                )
+        destination.flush()
+        os.fsync(destination.fileno())
+
+    _validate_expected_corpus(extracting, rows)
+    os.replace(extracting, path)
     print(
-        "Removed the verified unindexed final Wiki-18 row "
-        f"(id={EXPECTED_DOCUMENTS:,}); retained {EXPECTED_DOCUMENTS:,} "
-        "passages aligned with the pinned BM25/E5 indexes."
+        "Recovered the JSONL member from the existing Wiki-18 tar staging "
+        f"file; retained {rows:,} passages aligned with the pinned indexes."
     )
-    return EXPECTED_DOCUMENTS
+    return rows
+
+
+def _extract_compressed_tar_corpus(source: Path, target: Path) -> tuple[int, int]:
+    """Extract the pinned JSONL member from the gzip-compressed tar archive."""
+    try:
+        archive = tarfile.open(source, mode="r:gz")
+    except (OSError, tarfile.TarError) as exc:
+        raise RuntimeError(
+            f"Unable to open the pinned wiki-18 tar: {source}"
+        ) from exc
+    with archive:
+        member = archive.next()
+        if member is None:
+            raise RuntimeError(f"wiki-18 tar has no members: {source}")
+        _validate_tar_member(member, source)
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise RuntimeError(f"Unable to read the wiki-18 JSONL member: {source}")
+        with extracted, target.open("wb") as destination:
+            copied, rows = _copy_exact_counted(extracted, destination, member.size)
+            destination.flush()
+            os.fsync(destination.fileno())
+        if archive.next() is not None:
+            raise RuntimeError(f"wiki-18 tar has unexpected extra members: {source}")
+    return copied, rows
 
 
 def decompress_gzip_counted(source: Path, target: Path) -> tuple[int, int]:
@@ -779,24 +853,23 @@ def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     target = root / "wiki-18.jsonl"
     temporary = root / ".wiki-18.jsonl.decompressing"
 
-    # The pinned upstream JSONL has a valid final JSON object without a trailing
-    # newline. Older code rejected it only after fully decompressing the 5+ GB
-    # archive. Recover that completed output in place instead of deleting it and
-    # repeating the download/decompression.
+    # Despite its .jsonl.gz name, the pinned source is a gzip-compressed tar.
+    # Old releases inflated the tar framing into this staging path. Recover its
+    # sole JSONL member without downloading or inflating the 5+ GB archive again.
     if temporary.is_file():
+        legacy_member = _legacy_tar_member(temporary)
+        if legacy_member is not None:
+            rows = _recover_legacy_tar_corpus(temporary, legacy_member)
+            metadata = _validate_expected_corpus(temporary, rows)
+            metadata["path"] = target.name
+            os.replace(temporary, target)
+            if not keep_sources:
+                (root / CORPUS_ARCHIVE).unlink(missing_ok=True)
+            print(f"Reused recovered decompressed corpus: {target}")
+            return metadata
         try:
             _, rows = count_jsonl_file(temporary)
-            rows = _trim_known_unindexed_final_row(temporary, rows)
-            if rows != EXPECTED_DOCUMENTS:
-                raise RuntimeError(
-                    f"wiki-18 corpus has {rows:,} documents; "
-                    f"expected {EXPECTED_DOCUMENTS:,}"
-                )
-            metadata = {
-                **validate_corpus(temporary),
-                "documents": rows,
-                "source_archive": source_identity()["corpus"]["archive"],
-            }
+            metadata = _validate_expected_corpus(temporary, rows)
         except RuntimeError as exc:
             print(f"Existing decompressed corpus is not reusable ({exc}); rebuilding.")
             temporary.unlink(missing_ok=True)
@@ -831,17 +904,8 @@ def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     except RuntimeError:
         archive.unlink(missing_ok=True)
         raise
-    _, rows = decompress_gzip_counted(archive, temporary)
-    rows = _trim_known_unindexed_final_row(temporary, rows)
-    if rows != EXPECTED_DOCUMENTS:
-        raise RuntimeError(
-            f"wiki-18 corpus has {rows:,} documents; expected {EXPECTED_DOCUMENTS:,}"
-        )
-    metadata = {
-        **validate_corpus(temporary),
-        "documents": rows,
-        "source_archive": source_identity()["corpus"]["archive"],
-    }
+    _, rows = _extract_compressed_tar_corpus(archive, temporary)
+    metadata = _validate_expected_corpus(temporary, rows)
     metadata["path"] = target.name
     os.replace(temporary, target)
     if not keep_sources:
