@@ -16,7 +16,7 @@ PID_ROOT=$ROOT/work/experiments/services
 LOG_ROOT=$ROOT/logs/experiments/services
 mkdir -p "$PID_ROOT" "$LOG_ROOT"
 
-bash "$ROOT/hard_rq0/launch_retrievers.sh"
+bash "$ROOT/experiments/ensure_retrievers.sh"
 
 PID_FILE=$PID_ROOT/mixed-router.pid
 if [[ -f "$PID_FILE" ]] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
