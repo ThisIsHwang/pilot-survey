@@ -7,6 +7,7 @@ PROFILE=${PROFILE:-pilot}
 HARD_RESULTS=${HARD_RESULTS:-$ROOT/work/hard_rq0/runs/$PROFILE/results/policies}
 EXP003_RESULTS=${EXP003_RESULTS:-$ROOT/work/experiments/EXP-003/results}
 EXP004_RESULTS=${EXP004_RESULTS:-$ROOT/work/experiments/EXP-004/results}
+EXP005_RESULTS=${EXP005_RESULTS:-$ROOT/work/experiments/EXP-005/results}
 EXP006_RESULTS=${EXP006_RESULTS:-$ROOT/work/experiments/EXP-006/results}
 OUTPUT_DIR=${OUTPUT_DIR:-$ROOT/work/experiments/reports/$PROFILE}
 
@@ -22,6 +23,9 @@ args=(
   --exp004-results "$EXP004_RESULTS"
   --output-dir "$OUTPUT_DIR"
 )
+if [[ -d "$EXP005_RESULTS" ]] && find "$EXP005_RESULTS" -type f -name '*.jsonl' -print -quit | grep -q .; then
+  args+=(--exp005-results "$EXP005_RESULTS")
+fi
 if [[ -d "$EXP006_RESULTS" ]] && find "$EXP006_RESULTS" -type f -name '*.jsonl' -print -quit | grep -q .; then
   args+=(--exp006-results "$EXP006_RESULTS")
 fi
