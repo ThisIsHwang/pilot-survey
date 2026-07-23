@@ -26,6 +26,7 @@ LOG_ROOT=$RUNTIME_LOG_ROOT/hard_rq0
 BM25_PORT=${BM25_PORT:-8101}
 E5_PORT=${E5_PORT:-8102}
 E5_GPU=${E5_GPU:-7}
+E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}
 TRAIN_GPUS=${TRAIN_GPUS:-0,1,2,3,4,5,6}
 N_GPUS=${N_GPUS:-7}
 LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}
@@ -73,6 +74,7 @@ validate_positive_integer TP "$TP"
 validate_positive_integer DP "$DP"
 validate_positive_integer HARD_RETRIEVER_READY_TIMEOUT "$READY_TIMEOUT"
 validate_positive_integer HARD_RETRIEVER_PROBE_TIMEOUT "$PROBE_TIMEOUT"
+validate_positive_integer E5_FAISS_TEMP_MEMORY_MIB "$E5_FAISS_TEMP_MEMORY_MIB"
 if [[ "$N_GPUS" != 7 ]]; then
   echo "Hard-RQ0 reserves one H100 for E5 and requires N_GPUS=7; got '$N_GPUS'." >&2
   exit 2
@@ -186,7 +188,8 @@ E5_PID=$(HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   --corpus-path "$CORPUS_PATH" \
   --retriever-name e5 --retriever-model "$E5_MODEL" \
   "${E5_MODEL_REVISION_ARGS[@]}" \
-  --topk 10 --port "$E5_PORT" --faiss-gpu \
+  --topk 10 --port "$E5_PORT" --faiss-gpu --faiss-gpu-paged-load \
+  --faiss-gpu-temp-memory-mib "$E5_FAISS_TEMP_MEMORY_MIB" \
   --expected-documents "$EXPECTED_DOCUMENTS")
 echo "$E5_PID" > "$PID_ROOT/e5.pid"
 wait_for_http "$E5_PID" "http://127.0.0.1:${E5_PORT}/health" \
@@ -207,7 +210,7 @@ probe_retriever() {
     "http://127.0.0.1:${port}/health")
   "$PILOT_PYTHON" - "$health" "$name" "$expected_index" "$CORPUS_PATH" \
     "$E5_GPU" "$expected_model" "$expected_model_revision" \
-    "$EXPECTED_DOCUMENTS" <<'PY'
+    "$EXPECTED_DOCUMENTS" "$E5_FAISS_TEMP_MEMORY_MIB" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -221,6 +224,7 @@ from pathlib import Path
     expected_model,
     expected_model_revision,
     expected_documents,
+    expected_faiss_temp_memory_mib,
 ) = sys.argv[1:]
 payload = json.loads(raw)
 if payload.get("status") != "ok" or payload.get("backend") != expected_backend:
@@ -236,6 +240,12 @@ if int(payload.get("corpus_documents", -1)) != int(expected_documents):
 if expected_backend == "e5":
     if payload.get("faiss_gpu") is not True or int(payload.get("faiss_gpu_count", 0)) != 1:
         raise SystemExit(f"E5 did not initialize one visible FAISS GPU: {payload}")
+    if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+        raise SystemExit(f"E5 did not use the memory-safe paged FAISS loader: {payload}")
+    if payload.get("faiss_storage_dtype") != "float16":
+        raise SystemExit(f"E5 did not use FP16 FAISS storage: {payload}")
+    if int(payload.get("faiss_temp_memory_mib", 0)) != int(expected_faiss_temp_memory_mib):
+        raise SystemExit(f"E5 used unexpected FAISS scratch memory: {payload}")
     if str(payload.get("cuda_visible_devices")) != expected_e5_gpu:
         raise SystemExit(f"E5 is running on an unexpected CUDA device: {payload}")
     if Path(str(payload.get("retriever_model", ""))).resolve() != Path(expected_model).resolve():

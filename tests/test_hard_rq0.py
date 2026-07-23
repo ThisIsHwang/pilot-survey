@@ -37,6 +37,7 @@ from stackpilot.hard_assets import (
     source_identity,
 )
 
+from stackpilot.faiss_gpu import paged_flat_gpu_loader
 from stackpilot.hard_query_analysis import main as query_analysis_main
 from stackpilot.hard_query_report import main as query_report_main
 from stackpilot.hard_policy_eval import (
@@ -308,6 +309,80 @@ class HardRQ0Tests(unittest.TestCase):
             second.result(timeout=2)
         self.assertEqual(retriever.calls, 2)
 
+    def test_paged_faiss_loader_uses_one_native_add_without_host_copy(
+        self,
+    ) -> None:
+        calls: dict[str, object] = {}
+        host_pointer = object()
+
+        class FakeCpuIndex:
+            d = 3
+            ntotal = 5
+            metric_type = 7
+
+            @staticmethod
+            def get_xb():
+                return host_pointer
+
+        class FakeResource:
+            def setTempMemory(self, size: int) -> None:
+                calls["temp_memory"] = size
+
+            @staticmethod
+            def syncDefaultStreamCurrentDevice() -> None:
+                calls["synced"] = True
+
+        class FakeConfig:
+            device = -1
+            useFloat16 = False
+            use_cuvs = True
+
+        class FakeGpuIndex:
+            def __init__(self, resource, dimension, config) -> None:
+                calls["resource"] = resource
+                calls["dimension"] = dimension
+                calls["config"] = config
+                self.ntotal = 0
+
+            def add_c(self, documents: int, pointer) -> None:
+                calls.setdefault("adds", []).append((documents, pointer))
+                self.ntotal = documents
+
+        original_loader = object()
+        faiss = types.SimpleNamespace(
+            METRIC_INNER_PRODUCT=7,
+            METRIC_L2=8,
+            IndexFlatIP=FakeCpuIndex,
+            IndexFlatL2=type("FakeL2Index", (), {}),
+            GpuIndexFlatIP=FakeGpuIndex,
+            GpuIndexFlatL2=FakeGpuIndex,
+            GpuIndexFlatConfig=FakeConfig,
+            StandardGpuResources=FakeResource,
+            downcast_index=lambda index: index,
+            get_num_gpus=lambda: 1,
+            index_cpu_to_all_gpus=original_loader,
+        )
+        clone_options = types.SimpleNamespace(useFloat16=True, shard=True)
+
+        with paged_flat_gpu_loader(faiss, temp_memory_mib=512) as state:
+            result = faiss.index_cpu_to_all_gpus(
+                FakeCpuIndex(), co=clone_options
+            )
+
+        self.assertIs(faiss.index_cpu_to_all_gpus, original_loader)
+        self.assertIsInstance(result, FakeGpuIndex)
+        self.assertEqual(calls["adds"], [(5, host_pointer)])
+        self.assertEqual(calls["temp_memory"], 512 * 1024 * 1024)
+        self.assertEqual(calls["dimension"], 3)
+        self.assertEqual(calls["config"].device, 0)
+        self.assertTrue(calls["config"].useFloat16)
+        self.assertFalse(calls["config"].use_cuvs)
+        self.assertTrue(calls["synced"])
+        self.assertEqual(state.documents, 5)
+        self.assertEqual(state.index_bytes, 5 * 3 * 2)
+        self.assertEqual(state.mode, "paged-fp16-flat")
+        self.assertEqual(len(state.resources), 1)
+
     def test_h100_evaluation_and_prefetch_defaults_are_wired(self) -> None:
         root = Path(__file__).resolve().parents[1]
         evaluator = (root / "hard_rq0" / "eval_policy.sh").read_text("utf-8")
@@ -317,6 +392,9 @@ class HardRQ0Tests(unittest.TestCase):
         pipeline = (root / "scripts" / "run_full_pipeline.sh").read_text(
             "utf-8"
         )
+        retriever_launcher = (
+            root / "hard_rq0" / "launch_retrievers.sh"
+        ).read_text("utf-8")
 
         self.assertIn("LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}", evaluator)
         self.assertIn("TP=${TP:-1}", evaluator)
@@ -325,6 +403,11 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}", evaluator)
         self.assertIn('--data-parallel-size "$DP"', launcher)
         self.assertIn('--api-server-count "$VLLM_API_SERVER_COUNT"', launcher)
+        self.assertIn("--faiss-gpu-paged-load", retriever_launcher)
+        self.assertIn(
+            'E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}',
+            retriever_launcher,
+        )
         self.assertLess(
             pipeline.index(
                 'bash "$ROOT/scripts/prefetch_future_models.sh" --stage2'
@@ -694,7 +777,11 @@ class HardRQ0Tests(unittest.TestCase):
         source_root = Path(__file__).resolve().parents[1] / "stackpilot"
         server_files = {
             name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
-            for name in ("retrieval_concurrency.py", "searchr1_server.py")
+            for name in (
+                "faiss_gpu.py",
+                "retrieval_concurrency.py",
+                "searchr1_server.py",
+            )
         }
         response = Mock()
         response.raise_for_status.return_value = None
@@ -729,6 +816,10 @@ class HardRQ0Tests(unittest.TestCase):
                 "index_documents": EXPECTED_DOCUMENTS,
                 "faiss_gpu": True,
                 "faiss_gpu_count": 1,
+                "faiss_gpu_load_mode": "paged-fp16-flat",
+                "faiss_storage_dtype": "float16",
+                "faiss_temp_memory_mib": 512,
+                "faiss_index_bytes": EXPECTED_DOCUMENTS * 768 * 2,
                 "gpu_search_serialized": True,
                 "cuda_empty_cache_disabled": True,
                 "retriever_model": "/models/e5/snapshots/revision",
@@ -741,6 +832,15 @@ class HardRQ0Tests(unittest.TestCase):
             )
         self.assertTrue(identity["gpu_search_serialized"])
         self.assertTrue(identity["cuda_empty_cache_disabled"])
+
+        response.json.return_value["faiss_gpu_load_mode"] = "clone"
+        with (
+            patch("stackpilot.hard_policy_eval.requests.get", return_value=response),
+            self.assertRaisesRegex(RuntimeError, "memory-safe paged"),
+        ):
+            check_retriever(
+                "e5", 8102, Path("/idx/e5"), Path("/data/wiki-18.jsonl")
+            )
 
     def test_evaluation_limit_is_balanced_across_datasets(self) -> None:
         rows = [{"id": f"a:{index}", "dataset": "a"} for index in range(5)] + [

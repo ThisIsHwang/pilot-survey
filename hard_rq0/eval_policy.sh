@@ -275,6 +275,10 @@ if payload.get("status") != "ok" or payload.get("backend") != backend:
 if backend == "e5":
     if payload.get("faiss_gpu") is not True or int(payload.get("faiss_gpu_count", 0)) != 1:
         raise SystemExit(f"E5 is not using one visible FAISS GPU: {payload}")
+    if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+        raise SystemExit(f"E5 is not using the memory-safe paged FAISS loader: {payload}")
+    if payload.get("faiss_storage_dtype") != "float16":
+        raise SystemExit(f"E5 is not using FP16 FAISS storage: {payload}")
     if str(payload.get("cuda_visible_devices")) != expected_e5_gpu:
         raise SystemExit(f"E5 is running on an unexpected CUDA device: {payload}")
     if Path(str(payload.get("retriever_model", ""))).resolve() != expected_e5_model:

@@ -16,6 +16,7 @@ from stackpilot.cuda_compat import (
     configure_cuda_attention,
     load_e5_with_eager_attention,
 )
+from stackpilot.faiss_gpu import paged_flat_gpu_loader
 from stackpilot.retrieval_concurrency import batch_search
 
 
@@ -40,11 +41,19 @@ def main() -> None:
     parser.add_argument("--topk", type=int, default=10)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--faiss-gpu", action="store_true")
+    parser.add_argument("--faiss-gpu-paged-load", action="store_true")
+    parser.add_argument("--faiss-gpu-temp-memory-mib", type=int, default=512)
     parser.add_argument("--expected-documents", type=int, default=None)
     args = parser.parse_args()
 
     if args.expected_documents is not None and args.expected_documents <= 0:
         parser.error("--expected-documents must be positive")
+    if args.faiss_gpu_temp_memory_mib <= 0:
+        parser.error("--faiss-gpu-temp-memory-mib must be positive")
+    if args.faiss_gpu_paged_load and not (
+        args.retriever_name.lower() == "e5" and args.faiss_gpu
+    ):
+        parser.error("--faiss-gpu-paged-load requires an E5 --faiss-gpu server")
     disable_empty_cache_value = os.environ.get(
         "RETRIEVER_DISABLE_CUDA_EMPTY_CACHE", "0"
     )
@@ -76,7 +85,22 @@ def main() -> None:
         retrieval_use_fp16=True,
         retrieval_batch_size=256,
     )
-    retriever = retrieval_server.get_retriever(config)
+    faiss_load = None
+    if args.faiss_gpu_paged_load:
+        with paged_flat_gpu_loader(
+            retrieval_server.faiss,
+            temp_memory_mib=args.faiss_gpu_temp_memory_mib,
+        ) as faiss_load:
+            retriever = retrieval_server.get_retriever(config)
+        if faiss_load.documents is None:
+            raise RuntimeError(
+                "Search-R1 did not invoke the memory-safe FAISS GPU loader"
+            )
+        # FAISS GPU indexes borrow their resource object. Keep it alive for the
+        # full retriever lifetime after the temporary monkeypatch is restored.
+        retriever._stackpilot_faiss_resources = faiss_load.resources
+    else:
+        retriever = retrieval_server.get_retriever(config)
     if disable_empty_cache:
         # The hard-RQ0 E5 server owns GPU 7 exclusively. Retaining its allocator
         # cache avoids two synchronizing empty_cache calls per query batch.
@@ -147,6 +171,7 @@ def main() -> None:
         path.name: source_digest(path)
         for path in (
             Path(__file__).resolve(),
+            Path(__file__).with_name("faiss_gpu.py").resolve(),
             Path(__file__).with_name("retrieval_concurrency.py").resolve(),
         )
     }
@@ -161,6 +186,20 @@ def main() -> None:
             "corpus_path": str(Path(args.corpus_path).resolve()),
             "faiss_gpu": bool(args.faiss_gpu),
             "faiss_gpu_count": faiss_gpu_count,
+            "faiss_gpu_load_mode": (
+                faiss_load.mode
+                if faiss_load is not None
+                else ("clone" if args.faiss_gpu else "cpu")
+            ),
+            "faiss_storage_dtype": (
+                faiss_load.storage_dtype if faiss_load is not None else None
+            ),
+            "faiss_temp_memory_mib": (
+                faiss_load.temp_memory_mib if faiss_load is not None else None
+            ),
+            "faiss_index_bytes": (
+                faiss_load.index_bytes if faiss_load is not None else None
+            ),
             "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
             "index_class": index_class,
             "index_documents": index_documents,

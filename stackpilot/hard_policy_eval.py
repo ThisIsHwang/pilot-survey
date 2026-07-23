@@ -155,6 +155,7 @@ def evaluation_context(
     require_json_manifest(asset_manifest_path, "hard-RQ0 asset")
     evaluator_names = (
         "common.py",
+        "faiss_gpu.py",
         "hard_policy_eval.py",
         "hard_rq0_contract.py",
         "react_agent_eval.py",
@@ -269,7 +270,11 @@ def check_retriever(
         )
     expected_server_files = {
         filename: file_digest(Path(__file__).with_name(filename))
-        for filename in ("retrieval_concurrency.py", "searchr1_server.py")
+        for filename in (
+            "faiss_gpu.py",
+            "retrieval_concurrency.py",
+            "searchr1_server.py",
+        )
     }
     if payload.get("server_files") != expected_server_files:
         raise RuntimeError(
@@ -289,6 +294,15 @@ def check_retriever(
             or int(payload.get("faiss_gpu_count", 0)) != 1
         ):
             raise RuntimeError(f"E5 retriever is not using one FAISS GPU: {payload}")
+        if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+            raise RuntimeError(
+                f"E5 retriever is not using the memory-safe paged FAISS loader: "
+                f"{payload}"
+            )
+        if payload.get("faiss_storage_dtype") != "float16":
+            raise RuntimeError(
+                f"E5 retriever is not using FP16 FAISS storage: {payload}"
+            )
         if payload.get("gpu_search_serialized") is not True:
             raise RuntimeError(
                 f"E5 retriever does not serialize its shared GPU index: {payload}"
@@ -314,6 +328,12 @@ def check_retriever(
                 "retriever_model_revision": retriever_model_revision,
                 "faiss_gpu": payload.get("faiss_gpu") is True,
                 "faiss_gpu_count": int(payload.get("faiss_gpu_count", 0)),
+                "faiss_gpu_load_mode": payload.get("faiss_gpu_load_mode"),
+                "faiss_storage_dtype": payload.get("faiss_storage_dtype"),
+                "faiss_temp_memory_mib": int(
+                    payload.get("faiss_temp_memory_mib", 0)
+                ),
+                "faiss_index_bytes": int(payload.get("faiss_index_bytes", 0)),
                 "gpu_search_serialized": True,
                 "cuda_empty_cache_disabled": payload.get(
                     "cuda_empty_cache_disabled"

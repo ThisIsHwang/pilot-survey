@@ -43,7 +43,7 @@ e5_revision = sys.argv[7]
 root = Path(sys.argv[8])
 expected_server_files = {
     name: hashlib.sha256((root / "stackpilot" / name).read_bytes()).hexdigest()
-    for name in ("retrieval_concurrency.py", "searchr1_server.py")
+    for name in ("faiss_gpu.py", "retrieval_concurrency.py", "searchr1_server.py")
 }
 common = (
     payload.get("status") == "ok"
@@ -59,6 +59,8 @@ if not common:
 if expected == "e5" and not (
     payload.get("faiss_gpu") is True
     and int(payload.get("faiss_gpu_count", 0)) == 1
+    and payload.get("faiss_gpu_load_mode") == "paged-fp16-flat"
+    and payload.get("faiss_storage_dtype") == "float16"
     and payload.get("cuda_visible_devices") == e5_gpu
     and payload.get("gpu_search_serialized") is True
     and payload.get("cuda_empty_cache_disabled") is True
