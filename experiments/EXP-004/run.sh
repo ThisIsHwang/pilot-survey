@@ -17,6 +17,7 @@ bash hard_rq0/download_assets.sh
 bash hard_rq0/prepare_data.sh
 
 for seed in $SEEDS; do
+  bash experiments/reset_searchr1_experiment_files.sh
   EXPERIMENT_ID=EXP-004 SEED="$seed" PROFILE="$PROFILE" \
     BASE_MODEL="$BASE_MODEL" BASE_MODEL_REVISION="$BASE_MODEL_REVISION" \
     bash experiments/train_mixed_policy.sh
