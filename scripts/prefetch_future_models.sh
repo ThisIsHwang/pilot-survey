@@ -13,9 +13,9 @@ PYTHON=$ROOT/.venv-pilot/bin/python
 }
 MODE=${1:---all}
 case "$MODE" in
-  --all|--stage2|--hard) ;;
+  --all|--stage2|--hard|--hard-excluding-stage2) ;;
   *)
-    echo "Usage: bash scripts/prefetch_future_models.sh [--all|--stage2|--hard]" >&2
+    echo "Usage: bash scripts/prefetch_future_models.sh [--all|--stage2|--hard|--hard-excluding-stage2]" >&2
     exit 2
     ;;
 esac
@@ -41,16 +41,23 @@ default_revision() {
 }
 
 declare -A SEEN_MODELS=()
+remember_model() {
+  local owner=$1
+  local ref=$2
+  local revision=$3
+  SEEN_MODELS["${ref}@${revision}"]=$owner
+}
+
 prefetch_model() {
   local label=$1
   local ref=$2
   local revision=$3
   local key="${ref}@${revision}"
   if [[ -n ${SEEN_MODELS[$key]+x} ]]; then
-    echo "Reusing prefetch request for $label: $key"
+    echo "Skipping $label: $key is covered by ${SEEN_MODELS[$key]}."
     return
   fi
-  SEEN_MODELS[$key]=1
+  remember_model "$label" "$ref" "$revision"
   echo "Prefetching $label: $key"
   bash "$ROOT/scripts/resolve_hf_model.sh" "$ref" "$revision" "$PYTHON" >/dev/null
 }
@@ -73,6 +80,20 @@ e5_revision=${E5_MODEL_REVISION:-$(
   default_revision "$e5_model" "$DEFAULT_E5_MODEL" "$DEFAULT_E5_REVISION"
 )}
 
+# run_full_pipeline launches Stage-2 and Hard-RQ0 prefetch concurrently. Seed
+# the Hard-RQ0 process with every Stage-2 request so it only fetches models
+# unique to Hard-RQ0; the Stage-2 consumer is validated before Hard-RQ0 starts.
+if [[ "$MODE" == --hard-excluding-stage2 ]]; then
+  remember_model "the concurrent Stage-2 prefetch" \
+    "$base_policy_model" "$base_policy_revision"
+  remember_model "the concurrent Stage-2 prefetch" \
+    "$official_model" "$official_revision"
+  remember_model "the concurrent Stage-2 prefetch" \
+    "$train_model" "$train_revision"
+  remember_model "the concurrent Stage-2 prefetch" \
+    "$e5_model" "$e5_revision"
+fi
+
 if [[ "$MODE" == --all || "$MODE" == --stage2 ]]; then
   prefetch_model "Stage-2 base policy" "$base_policy_model" "$base_policy_revision"
   prefetch_model \
@@ -81,7 +102,7 @@ if [[ "$MODE" == --all || "$MODE" == --stage2 ]]; then
   prefetch_model "E5 encoder" "$e5_model" "$e5_revision"
 fi
 
-if [[ "$MODE" == --all || "$MODE" == --hard ]]; then
+if [[ "$MODE" == --all || "$MODE" == --hard || "$MODE" == --hard-excluding-stage2 ]]; then
   if [[ -n ${HARD_BASE_MODEL_REF:-} ]]; then
     hard_model=$HARD_BASE_MODEL_REF
     hard_revision=${HARD_BASE_MODEL_REVISION:-$(
