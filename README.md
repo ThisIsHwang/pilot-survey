@@ -1,9 +1,9 @@
 # Retrieval-stack adaptation pilot
 
-This repository runs the zero-shot retrieval-stack pilot on one Linux node with
-8 full NVIDIA H100 GPUs and CUDA 12.9. It compares BM25, E5, and ColBERT on a
-controlled HotpotQA corpus, then evaluates the same Qwen 2.5 search agent against
-all three backends.
+This repository runs the zero-shot pilot, Search-R1 Stage 2, and the full-wiki
+hard-RQ0 follow-up on one Linux node with 8 full NVIDIA H100 GPUs and CUDA 12.9.
+The hard follow-up trains three BM25 and three E5 specialists and cross-evaluates
+them at top-k 3, 5, and 10 on 2WikiMultiHopQA and MuSiQue.
 
 Search-R1 is pinned to commit
 `598e61bd1d36895726d28a8d06b3a15bed19f5d3`. BM25 and E5 reuse its official
@@ -19,9 +19,11 @@ packages.
 - an NVIDIA driver capable of running CUDA 12.9 binaries
 - the CUDA 12.9 toolkit, including `nvcc`, on `PATH`
 - `g++`, `git`, and `curl`
-- at least 8 GiB free in `/dev/shm`; keep at least 60 GiB free when Stage 2
-  starts, and plan roughly 100 GiB for a completely uncached full bootstrap,
-  model download, and four specialist checkpoints
+- at least 8 GiB free in `/dev/shm` and at least 128 GiB available host RAM
+- for the default all-experiment run, plan at least 350 GiB free disk. The
+  hard-RQ0 preflight computes a profile-aware requirement and stops before a
+  large download when the node is too small. Its official assets alone occupy
+  roughly 100 GB after assembly.
 
 On a module-based cluster, load its CUDA 12.9 toolkit before running the pilot,
 for example `module load cuda/12.9`. Confirm that `nvcc --version` reports
@@ -30,10 +32,9 @@ warm-up compile CUDA extensions.
 
 ## Recommended one-command run
 
-The full runner executes the zero-shot Stage 0 and the newly merged Search-R1
-Stage 2 in sequence. By default it downloads the 7B Stage-0 model, the 3B base
-model, and the official Search-R1 policy from Hugging Face while the relevant
-step is starting.
+The full runner executes Stage 0, Stage 2, and hard-RQ0 in sequence. It downloads
+the pinned models, datasets, and full-wiki retrieval assets as their step starts,
+then reuses verified caches on every rerun.
 
 ```bash
 cd /group-volume/teo.hwang/pilot-survey
@@ -48,20 +49,21 @@ HF_HOME=/group-volume/teo.hwang/huggingface-cache \
 branch/tag is downloaded to its concrete Hugging Face snapshot directory. The
 download progress is therefore visible and is not hidden behind vLLM's old
 900-second readiness limit. Subsequent runs reuse the Hugging Face, dataset,
-index, policy-evaluation, and completed-training caches. A direct remote
-`launch_vllm_bg.sh` call still has a four-hour first-load fallback.
+index, policy-evaluation, and completed-training caches. Full-wiki E5 startup
+also has a four-hour default readiness window.
 
-The three entry points are deliberately explicit:
+The four entry points are deliberately explicit:
 
 - `scripts/run_all.sh`: Stage 0 only
 - `searchr1_stage2/run_all.sh`: Stage 2 only
-- `scripts/run_full_pipeline.sh`: Stage 0 followed by Stage 2
+- `hard_rq0/run_all.sh`: hard-RQ0 only, including all bootstraps and downloads
+- `scripts/run_full_pipeline.sh`: Stage 0, Stage 2, then hard-RQ0
 
 The full runner performs all three environment bootstraps, strict preflights,
-data preparation, all indexes, server warm-ups, Stage-0 evaluations, two
-Search-R1 specialist trainings and cross-evaluations, both reports, and final
-cleanup. It always proceeds to Stage 2; inspect the Stage-0 report separately
-if a manual go/no-go decision is required first.
+data preparation, all indexes, server warm-ups, Stage-0 evaluations, Stage-2
+training, six hard-RQ0 specialist trainings and cross-evaluations, reports, and
+final cleanup. Set `RUN_HARD_RQ0=0` only when intentionally omitting the new
+full-wiki experiment.
 
 To use existing local model snapshots, point each role at its concrete Hugging
 Face model directory containing `config.json`, tokenizer files, and weight
@@ -72,6 +74,7 @@ STAGE0_MODEL_REF=/models/Qwen2.5-7B-Instruct \
 BASE_POLICY_MODEL=/models/Qwen2.5-3B-Instruct \
 OFFICIAL_POLICY_MODEL=/models/SearchR1-official \
 TRAIN_BASE_MODEL=/models/Qwen2.5-3B-Instruct \
+HARD_BASE_MODEL_REF=/models/Qwen2.5-3B-Instruct \
   bash scripts/run_full_pipeline.sh
 ```
 
@@ -79,8 +82,9 @@ The bundled Qwen/Search-R1, E5, and ColBERT models are pinned to concrete Hub
 commits. A custom remote model defaults to `main`, which is resolved once to an
 immutable commit at run start. To select another exact policy-model revision, set
 `STAGE0_MODEL_REVISION`, `BASE_POLICY_MODEL_REVISION`,
-`OFFICIAL_POLICY_MODEL_REVISION`, and `TRAIN_BASE_MODEL_REVISION` to full Hub
-commit hashes. Local directories ignore these revision controls.
+`OFFICIAL_POLICY_MODEL_REVISION`, `TRAIN_BASE_MODEL_REVISION`, and
+`HARD_BASE_MODEL_REVISION` to full Hub commit hashes. Local directories ignore
+these revision controls.
 Retriever overrides use `E5_MODEL`/`E5_MODEL_REVISION` and
 `COLBERT_MODEL`/`COLBERT_MODEL_REVISION` in the same way.
 
@@ -91,11 +95,10 @@ RETRIEVAL_LIMIT=20 AGENT_LIMIT=5 POLICY_LIMIT=20 SMOKE_ONLY=1 \
   bash scripts/run_full_pipeline.sh
 ```
 
-This still prepares the configured 3,000/500 examples and builds the full pilot
-indexes when they are not cached. It shortens all evaluation limits, runs only
-the two one-update smoke trainings, and intentionally skips pilot training,
-specialist cross-evaluation, and the Stage-2 report. It is not a complete
-experiment.
+This also runs one hard-RQ0 specialist seed with a 20-question evaluation and
+skips its multi-seed report. A fresh hard smoke still downloads the full wiki-18
+assets; use `RUN_HARD_RQ0=0` when only a lightweight Stage-0/2 code-path check is
+wanted. A smoke run is not a complete experiment.
 
 After all three bootstraps have succeeded once, avoid recreating the
 environments on a rerun:
@@ -105,8 +108,9 @@ SKIP_BOOTSTRAP=1 \
   bash scripts/run_full_pipeline.sh
 ```
 
-Useful Stage-2 controls are `RUN_STAGE0=0`, `RUN_SMOKE=0`, `SMOKE_ONLY=1`,
-`POLICY_LIMIT=<n>`, and `FORCE_TRAIN=1`. The last option archives a completed
+Useful controls are `RUN_STAGE0=0`, `RUN_HARD_RQ0=0`, `RUN_SMOKE=0`,
+`SMOKE_ONLY=1`, `POLICY_LIMIT=<n>`, `HARD_PROFILE=smoke|pilot|full`,
+`HARD_LIMIT=<n>`, and `FORCE_TRAIN=1`. The last option archives a completed
 checkpoint directory and trains again; it does not delete it.
 
 ## Manual Stage-0 run
@@ -187,6 +191,12 @@ E5/FAISS service; its rollout memory utilization is reduced to 0.50. Override
 that service GPU with `STAGE2_E5_GPU` only when the replacement remains visible
 and has enough free memory. These phases run sequentially.
 
+Hard-RQ0 keeps its full-wiki services alive across sequential runs. During
+training, Search-R1 uses GPUs 0-6 and the E5 encoder plus GPU-FAISS index uses
+GPU 7; BM25 remains on CPU. During evaluation, vLLM uses GPUs 0-1 with
+tensor parallel size 2 while E5 remains on GPU 7. Launch and training preflights
+reject overlapping assignments, a CPU-only FAISS build, or a non-H100/MIG node.
+
 The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
 `TP`. `LLM_GPUS` must contain exactly `TP` unique GPU IDs.
 
@@ -215,6 +225,15 @@ The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
   checkpoint both validate. The pinned trainer does not save optimizer state,
   so an interrupted run is moved to `.incomplete.<timestamp>` and restarted
   from the base model instead of pretending to resume.
+- Hard-RQ0 pins the corpus, BM25, E5, FlashRAG, Qwen, E5 encoder, and query
+  analysis model revisions. Its 64.6 GB E5 index is assembled incrementally;
+  each downloaded split is removed after its durable assembly checkpoint, and
+  the compressed corpus is removed after successful promotion, unless
+  `KEEP_HARD_SOURCE_ARCHIVES=1` is set.
+- Hard-RQ0 assets and prepared data have strict manifests. Policy rows resume by
+  a shared evaluation signature and a model-specific run signature; stale rows
+  are archived outside the report glob. Completed GRPO runs require the exact
+  final `global_step_N` checkpoint and an atomic completion marker.
 
 ## Logs and cleanup
 
@@ -235,6 +254,7 @@ Stop only the processes recorded by this checkout:
 
 ```bash
 bash scripts/stop_servers.sh
+bash hard_rq0/stop_retrievers.sh
 .venv-searchr1/bin/ray stop --force
 ```
 
@@ -252,6 +272,9 @@ already occupying ports 8001, 8002, 8003, or 9000.
 - `work/merged/hotpot-{bm25,e5}-pilot-grpo` (validated model symlinks)
 - `work/results/policies/*.jsonl` and `*_summary.csv`
 - `work/results/rq0/RQ0_REPORT.md`
+- `work/hard_rq0/runs/pilot/results/report/HARD_RQ0_REPORT.md`
+- `work/hard_rq0/runs/pilot/results/report/QUERY_BEHAVIOR.md`
+- `work/hard_rq0/checkpoints/hard-rq0-{bm25,e5}-seed*-pilot/`
 
 The query-style oracle excludes the RRF ensemble; the ensemble remains a
 separate fixed baseline.
@@ -273,6 +296,7 @@ of these hold:
   oracle is materially stronger;
 - the fixed RRF ensemble does not already close most of the gap.
 
-Stage 2 remains outside the Stage-0-only `scripts/run_all.sh` because it needs a
-separate runtime and GPU allocation. Use `scripts/run_full_pipeline.sh` to run
-both stages, or `searchr1_stage2/run_all.sh` to run only the new stage.
+Stage 2 and hard-RQ0 remain outside the Stage-0-only `scripts/run_all.sh` because
+they need separate runtimes and GPU layouts. Use `scripts/run_full_pipeline.sh`
+for every experiment, `searchr1_stage2/run_all.sh` for Stage 2 only, or
+`hard_rq0/run_all.sh` for the full-wiki follow-up only.

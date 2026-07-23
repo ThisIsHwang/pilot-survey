@@ -165,14 +165,25 @@ from colbert import Indexer, Searcher  # noqa: F401
 from pyserini.index.lucene import IndexReader  # noqa: F401
 from pyserini.search.lucene import LuceneSearcher  # noqa: F401
 from ragatouille import RAGPretrainedModel  # noqa: F401
-from stackpilot import policy_eval, query_stats, rq0_report  # noqa: F401
+from stackpilot import (  # noqa: F401
+    hard_assets,
+    hard_policy_eval,
+    hard_query_analysis,
+    hard_query_report,
+    hard_rq0_report,
+    policy_eval,
+    prepare_hard_rq0,
+    query_stats,
+    rq0_report,
+    validate_hard_results,
+)
 
 sys.path.insert(0, str(Path.cwd() / "upstream" / "Search-R1"))
 from search_r1.search import index_builder, retrieval_server  # noqa: E402,F401
 
 print(
     "Pyserini, psutil, fast-pytorch-kmeans, ColBERT, RAGatouille, "
-    "policy/RQ0 modules, and Search-R1 imports passed."
+    "policy/RQ0/hard-RQ0 modules, and Search-R1 imports passed."
 )
 PY
 

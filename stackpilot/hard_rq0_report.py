@@ -38,17 +38,26 @@ def markdown_table(frame: pd.DataFrame, digits: int = 4) -> str:
             lambda value: "" if pd.isna(value) else f"{float(value):.{digits}f}"
         )
     headers = [str(column) for column in display.columns]
-    rows = [[str(value) for value in row] for row in display.itertuples(index=False, name=None)]
+    rows = [
+        [str(value) for value in row]
+        for row in display.itertuples(index=False, name=None)
+    ]
     widths = [
         max(len(headers[index]), *(len(row[index]) for row in rows))
         for index in range(len(headers))
     ]
     lines = [
-        "| " + " | ".join(headers[index].ljust(widths[index]) for index in range(len(headers))) + " |",
+        "| "
+        + " | ".join(
+            headers[index].ljust(widths[index]) for index in range(len(headers))
+        )
+        + " |",
         "| " + " | ".join("-" * widths[index] for index in range(len(headers))) + " |",
     ]
     lines.extend(
-        "| " + " | ".join(row[index].ljust(widths[index]) for index in range(len(headers))) + " |"
+        "| "
+        + " | ".join(row[index].ljust(widths[index]) for index in range(len(headers)))
+        + " |"
         for row in rows
     )
     return "\n".join(lines)
@@ -90,8 +99,7 @@ def specialist_metrics_available(frame: pd.DataFrame) -> None:
     too_small = specialist_seed_counts[specialist_seed_counts < 3]
     if not too_small.empty:
         raise RuntimeError(
-            "Hard-RQ0 requires three specialist seeds; observed "
-            f"{too_small.to_dict()}"
+            f"Hard-RQ0 requires three specialist seeds; observed {too_small.to_dict()}"
         )
 
 
@@ -105,13 +113,18 @@ def matched_hard_question_ids(frame: pd.DataFrame) -> pd.DataFrame:
     ).dropna(subset=["bm25", "e5"])
     base_turn1["base_hard"] = (base_turn1["bm25"] <= 0.5) & (base_turn1["e5"] <= 0.5)
 
+    # Define recoverability from the fixed base policy only. Selecting the
+    # diagnostic subset using specialist outcomes would condition the reported
+    # treatment effect on the outcome being tested.
     recoverability = (
-        frame.groupby(["question_id", "dataset", "topk"])["turn3_support_recall"]
+        base.groupby(["question_id", "dataset", "topk"])["turn3_support_recall"]
         .max()
-        .rename("best_turn3_recall")
+        .rename("base_best_turn3_recall")
     )
     matched = base_turn1.join(recoverability, how="inner").reset_index()
-    matched["recoverable"] = matched["best_turn3_recall"] > matched[["bm25", "e5"]].max(axis=1)
+    matched["recoverable"] = matched["base_best_turn3_recall"] > matched[
+        ["bm25", "e5"]
+    ].max(axis=1)
     matched["matched_hard"] = matched["base_hard"] & matched["recoverable"]
     return matched
 
@@ -196,7 +209,7 @@ def home_excess(gains: pd.DataFrame) -> pd.DataFrame:
     return pivot
 
 
-def hierarchical_bootstrap(
+def crossed_cluster_bootstrap(
     frame: pd.DataFrame,
     value_column: str,
     samples: int,
@@ -204,17 +217,30 @@ def hierarchical_bootstrap(
 ) -> tuple[float, float, float]:
     if frame.empty:
         return np.nan, np.nan, np.nan
-    seeds = sorted(frame["seed"].unique())
-    observed = float(frame.groupby("seed")[value_column].mean().mean())
+    try:
+        matrix = (
+            frame.pivot(index="seed", columns="question_id", values=value_column)
+            .sort_index(axis=0)
+            .sort_index(axis=1)
+        )
+    except ValueError as exc:
+        raise RuntimeError(
+            "Bootstrap input must have one value per seed/question cell"
+        ) from exc
+    if matrix.empty or matrix.isna().any().any():
+        raise RuntimeError(
+            "Bootstrap input must contain a complete crossed seed/question grid"
+        )
+    values = matrix.to_numpy(dtype=np.float64)
+    seed_count, question_count = values.shape
+    observed = float(values.mean(axis=1).mean())
     draws = np.empty(samples, dtype=np.float64)
     for index in range(samples):
-        sampled_seeds = rng.choice(seeds, size=len(seeds), replace=True)
-        seed_means = []
-        for seed in sampled_seeds:
-            values = frame.loc[frame["seed"] == seed, value_column].to_numpy(dtype=float)
-            sampled_values = rng.choice(values, size=len(values), replace=True)
-            seed_means.append(float(sampled_values.mean()))
-        draws[index] = float(np.mean(seed_means))
+        sampled_seeds = rng.integers(0, seed_count, size=seed_count)
+        # Questions are crossed with seeds, so resample the same question IDs
+        # for every sampled seed instead of treating them as nested observations.
+        sampled_questions = rng.integers(0, question_count, size=question_count)
+        draws[index] = float(values[np.ix_(sampled_seeds, sampled_questions)].mean())
     low, high = np.quantile(draws, [0.025, 0.975])
     return observed, float(low), float(high)
 
@@ -224,7 +250,7 @@ def home_excess_summary(home: pd.DataFrame, samples: int, seed: int) -> pd.DataF
     rows = []
     group_columns = ["subset", "policy_tag", "dataset", "topk", "metric"]
     for keys, group in home.groupby(group_columns):
-        observed, low, high = hierarchical_bootstrap(
+        observed, low, high = crossed_cluster_bootstrap(
             group, "home_excess_gain", samples, rng
         )
         per_seed = group.groupby("seed")["home_excess_gain"].mean()
@@ -234,7 +260,9 @@ def home_excess_summary(home: pd.DataFrame, samples: int, seed: int) -> pd.DataF
                 "n_questions": int(group["question_id"].nunique()),
                 "n_seeds": int(per_seed.shape[0]),
                 "home_excess_gain": observed,
-                "seed_std": float(per_seed.std(ddof=1)) if len(per_seed) > 1 else np.nan,
+                "seed_std": float(per_seed.std(ddof=1))
+                if len(per_seed) > 1
+                else np.nan,
                 "ci_low": low,
                 "ci_high": high,
             }
@@ -246,7 +274,9 @@ def home_excess_summary(home: pd.DataFrame, samples: int, seed: int) -> pd.DataF
 
 def gain_summary(gains: pd.DataFrame) -> pd.DataFrame:
     group_columns = ["subset", "policy_tag", "dataset", "backend", "topk", "metric"]
-    per_seed = gains.groupby(group_columns + ["seed"], as_index=False)["gain_over_base"].mean()
+    per_seed = gains.groupby(group_columns + ["seed"], as_index=False)[
+        "gain_over_base"
+    ].mean()
     return (
         per_seed.groupby(group_columns)["gain_over_base"]
         .agg(gain_over_base="mean", seed_std="std")
@@ -335,7 +365,10 @@ def main() -> None:
         home_excess(all_gains), args.bootstrap_samples, args.bootstrap_seed
     )
     base_gap_rows = pd.concat(
-        [base_backend_gap(expanded, metric).assign(metric=metric) for metric in METRICS],
+        [
+            base_backend_gap(expanded, metric).assign(metric=metric)
+            for metric in METRICS
+        ],
         ignore_index=True,
     )
     base_gap_summary = (
@@ -350,9 +383,19 @@ def main() -> None:
     interactions.to_csv(output_dir / "home_backend_excess.csv", index=False)
     base_gap_summary.to_csv(output_dir / "base_backend_gap.csv", index=False)
     matched.to_csv(output_dir / "difficulty_matching.csv", index=False)
-    matched_ids = matched[matched["matched_hard"]]["question_id"].astype(str).tolist()
+    matched_units = matched.loc[
+        matched["matched_hard"], ["question_id", "dataset", "topk"]
+    ].copy()
+    matched_units["question_id"] = matched_units["question_id"].astype(str)
+    matched_units["dataset"] = matched_units["dataset"].astype(str)
+    matched_units["topk"] = matched_units["topk"].astype(int)
+    matched_unit_records = matched_units.to_dict(orient="records")
+    matched_ids = sorted(matched_units["question_id"].unique().tolist())
     (output_dir / "matched_hard_question_ids.json").write_text(
         json.dumps(matched_ids, indent=2) + "\n", encoding="utf-8"
+    )
+    (output_dir / "matched_hard_units.json").write_text(
+        json.dumps(matched_unit_records, indent=2) + "\n", encoding="utf-8"
     )
 
     lines = [
@@ -364,16 +407,18 @@ def main() -> None:
         "",
         "`(specialist_home - base_home) - (specialist_away - base_away)`.",
         "",
-        "The matched-hard subset contains questions for which base Qwen has first-turn support recall <= 0.5 on both BM25 and E5, and at least one evaluated policy improves support recall by turn 3.",
+        "The matched-hard subset contains evaluation units for which base Qwen has first-turn support recall <= 0.5 on both BM25 and E5, and base Qwen itself improves support recall by turn 3. Specialist outcomes are not used to select this subset.",
         "",
-        f"Matched-hard questions: **{len(matched_ids)}** / **{matched['question_id'].nunique()}**.",
+        f"Matched-hard evaluation units: **{len(matched_units)}** / **{len(matched)}**; unique questions: **{len(matched_ids)}** / **{matched['question_id'].nunique()}**.",
         "",
     ]
 
     for subset_name in ("all", "matched-hard"):
         subset_frame = absolute[absolute["subset"] == subset_name]
         for dataset in sorted(subset_frame["dataset"].unique()):
-            for topk in sorted(subset_frame.loc[subset_frame["dataset"] == dataset, "topk"].unique()):
+            for topk in sorted(
+                subset_frame.loc[subset_frame["dataset"] == dataset, "topk"].unique()
+            ):
                 report_section(
                     lines,
                     absolute,
@@ -398,7 +443,9 @@ def main() -> None:
         & interactions["metric"].isin(target_metrics)
     ]
     if target_rows.empty:
-        lines.append("- Matched-hard specialist results are incomplete; no interaction estimate is available.")
+        lines.append(
+            "- Matched-hard specialist results are incomplete; no interaction estimate is available."
+        )
     else:
         for row in target_rows.itertuples(index=False):
             passes = bool(row.home_excess_gain >= args.threshold and row.ci_low > 0)
@@ -415,7 +462,7 @@ def main() -> None:
             "- A large gain over base on both backends is a general RL effect, not specialization.",
             "- A positive home-backend excess isolates retriever-specific improvement after subtracting the base backend gap.",
             "- The strongest evidence is near-zero turn-1 interaction followed by positive turn-2/3 evidence-gain or recovery interaction.",
-            "- The hard-RQ0 gate requires at least 0.05 home-backend excess with a hierarchical bootstrap CI above zero on the matched-hard subset.",
+            "- The hard-RQ0 gate requires at least 0.05 home-backend excess with a crossed seed/question bootstrap CI above zero on the matched-hard subset.",
             "- If this remains below 0.03, the hidden-retriever adaptation hypothesis should be rejected for this setup.",
             "",
         ]

@@ -6,11 +6,58 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from sentence_transformers import SentenceTransformer
 
 from stackpilot.common import ensure_dir, read_jsonl_tolerant
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
+GROUP_COLUMNS = [
+    "subset",
+    "policy_tag",
+    "seed",
+    "dataset",
+    "backend",
+    "topk",
+    "turn",
+]
+TURN_COLUMNS = [
+    "policy_tag",
+    "seed",
+    "question_id",
+    "dataset",
+    "backend",
+    "topk",
+    "turn",
+    "question",
+    "query",
+    "previous_query",
+    "query_token_count",
+    "query_question_overlap",
+    "query_has_quotes",
+    "query_capitalized_ratio",
+    "query_numeric_ratio",
+    "query_lexical_change",
+    "support_recall",
+    "evidence_gain",
+]
+METRIC_COLUMNS = [
+    "query_token_count",
+    "query_question_overlap",
+    "query_question_semantic_similarity",
+    "query_has_quotes",
+    "query_capitalized_ratio",
+    "query_numeric_ratio",
+    "query_lexical_change",
+    "query_semantic_change",
+    "support_recall",
+    "evidence_gain",
+]
+SHIFT_METRICS = [
+    "query_question_semantic_similarity",
+    "query_has_quotes",
+    "query_capitalized_ratio",
+    "query_lexical_change",
+    "query_semantic_change",
+]
 
 
 def cosine_rows(left: np.ndarray, right: np.ndarray) -> np.ndarray:
@@ -62,8 +109,8 @@ def load_turns(results_dir: Path) -> pd.DataFrame:
                 )
                 previous_query = query
     if not rows:
-        raise RuntimeError(f"No turn records found under {results_dir}")
-    return pd.DataFrame(rows)
+        return pd.DataFrame(columns=TURN_COLUMNS)
+    return pd.DataFrame(rows, columns=TURN_COLUMNS)
 
 
 def add_subsets(turns: pd.DataFrame, difficulty_file: Path | None) -> pd.DataFrame:
@@ -78,9 +125,19 @@ def add_subsets(turns: pd.DataFrame, difficulty_file: Path | None) -> pd.DataFra
         raise RuntimeError(
             f"{difficulty_file} is missing difficulty columns: {sorted(missing)}"
         )
-    matched = difficulty[difficulty["matched_hard"].astype(bool)][
-        ["question_id", "dataset", "topk"]
-    ].copy()
+    values = difficulty["matched_hard"]
+    if values.dtype == bool:
+        matched_mask = values
+    else:
+        normalized = values.astype(str).str.strip().str.lower()
+        invalid = ~normalized.isin(("true", "false", "1", "0"))
+        if invalid.any():
+            raise RuntimeError(
+                f"{difficulty_file} has invalid matched_hard values: "
+                f"{values[invalid].head(10).tolist()}"
+            )
+        matched_mask = normalized.isin(("true", "1"))
+    matched = difficulty[matched_mask][["question_id", "dataset", "topk"]].copy()
     matched["question_id"] = matched["question_id"].astype(str)
     hard_turns = turns.copy()
     hard_turns["question_id"] = hard_turns["question_id"].astype(str)
@@ -99,15 +156,33 @@ def main() -> None:
     parser.add_argument("--results-dir", default="work/hard_rq0/results/policies")
     parser.add_argument("--output-dir", default="work/hard_rq0/results/report")
     parser.add_argument("--difficulty-file", default=None)
-    parser.add_argument(
-        "--model", default="sentence-transformers/all-MiniLM-L6-v2"
-    )
+    parser.add_argument("--model", default="sentence-transformers/all-MiniLM-L6-v2")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--batch-size", type=int, default=256)
     args = parser.parse_args()
+    if args.batch_size < 1:
+        raise ValueError(f"--batch-size must be positive; got {args.batch_size}")
 
     output_dir = ensure_dir(Path(args.output_dir))
     turns = load_turns(Path(args.results_dir))
+    if turns.empty:
+        turns["query_question_semantic_similarity"] = pd.Series(dtype=float)
+        turns["query_semantic_change"] = pd.Series(dtype=float)
+        turns["subset"] = pd.Series(dtype=str)
+        turns.to_csv(output_dir / "query_turns.csv", index=False)
+        pd.DataFrame(columns=[*GROUP_COLUMNS, *METRIC_COLUMNS]).to_csv(
+            output_dir / "query_turn_summary.csv", index=False
+        )
+        pd.DataFrame(columns=GROUP_COLUMNS[:-1]).to_csv(
+            output_dir / "query_shift_by_turn.csv", index=False
+        )
+        print(
+            "No search turns were emitted; wrote empty hard-RQ0 query-analysis tables."
+        )
+        return
+
+    from sentence_transformers import SentenceTransformer
+
     encoder = SentenceTransformer(args.model, device=args.device)
     questions = encoder.encode(
         turns["question"].tolist(),
@@ -141,31 +216,8 @@ def main() -> None:
     )
 
     turns.to_csv(output_dir / "query_turns.csv", index=False)
-    metric_columns = [
-        "query_token_count",
-        "query_question_overlap",
-        "query_question_semantic_similarity",
-        "query_has_quotes",
-        "query_capitalized_ratio",
-        "query_numeric_ratio",
-        "query_lexical_change",
-        "query_semantic_change",
-        "support_recall",
-        "evidence_gain",
-    ]
     summary = (
-        turns.groupby(
-            [
-                "subset",
-                "policy_tag",
-                "seed",
-                "dataset",
-                "backend",
-                "topk",
-                "turn",
-            ],
-            as_index=False,
-        )[metric_columns]
+        turns.groupby(GROUP_COLUMNS, as_index=False)[METRIC_COLUMNS]
         .mean()
         .sort_values(
             ["subset", "dataset", "topk", "policy_tag", "backend", "seed", "turn"]
@@ -176,21 +228,11 @@ def main() -> None:
     turn_pivot = summary.pivot_table(
         index=["subset", "policy_tag", "seed", "dataset", "backend", "topk"],
         columns="turn",
-        values=[
-            "query_question_semantic_similarity",
-            "query_has_quotes",
-            "query_capitalized_ratio",
-            "query_lexical_change",
-            "query_semantic_change",
-        ],
+        values=SHIFT_METRICS,
         aggfunc="mean",
     )
-    turn_pivot.columns = [
-        f"{metric}_turn{turn}" for metric, turn in turn_pivot.columns
-    ]
-    turn_pivot.reset_index().to_csv(
-        output_dir / "query_shift_by_turn.csv", index=False
-    )
+    turn_pivot.columns = [f"{metric}_turn{turn}" for metric, turn in turn_pivot.columns]
+    turn_pivot.reset_index().to_csv(output_dir / "query_shift_by_turn.csv", index=False)
     print(summary.round(4).to_string(index=False))
 
 

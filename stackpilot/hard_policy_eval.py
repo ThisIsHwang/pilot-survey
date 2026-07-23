@@ -6,6 +6,7 @@ import json
 import os
 import re
 import unicodedata
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,17 +24,33 @@ from stackpilot.common import (
     read_jsonl,
     read_jsonl_tolerant,
 )
-from stackpilot.react_agent_eval import SYSTEM_PROMPT, format_results, parse_action
+from stackpilot.hard_assets import EXPECTED_DOCUMENTS
+from stackpilot.hard_rq0_contract import (
+    METRICS,
+    RESULT_SCHEMA,
+    episode_validation_error,
+    finite_number,
+    validate_policy_seed,
+    validate_policy_selection,
+)
+from stackpilot.prepare_hard_rq0 import DATA_MANIFEST_NAME, DATA_PREP_SCHEMA
+from stackpilot.react_agent_eval import (
+    SYSTEM_PROMPT,
+    file_digest,
+    format_results,
+    model_identity,
+    parse_action,
+)
 from stackpilot.retrieval_clients import RetrievalClient
 from stackpilot.service_checks import check_vllm, effective_model_name
 
-RESULT_SCHEMA = 2
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
+ASSET_MANIFEST_NAME = ".hard-rq0-assets-manifest.json"
 
 
 def normalize_title(value: str) -> str:
     text = unicodedata.normalize("NFKC", str(value)).replace("_", " ").strip()
-    text = text.strip('"\'')
+    text = text.strip("\"'")
     return " ".join(text.lower().split())
 
 
@@ -41,7 +58,9 @@ def token_set(value: str) -> set[str]:
     return {token.lower() for token in TOKEN_RE.findall(value)}
 
 
-def query_features(question: str, query: str, previous_query: str | None) -> dict[str, float]:
+def query_features(
+    question: str, query: str, previous_query: str | None
+) -> dict[str, float]:
     tokens = TOKEN_RE.findall(query)
     question_tokens = token_set(question)
     query_tokens = {token.lower() for token in tokens}
@@ -49,7 +68,9 @@ def query_features(question: str, query: str, previous_query: str | None) -> dic
     overlap = len(question_tokens & query_tokens) / max(1, len(question_tokens))
     change = 1.0
     if previous_query is not None:
-        change = 1.0 - len(query_tokens & previous_tokens) / max(1, len(query_tokens | previous_tokens))
+        change = 1.0 - len(query_tokens & previous_tokens) / max(
+            1, len(query_tokens | previous_tokens)
+        )
     return {
         "query_token_count": float(len(tokens)),
         "query_question_overlap": float(overlap),
@@ -65,48 +86,192 @@ def query_features(question: str, query: str, previous_query: str | None) -> dic
     }
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def signature(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def model_identity(cfg: dict[str, Any]) -> dict[str, Any]:
-    model_path = os.environ.get("MODEL_PATH") or os.environ.get("MODEL") or cfg["llm"]["model"]
-    identity: dict[str, Any] = {
-        "model_path": str(model_path),
-        "served_model_name": effective_model_name(cfg),
+def require_json_manifest(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file():
+        raise RuntimeError(f"Missing {label} manifest: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid {label} manifest: {path}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"{label} manifest must contain a JSON object: {path}")
+    return payload
+
+
+def evaluation_context(
+    cfg: dict[str, Any],
+    data_file: Path,
+    rows: list[dict[str, Any]],
+    backends: list[str] | tuple[str, ...],
+    topks: list[int] | tuple[int, ...],
+    retriever_identities: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    data_manifest_path = data_file.parent / DATA_MANIFEST_NAME
+    data_manifest = require_json_manifest(data_manifest_path, "hard-RQ0 data")
+    if data_manifest.get("schema") != DATA_PREP_SCHEMA:
+        raise RuntimeError(
+            f"Expected hard-RQ0 data manifest schema {DATA_PREP_SCHEMA}: "
+            f"{data_manifest_path}"
+        )
+    expected_data_file = data_file.parent / "eval_all.jsonl"
+    if data_file != expected_data_file.resolve():
+        raise RuntimeError(
+            f"Hard-RQ0 evaluation must use the manifested eval_all.jsonl: {expected_data_file}"
+        )
+    data_record = (data_manifest.get("artifacts") or {}).get("data/eval_all.jsonl")
+    if not isinstance(data_record, dict):
+        raise RuntimeError(
+            f"Data manifest does not describe data/eval_all.jsonl: {data_manifest_path}"
+        )
+    data_sha256 = file_digest(data_file)
+    if (
+        data_record.get("size") != data_file.stat().st_size
+        or data_record.get("sha256") != data_sha256
+    ):
+        raise RuntimeError(
+            f"Evaluation data does not match its manifest; rerun hard_rq0/prepare_data.sh: "
+            f"{data_file}"
+        )
+
+    asset_root = (
+        Path(os.environ.get("HARD_ASSET_ROOT") or cfg["assets"]["root"])
+        .expanduser()
+        .resolve()
+    )
+    asset_manifest_path = asset_root / ASSET_MANIFEST_NAME
+    require_json_manifest(asset_manifest_path, "hard-RQ0 asset")
+    evaluator_names = (
+        "common.py",
+        "hard_policy_eval.py",
+        "hard_rq0_contract.py",
+        "react_agent_eval.py",
+        "retrieval_clients.py",
+        "service_checks.py",
+    )
+    return {
+        "schema": RESULT_SCHEMA,
+        "data": {
+            "path": str(data_file),
+            "sha256": data_sha256,
+            "manifest_path": str(data_manifest_path.resolve()),
+            "manifest_sha256": file_digest(data_manifest_path),
+        },
+        "assets": {
+            "root": str(asset_root),
+            "manifest_path": str(asset_manifest_path),
+            "manifest_sha256": file_digest(asset_manifest_path),
+        },
+        "evaluator_files": {
+            name: file_digest(Path(__file__).with_name(name))
+            for name in evaluator_names
+        },
+        "question_ids": [str(row["id"]) for row in rows],
+        "backends": sorted(backends),
+        "topks": sorted(topks),
+        "retrievers": {
+            backend: retriever_identities[backend]
+            for backend in sorted(backends)
+            if retriever_identities is not None
+        },
+        "protocol": {
+            "request_seed_strategy": "sha256(policy-seed,question-id,backend,topk,attempt)",
+            "retrieval_model": cfg["retrieval"].get("e5_model"),
+            "retrieval_model_revision": cfg["retrieval"].get("e5_model_revision"),
+            "agent": cfg["agent"],
+            "llm_generation": {
+                "temperature": cfg["llm"]["temperature"],
+                "max_tokens": cfg["llm"]["max_tokens"],
+            },
+        },
     }
-    path = Path(str(model_path)).expanduser()
-    if path.is_dir():
-        identity["resolved_model_path"] = str(path.resolve())
-        config_path = path / "config.json"
-        if config_path.is_file():
-            identity["config_sha256"] = file_sha256(config_path)
-    return identity
 
 
-def run_signature(cfg: dict[str, Any], data_file: Path, tag: str, seed: int) -> str:
+def run_signature(
+    cfg: dict[str, Any],
+    evaluation_signature: str,
+    tag: str,
+    seed: int,
+) -> str:
     payload = {
         "schema": RESULT_SCHEMA,
         "config": cfg,
-        "data_sha256": file_sha256(data_file),
+        "evaluation_signature": evaluation_signature,
         "tag": tag,
         "seed": seed,
         "model": model_identity(cfg),
     }
-    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return signature(payload)
 
 
-def check_retriever(name: str, port: int) -> None:
+def check_retriever(
+    name: str, port: int, expected_index: Path, expected_corpus: Path
+) -> dict[str, str | bool | int]:
     response = requests.get(f"http://127.0.0.1:{port}/health", timeout=10)
     response.raise_for_status()
     payload = response.json()
     if payload.get("status") != "ok" or payload.get("backend") != name:
         raise RuntimeError(f"Unexpected {name} health response: {payload}")
+    actual_index = Path(str(payload.get("index_path", ""))).resolve()
+    if actual_index != expected_index.resolve():
+        raise RuntimeError(
+            f"{name} retriever uses {actual_index}, expected {expected_index.resolve()}"
+        )
+    actual_corpus = Path(str(payload.get("corpus_path", ""))).resolve()
+    if actual_corpus != expected_corpus.resolve():
+        raise RuntimeError(
+            f"{name} retriever uses {actual_corpus}, expected {expected_corpus.resolve()}"
+        )
+    index_documents = int(payload.get("index_documents", -1))
+    corpus_documents = int(payload.get("corpus_documents", -1))
+    if index_documents != EXPECTED_DOCUMENTS:
+        raise RuntimeError(
+            f"{name} index has {index_documents:,} documents, "
+            f"expected {EXPECTED_DOCUMENTS:,}"
+        )
+    if corpus_documents != EXPECTED_DOCUMENTS:
+        raise RuntimeError(
+            f"{name} corpus has {corpus_documents:,} documents, "
+            f"expected {EXPECTED_DOCUMENTS:,}"
+        )
+    identity: dict[str, str | bool | int] = {
+        "backend": name,
+        "index_path": str(actual_index),
+        "corpus_path": str(actual_corpus),
+        "index_documents": index_documents,
+        "corpus_documents": corpus_documents,
+    }
+    if name == "e5":
+        if (
+            payload.get("faiss_gpu") is not True
+            or int(payload.get("faiss_gpu_count", 0)) != 1
+        ):
+            raise RuntimeError(f"E5 retriever is not using one FAISS GPU: {payload}")
+        retriever_model = str(payload.get("retriever_model", "")).strip()
+        retriever_model_revision = str(
+            payload.get("retriever_model_revision", "")
+        ).strip()
+        if not retriever_model or not retriever_model_revision:
+            raise RuntimeError(
+                "E5 health response does not identify the loaded retriever model "
+                "and immutable revision: "
+                f"{payload}"
+            )
+        identity.update(
+            {
+                "retriever_model": retriever_model,
+                "retriever_model_revision": retriever_model_revision,
+                "faiss_gpu": payload.get("faiss_gpu") is True,
+                "faiss_gpu_count": int(payload.get("faiss_gpu_count", 0)),
+            }
+        )
+    return identity
 
 
 def complete(
@@ -133,7 +298,13 @@ def best_answer_scores(prediction: str, answers: list[str]) -> tuple[float, floa
     )
 
 
-def value_at(values: list[float], index: int) -> float:
+def recall_at(values: list[float], index: int) -> float:
+    if not values:
+        return 0.0
+    return values[index] if len(values) > index else values[-1]
+
+
+def gain_at(values: list[float], index: int) -> float:
     return values[index] if len(values) > index else 0.0
 
 
@@ -190,7 +361,9 @@ def run_episode(
         matched = gold_titles & cumulative_titles
         recall = len(matched) / max(1, len(gold_titles))
         gain = recall - previous_recall
-        new_support = sorted((gold_titles & normalized_retrieved) - previously_seen_titles)
+        new_support = sorted(
+            (gold_titles & normalized_retrieved) - previously_seen_titles
+        )
         turn_records.append(
             {
                 "turn": len(searches),
@@ -228,11 +401,11 @@ def run_episode(
     em, f1 = best_answer_scores(prediction, answers)
     recalls = [float(record["support_recall"]) for record in turn_records]
     gains = [float(record["evidence_gain"]) for record in turn_records]
-    turn1_recall = value_at(recalls, 0)
-    turn2_recall = value_at(recalls, 1)
-    turn3_recall = value_at(recalls, 2)
-    turn2_gain = value_at(gains, 1)
-    turn3_gain = value_at(gains, 2)
+    turn1_recall = recall_at(recalls, 0)
+    turn2_recall = recall_at(recalls, 1)
+    turn3_recall = recall_at(recalls, 2)
+    turn2_gain = gain_at(gains, 1)
+    turn3_gain = gain_at(gains, 2)
     final_recall = recalls[-1] if recalls else 0.0
     first_miss = turn1_recall < 1.0
     return {
@@ -261,6 +434,157 @@ def run_episode(
     }
 
 
+def validate_data_rows(rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        raise RuntimeError("Hard-RQ0 evaluation data is empty")
+    required = {"id", "question", "dataset", "answers", "support_titles"}
+    identifiers: list[str] = []
+    for index, row in enumerate(rows):
+        missing = required - set(row)
+        if missing:
+            raise RuntimeError(
+                f"Hard-RQ0 evaluation row {index} is missing fields: {sorted(missing)}"
+            )
+        identifier = str(row["id"]).strip()
+        if not identifier:
+            raise RuntimeError(f"Hard-RQ0 evaluation row {index} has an empty ID")
+        identifiers.append(identifier)
+        if not str(row["question"]).strip() or not str(row["dataset"]).strip():
+            raise RuntimeError(
+                f"Hard-RQ0 evaluation row {identifier!r} has an empty question or dataset"
+            )
+        answers = row["answers"]
+        support_titles = row["support_titles"]
+        if not isinstance(answers, list) or not any(
+            str(value).strip() for value in answers
+        ):
+            raise RuntimeError(
+                f"Hard-RQ0 evaluation row {identifier!r} has no usable answers"
+            )
+        if not isinstance(support_titles, list) or not any(
+            str(value).strip() for value in support_titles
+        ):
+            raise RuntimeError(
+                f"Hard-RQ0 evaluation row {identifier!r} has no supporting titles"
+            )
+    if len(set(identifiers)) != len(identifiers):
+        raise RuntimeError("Hard-RQ0 evaluation question IDs must be unique")
+
+
+def balanced_limit(
+    rows: list[dict[str, Any]], limit: int | None
+) -> list[dict[str, Any]]:
+    if limit is None or limit >= len(rows):
+        return list(rows)
+    dataset_order: list[str] = []
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        dataset = str(row["dataset"])
+        if dataset not in buckets:
+            dataset_order.append(dataset)
+            buckets[dataset] = []
+        buckets[dataset].append(row)
+    selected: list[dict[str, Any]] = []
+    offset = 0
+    while len(selected) < limit:
+        made_progress = False
+        for dataset in dataset_order:
+            bucket = buckets[dataset]
+            if offset < len(bucket):
+                selected.append(bucket[offset])
+                made_progress = True
+                if len(selected) == limit:
+                    break
+        if not made_progress:
+            break
+        offset += 1
+    return selected
+
+
+def result_key(row: dict[str, Any]) -> tuple[str, str, int] | None:
+    try:
+        return (
+            str(row["question_id"]),
+            str(row["backend"]),
+            int(row["topk"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def prepare_result_cache(
+    output_path: Path,
+    existing: list[dict[str, Any]],
+    expected_keys: set[tuple[str, str, int]],
+    expected_datasets: dict[str, str],
+    run_id: str,
+    evaluation_id: str,
+    tag: str,
+    seed: int,
+    max_search_turns: int = 4,
+) -> dict[tuple[str, str, int], dict[str, Any]]:
+    current: dict[tuple[str, str, int], dict[str, Any]] = {}
+    archived: list[dict[str, Any]] = []
+    for row in existing:
+        key = result_key(row)
+        bounded_metrics = all(
+            finite_number(row.get(metric)) and 0.0 <= float(row[metric]) <= 1.0
+            for metric in METRICS
+        )
+        search_count = row.get("search_count")
+        valid_search_count = (
+            finite_number(search_count)
+            and float(search_count).is_integer()
+            and 0 <= float(search_count) <= max_search_turns
+        )
+        valid_episode = episode_validation_error(row, max_search_turns) is None
+        matches = (
+            key in expected_keys
+            and row.get("schema") == RESULT_SCHEMA
+            and row.get("run_signature") == run_id
+            and row.get("evaluation_signature") == evaluation_id
+            and row.get("policy_tag") == tag
+            and row.get("seed") == seed
+            and str(row.get("dataset", ""))
+            == expected_datasets.get(str(row.get("question_id", "")))
+            and bounded_metrics
+            and valid_search_count
+            and valid_episode
+        )
+        if not matches or key is None:
+            archived.append(row)
+            continue
+        if key in current:
+            archived.append(current[key])
+        current[key] = row
+
+    if archived:
+        archive_dir = output_path.parent / "archive"
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        archive_path = archive_dir / (
+            f"{output_path.stem}.stale-{timestamp}-{run_id[:12]}.jsonl"
+        )
+        atomic_write_jsonl(archive_path, archived)
+        print(f"Archived {len(archived)} stale result rows: {archive_path}")
+    if existing:
+        atomic_write_jsonl(output_path, list(current.values()))
+    return current
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", default="configs/hard_rq0.yaml")
@@ -268,7 +592,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tag", required=True)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--backends", nargs="+", choices=("bm25", "e5"), default=("bm25", "e5"))
+    parser.add_argument(
+        "--backends", nargs="+", choices=("bm25", "e5"), default=("bm25", "e5")
+    )
     parser.add_argument("--topks", nargs="+", type=int, default=None)
     return parser.parse_args()
 
@@ -276,25 +602,74 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     cfg = load_config(args.config)
-    check_vllm(cfg)
     retrieval_cfg = cfg["retrieval"]
-    ports = {"bm25": int(retrieval_cfg["bm25_port"]), "e5": int(retrieval_cfg["e5_port"])}
-    for backend in args.backends:
-        check_retriever(backend, ports[backend])
+    topks = list(args.topks or [int(value) for value in retrieval_cfg["topks"]])
+    backends = list(args.backends)
+    validate_policy_selection(args.tag, args.limit, backends, topks)
+    validate_policy_seed(args.tag, args.seed, cfg["training"]["seeds"])
 
     data_file = Path(args.data_file).resolve()
-    rows = read_jsonl(data_file)
-    if args.limit is not None:
-        rows = rows[: args.limit]
-    topks = args.topks or [int(value) for value in retrieval_cfg["topks"]]
+    if not data_file.is_file():
+        raise RuntimeError(f"Hard-RQ0 evaluation data is missing: {data_file}")
+    all_rows = read_jsonl(data_file)
+    validate_data_rows(all_rows)
+    rows = balanced_limit(all_rows, args.limit)
+    if not rows:
+        raise RuntimeError("The selected hard-RQ0 evaluation set is empty")
+
+    ports = {
+        "bm25": int(retrieval_cfg["bm25_port"]),
+        "e5": int(retrieval_cfg["e5_port"]),
+    }
+    asset_root = (
+        Path(os.environ.get("HARD_ASSET_ROOT") or cfg["assets"]["root"])
+        .expanduser()
+        .resolve()
+    )
+    expected_indexes = {
+        "bm25": asset_root / "bm25",
+        "e5": asset_root / "e5_Flat.index",
+    }
+    expected_corpus = asset_root / "wiki-18.jsonl"
+    check_vllm(cfg)
+    retriever_identities: dict[str, dict[str, Any]] = {}
+    for backend in backends:
+        retriever_identities[backend] = check_retriever(
+            backend, ports[backend], expected_indexes[backend], expected_corpus
+        )
+
+    context = evaluation_context(
+        cfg, data_file, rows, backends, topks, retriever_identities
+    )
+    evaluation_id = signature(context)
+    run_id = run_signature(cfg, evaluation_id, args.tag, args.seed)
     work_dir = ensure_dir(Path(cfg["work_dir"]).resolve() / "results" / "policies")
     output_path = work_dir / f"{args.tag}-seed{args.seed}.jsonl"
     summary_path = work_dir / f"{args.tag}-seed{args.seed}_summary.csv"
-    signature = run_signature(cfg, data_file, args.tag, args.seed)
+
+    expected_keys = {
+        (str(item["id"]), backend, int(topk))
+        for item in rows
+        for backend in backends
+        for topk in topks
+    }
+    expected_datasets = {str(item["id"]): str(item["dataset"]) for item in rows}
+    existing = read_jsonl_tolerant(output_path)
+    row_by_key = prepare_result_cache(
+        output_path,
+        existing,
+        expected_keys,
+        expected_datasets,
+        run_id,
+        evaluation_id,
+        args.tag,
+        args.seed,
+        int(cfg["agent"]["max_search_turns"]),
+    )
 
     clients = {
         backend: RetrievalClient(backend, f"http://127.0.0.1:{ports[backend]}/retrieve")
-        for backend in args.backends
+        for backend in backends
     }
     client = OpenAI(
         base_url=cfg["llm"]["api_base"],
@@ -304,20 +679,10 @@ def main() -> None:
     )
     model = effective_model_name(cfg)
 
-    selected_ids = {str(row["id"]) for row in rows}
-    existing = read_jsonl_tolerant(output_path)
-    row_by_key = {
-        (str(row.get("question_id")), str(row.get("backend")), int(row.get("topk", -1))): row
-        for row in existing
-        if row.get("schema") == RESULT_SCHEMA
-        and row.get("run_signature") == signature
-        and str(row.get("question_id")) in selected_ids
-    }
-
-    total = len(rows) * len(args.backends) * len(topks)
+    total = len(expected_keys)
     progress = tqdm(total=total, desc=f"hard RQ0 eval: {args.tag}/seed{args.seed}")
     for item in rows:
-        for backend in args.backends:
+        for backend in backends:
             for topk in topks:
                 key = (str(item["id"]), backend, int(topk))
                 if key not in row_by_key:
@@ -333,7 +698,8 @@ def main() -> None:
                     result.update(
                         {
                             "schema": RESULT_SCHEMA,
-                            "run_signature": signature,
+                            "run_signature": run_id,
+                            "evaluation_signature": evaluation_id,
                             "policy_tag": args.tag,
                             "seed": args.seed,
                             "served_model": model,
@@ -344,26 +710,40 @@ def main() -> None:
                 progress.update(1)
     progress.close()
 
-    frame = pd.DataFrame(list(row_by_key.values()))
-    metrics = [
-        "em",
-        "f1",
-        "support_recall",
-        "turn1_support_recall",
-        "turn2_support_recall",
-        "turn3_support_recall",
-        "turn2_evidence_gain",
-        "turn3_evidence_gain",
-        "recovery_at_2",
-        "recovery_at_3",
-        "full_recovery_at_2",
-        "full_recovery_at_3",
-        "search_count",
+    actual_keys = set(row_by_key)
+    if actual_keys != expected_keys or len(row_by_key) != total:
+        missing = sorted(expected_keys - actual_keys)[:10]
+        extra = sorted(actual_keys - expected_keys)[:10]
+        raise RuntimeError(
+            f"Expected exactly {total} hard-RQ0 rows, found {len(row_by_key)}; "
+            f"missing={missing}, extra={extra}"
+        )
+    ordered_rows = [
+        row_by_key[(str(item["id"]), backend, int(topk))]
+        for item in rows
+        for backend in backends
+        for topk in topks
     ]
-    summary = frame.groupby(["dataset", "backend", "topk"])[metrics].mean().reset_index()
+    atomic_write_jsonl(output_path, ordered_rows)
+
+    frame = pd.DataFrame(ordered_rows)
+    summary_groups = ["dataset", "backend", "topk"]
+    summary = (
+        frame.groupby(summary_groups)[[*METRICS, "search_count"]].mean().reset_index()
+    )
+    question_counts = (
+        frame.groupby(summary_groups)["question_id"]
+        .nunique()
+        .rename("n_questions")
+        .reset_index()
+    )
+    summary = summary.merge(
+        question_counts, on=summary_groups, how="inner", validate="one_to_one"
+    )
     summary.insert(0, "policy_tag", args.tag)
     summary.insert(1, "seed", args.seed)
-    summary.insert(2, "run_signature", signature)
+    summary.insert(2, "run_signature", run_id)
+    summary.insert(3, "evaluation_signature", evaluation_id)
     summary.to_csv(summary_path, index=False)
     print(summary.round(4).to_string(index=False))
     print(f"Raw results: {output_path}")

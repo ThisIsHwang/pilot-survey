@@ -38,7 +38,8 @@ SMOKE_ONLY=${SMOKE_ONLY:-0}
 export HF_HOME=${HF_HOME:-$ROOT/.cache/huggingface}
 # Model roles above are explicit. Clear stale serving/offline variables so
 # index/model downloads cannot inherit a previous manual Stage-0 launch.
-unset MODEL MODEL_PATH MODEL_LOCAL_ONLY MODEL_REVISION SERVED_MODEL_NAME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+unset MODEL MODEL_PATH MODEL_LOCAL_ONLY MODEL_REVISION SERVED_MODEL_NAME \
+  HF_HUB_OFFLINE TRANSFORMERS_OFFLINE RQ0_SEED
 
 if [[ ! "$POLICY_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
   echo "POLICY_LIMIT must be a positive integer; got '$POLICY_LIMIT'." >&2
@@ -75,6 +76,15 @@ if [[ ${SKIP_BOOTSTRAP:-0} != 1 ]]; then
   bash "$ROOT/scripts/bootstrap_vllm.sh"
   bash "$ROOT/scripts/bootstrap_searchr1.sh"
 fi
+
+# Stabilize the upstream-tree fingerprint before any Stage-2 checkpoint
+# signature is computed. The hook is inert unless hard-RQ0 sets RQ0_SEED.
+[[ -x "$ROOT/.venv-searchr1/bin/python" ]] || {
+  echo "Missing .venv-searchr1; run bash scripts/bootstrap_searchr1.sh." >&2
+  exit 1
+}
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
 
 bash "$ROOT/scripts/preflight.sh"
 bash "$ROOT/scripts/preflight_searchr1.sh"

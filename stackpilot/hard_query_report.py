@@ -25,10 +25,18 @@ def markdown_table(frame: pd.DataFrame) -> str:
     for column in display.select_dtypes(include=["number"]).columns:
         display[column] = display[column].map(lambda value: f"{float(value):.4f}")
     headers = list(display.columns)
-    rows = [[str(value) for value in row] for row in display.itertuples(index=False, name=None)]
-    widths = [max(len(str(headers[i])), *(len(row[i]) for row in rows)) for i in range(len(headers))]
+    rows = [
+        [str(value) for value in row]
+        for row in display.itertuples(index=False, name=None)
+    ]
+    widths = [
+        max(len(str(headers[i])), *(len(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
     lines = [
-        "| " + " | ".join(str(headers[i]).ljust(widths[i]) for i in range(len(headers))) + " |",
+        "| "
+        + " | ".join(str(headers[i]).ljust(widths[i]) for i in range(len(headers)))
+        + " |",
         "| " + " | ".join("-" * widths[i] for i in range(len(headers))) + " |",
     ]
     lines.extend(
@@ -44,7 +52,25 @@ def main() -> None:
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    summary = pd.read_csv(args.summary)
+    required = {
+        "subset",
+        "policy_tag",
+        "seed",
+        "dataset",
+        "backend",
+        "topk",
+        "turn",
+        *STYLE_METRICS,
+    }
+    try:
+        summary = pd.read_csv(args.summary)
+    except pd.errors.EmptyDataError:
+        summary = pd.DataFrame(columns=sorted(required))
+    missing = required - set(summary.columns)
+    if missing:
+        raise RuntimeError(
+            f"Query summary is missing required columns: {sorted(missing)}"
+        )
     matched = summary[
         (summary["subset"] == "matched-hard")
         & summary["policy_tag"].isin(SPECIALISTS)

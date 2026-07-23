@@ -18,10 +18,14 @@ fi
 export HF_HOME=${HF_HOME:-$ROOT/.cache/huggingface}
 
 RUN_STAGE0=${RUN_STAGE0:-1}
-if [[ "$RUN_STAGE0" != 0 && "$RUN_STAGE0" != 1 ]]; then
-  echo "RUN_STAGE0 must be 0 or 1; got '$RUN_STAGE0'." >&2
-  exit 2
-fi
+RUN_HARD_RQ0=${RUN_HARD_RQ0:-1}
+for flag_name in RUN_STAGE0 RUN_HARD_RQ0; do
+  flag_value=${!flag_name}
+  if [[ "$flag_value" != 0 && "$flag_value" != 1 ]]; then
+    echo "$flag_name must be 0 or 1; got '$flag_value'." >&2
+    exit 2
+  fi
+done
 if [[ -z "$STAGE0_MODEL_REF" ]]; then
   echo "STAGE0_MODEL_REF must not be empty." >&2
   exit 2
@@ -31,6 +35,7 @@ cleanup() {
   local status=$?
   trap - EXIT INT TERM
   "$ROOT/.venv-searchr1/bin/ray" stop --force >/dev/null 2>&1 || true
+  bash "$ROOT/hard_rq0/stop_retrievers.sh" || true
   bash "$ROOT/scripts/stop_servers.sh" || true
   exit "$status"
 }
@@ -39,6 +44,7 @@ trap cleanup EXIT INT TERM
 # An interrupted run can leave processes importing these virtual environments
 # or holding GPUs. Stop them before any bootstrap recreates an environment.
 "$ROOT/.venv-searchr1/bin/ray" stop --force >/dev/null 2>&1 || true
+bash "$ROOT/hard_rq0/stop_retrievers.sh" || true
 bash "$ROOT/scripts/stop_servers.sh" || true
 
 if [[ ${SKIP_BOOTSTRAP:-0} != 1 ]]; then
@@ -65,8 +71,48 @@ fi
   unset MODEL MODEL_PATH MODEL_LOCAL_ONLY MODEL_REVISION SERVED_MODEL_NAME HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
   SKIP_BOOTSTRAP=1 bash "$ROOT/searchr1_stage2/run_all.sh"
 )
-if [[ "$RUN_STAGE0" == 1 ]]; then
-  echo "Full Stage-0 + Stage-2 pipeline completed."
-else
-  echo "Stage-2 pipeline completed (RUN_STAGE0=0)."
+if [[ "$RUN_HARD_RQ0" == 1 ]]; then
+  (
+    unset MODEL MODEL_PATH MODEL_LOCAL_ONLY MODEL_REVISION SERVED_MODEL_NAME \
+      BASE_MODEL_REF BASE_MODEL_PATH BASE_MODEL_REVISION \
+      HF_HUB_OFFLINE TRANSFORMERS_OFFLINE
+    hard_env=("SKIP_BOOTSTRAP=1")
+    if [[ -n ${HARD_BASE_MODEL_REF:-} ]]; then
+      hard_env+=("BASE_MODEL_REF=$HARD_BASE_MODEL_REF")
+      if [[ -n ${HARD_BASE_MODEL_REVISION:-} ]]; then
+        hard_env+=("BASE_MODEL_REVISION=$HARD_BASE_MODEL_REVISION")
+      fi
+    elif [[ -n ${TRAIN_BASE_MODEL:-} ]]; then
+      hard_env+=("BASE_MODEL_REF=$TRAIN_BASE_MODEL")
+      if [[ -n ${HARD_BASE_MODEL_REVISION:-} ]]; then
+        hard_env+=("BASE_MODEL_REVISION=$HARD_BASE_MODEL_REVISION")
+      elif [[ -n ${TRAIN_BASE_MODEL_REVISION:-} ]]; then
+        hard_env+=("BASE_MODEL_REVISION=$TRAIN_BASE_MODEL_REVISION")
+      fi
+    elif [[ -n ${HARD_BASE_MODEL_REVISION:-} ]]; then
+      hard_env+=("BASE_MODEL_REVISION=$HARD_BASE_MODEL_REVISION")
+    fi
+    if [[ ${SMOKE_ONLY:-0} == 1 ]]; then
+      hard_env+=(
+        "PROFILE=${HARD_PROFILE:-smoke}"
+        "RESULT_SET=${HARD_RESULT_SET:-smoke}"
+        "SEEDS=${HARD_SEEDS:-13}"
+        "LIMIT=${HARD_LIMIT:-20}"
+        "RUN_REPORT=0"
+      )
+    else
+      hard_env+=(
+        "PROFILE=${HARD_PROFILE:-pilot}"
+        "RESULT_SET=${HARD_RESULT_SET:-pilot}"
+        "SEEDS=${HARD_SEEDS:-13 42 87}"
+      )
+      if [[ -n ${HARD_LIMIT:-} ]]; then hard_env+=("LIMIT=$HARD_LIMIT"); fi
+    fi
+    env "${hard_env[@]}" bash "$ROOT/hard_rq0/run_all.sh"
+  )
 fi
+
+completed="Stage-2"
+if [[ "$RUN_STAGE0" == 1 ]]; then completed="Stage-0 + $completed"; fi
+if [[ "$RUN_HARD_RQ0" == 1 ]]; then completed="$completed + hard-RQ0"; fi
+echo "$completed pipeline completed."

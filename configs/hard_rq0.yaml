@@ -14,6 +14,7 @@ retrieval:
   bm25_port: 8101
   e5_port: 8102
   e5_model: intfloat/e5-base-v2
+  e5_model_revision: f52bf8ec8c7124536f0efb74aca902b2995e5bcd
 
 llm:
   model: Qwen/Qwen2.5-3B-Instruct
@@ -28,6 +29,7 @@ agent:
 
 data:
   repo_id: RUC-NLPIR/FlashRAG_datasets
+  revision: bcafb8dd07d453be3cbeeeb3f78be1841bddf92c
   datasets: [2wikimultihopqa, musique]
   train_examples_per_dataset: 5000
   eval_examples_per_dataset: 500

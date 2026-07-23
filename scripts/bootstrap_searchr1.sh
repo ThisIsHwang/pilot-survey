@@ -77,6 +77,12 @@ else
   exit 1
 fi
 
+# Apply the hard-RQ0 rollout-seed hook before any Stage-2 signature is computed.
+# With RQ0_SEED unset it preserves Stage-2's original seed=0 behavior, while
+# keeping the upstream dirty-tree fingerprint stable across full-pipeline reruns.
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$SEARCH_R1"
+
 source "$ROOT/scripts/lib/bootstrap_uv.sh"
 ensure_uv "$ROOT"
 "$UV_BIN" venv --clear --no-project --python "$PYTHON_BASE" .venv-searchr1
