@@ -3,6 +3,11 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+try:
+    from hard_rq0.patch_searchr1_experiment_env import patch as patch_experiment_env
+except ModuleNotFoundError:  # direct `python hard_rq0/...py` execution
+    from patch_searchr1_experiment_env import patch as patch_experiment_env
+
 MARKER = "# STACKPILOT_EVIDENCE_REWARD_V1"
 
 
@@ -14,18 +19,29 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def patch(search_r1_root: Path) -> None:
+    patch_experiment_env(search_r1_root)
     target = search_r1_root / "verl" / "trainer" / "main_ppo.py"
     text = target.read_text(encoding="utf-8")
     if MARKER in text:
         print(f"Evidence reward patch already present: {target}")
         return
 
-    text = replace_once(
-        text,
-        "import re\nimport numpy as np\n",
-        "import re\nimport numpy as np\nimport os\nimport unicodedata\n",
-        "reward imports",
-    )
+    if "import os\n" not in text:
+        text = replace_once(
+            text,
+            "import re\nimport numpy as np\n",
+            "import re\nimport numpy as np\nimport os\n",
+            "reward imports",
+        )
+    if "import unicodedata\n" not in text:
+        import_anchor = "import os\n" if "import os\n" in text else "import numpy as np\n"
+        text = replace_once(
+            text,
+            import_anchor,
+            import_anchor + "import unicodedata\n",
+            "unicode import anchor",
+        )
+
     helper_anchor = "\nclass RewardManager():\n"
     helper = '''
 # STACKPILOT_EVIDENCE_REWARD_V1
