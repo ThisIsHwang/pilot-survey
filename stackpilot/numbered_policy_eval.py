@@ -71,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bm25-port", type=int, default=8101)
     parser.add_argument("--e5-port", type=int, default=8102)
     parser.add_argument("--hybrid-port", type=int, default=8300)
+    parser.add_argument(
+        "--inject-backend-id",
+        action="store_true",
+        help="prepend the current backend as retrieval_environment metadata",
+    )
     return parser.parse_args()
 
 
@@ -101,6 +106,7 @@ def main() -> None:
                 and row.get("run_id") == args.run_id
                 and row.get("policy_tag") == args.tag
                 and int(row.get("seed", -1)) == args.seed
+                and bool(row.get("backend_id_injected", False)) == args.inject_backend_id
             ):
                 existing[(str(row["question_id"]), str(row["backend"]), int(row["topk"]))] = row
 
@@ -113,15 +119,22 @@ def main() -> None:
                 if key in existing:
                     all_rows.append(existing[key])
                     continue
+                eval_item = dict(item)
+                if args.inject_backend_id:
+                    eval_item["question"] = (
+                        f"<retrieval_environment>{backend}</retrieval_environment>\n"
+                        f"{item['question']}"
+                    )
                 episode = run_episode(
                     client=client,
                     model=args.model,
                     retriever=clients[backend],
-                    item=item,
+                    item=eval_item,
                     cfg=cfg,
                     topk=int(topk),
                     eval_seed=args.seed,
                 )
+                episode["question"] = str(item["question"])
                 episode.update(
                     {
                         "schema": 1,
@@ -129,6 +142,7 @@ def main() -> None:
                         "run_id": args.run_id,
                         "policy_tag": args.tag,
                         "seed": args.seed,
+                        "backend_id_injected": args.inject_backend_id,
                     }
                 )
                 all_rows.append(episode)
