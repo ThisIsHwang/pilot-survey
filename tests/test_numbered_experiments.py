@@ -91,7 +91,45 @@ class NumberedExperimentTests(unittest.TestCase):
         self.assertEqual(len(result), 2)
 
     def test_mixed_patch_is_idempotent_and_compiles(self) -> None:
-        source = '''import os\nimport re\nfrom typing import List, Dict, Any, Tuple\n\nclass Manager:\n    def run_llm_loop(self, gen_batch, initial_input_ids: object) -> Tuple[Dict, Dict]:\n        """Run main LLM generation loop."""\n        \n        original_left_side = {'input_ids': initial_input_ids[:, -self.config.max_start_length:]}\n        return {}, {}\n\n    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:\n        cur_actions, contents = self.postprocess_predictions(predictions)\n        next_obs, dones, valid_action, is_search = [], [], [], []\n        \n        search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']\n        if do_search:\n            search_results = self.batch_search(search_queries)\n            assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])\n        else:\n            search_results = [''] * sum([1 for action in cur_actions if action == 'search'])\n        return next_obs\n\n    def batch_search(self, queries: List[str] = None) -> str:\n        """Batchified search for queries."""\n        results = self._batch_search(queries)['result']\n        return [self._passages2string(result) for result in results]\n\n    def _batch_search(self, queries):\n        payload = {\n            "queries": queries,\n            "topk": self.config.topk,\n            "return_scores": True\n        }\n        return requests.post(self.config.search_url, json=payload).json()\n\n    def _passages2string(self, retrieval_result):\n        return str(retrieval_result)\n'''
+        source = '''import os
+import re
+from typing import List, Dict, Any, Tuple
+
+class Manager:
+    def run_llm_loop(self, gen_batch, initial_input_ids: torch.Tensor) -> Tuple[Dict, Dict]:
+        """Run main LLM generation loop."""
+        
+        original_left_side = {'input_ids': initial_input_ids[:, -self.config.max_start_length:]}
+        return {}, {}
+
+    def execute_predictions(self, predictions: List[str], pad_token: str, active_mask=None, do_search=True) -> List[str]:
+        cur_actions, contents = self.postprocess_predictions(predictions)
+        next_obs, dones, valid_action, is_search = [], [], [], []
+        
+        search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
+        if do_search:
+            search_results = self.batch_search(search_queries)
+            assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
+        else:
+            search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
+        return next_obs
+
+    def batch_search(self, queries: List[str] = None) -> str:
+        """Batchified search for queries."""
+        results = self._batch_search(queries)['result']
+        return [self._passages2string(result) for result in results]
+
+    def _batch_search(self, queries):
+        payload = {
+            "queries": queries,
+            "topk": self.config.topk,
+            "return_scores": True
+        }
+        return requests.post(self.config.search_url, json=payload).json()
+
+    def _passages2string(self, retrieval_result):
+        return str(retrieval_result)
+'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "search_r1" / "llm_agent" / "generation.py"
@@ -107,7 +145,17 @@ class NumberedExperimentTests(unittest.TestCase):
             compile(first, str(target), "exec")
 
     def test_evidence_reward_patch_is_idempotent_and_compiles(self) -> None:
-        source = '''import re\nimport numpy as np\n\nclass RewardManager():\n    def score(self, data_item, sequences_str, ground_truth, reward_tensor, i, valid_response_length):\n        compute_score_fn = lambda **kwargs: 1.0\n        score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)\n\n        reward_tensor[i, valid_response_length - 1] = score\n'''
+        source = '''import re
+import numpy as np
+
+class RewardManager():
+    def score(self, data_item, sequences_str, ground_truth, reward_tensor, i, valid_response_length):
+        compute_score_fn = lambda **kwargs: 1.0
+        if True:
+            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
+
+            reward_tensor[i, valid_response_length - 1] = score
+'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = root / "verl" / "trainer" / "main_ppo.py"
@@ -174,7 +222,7 @@ class NumberedExperimentTests(unittest.TestCase):
         self.assertIn("VARIANT=blind", exp003)
         self.assertIn("INJECT_BACKEND_ID=1", exp004)
         self.assertIn("patch_searchr1_evidence_reward.py", exp005)
-        self.assertIn("BACKENDS=\"hybrid\"", exp006)
+        self.assertIn('BACKENDS="hybrid"', exp006)
 
 
 if __name__ == "__main__":
