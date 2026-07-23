@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "id_format": "EXP-###",
+  "run_id_format": "EXP-###__seed-SSS__profile-NAME__variant-NAME",
+  "experiments": [
+    {
+      "id": "EXP-001",
+      "slug": "rq0-easy-transfer",
+      "status": "completed",
+      "question": "Do BM25-, E5-, and ColBERT-connected agents differ in the original small-corpus HotpotQA pilot?",
+      "entrypoint": "scripts/run_all.sh",
+      "parent": null
+    },
+    {
+      "id": "EXP-002",
+      "slug": "rq0-hard-specialists",
+      "status": "active",
+      "question": "Do BM25 and E5 specialists show home-backend excess gain under full-wiki, low-top-k, multi-turn retrieval?",
+      "entrypoint": "hard_rq0/run_all.sh",
+      "parent": "EXP-001"
+    },
+    {
+      "id": "EXP-003",
+      "slug": "mixed-blind-grpo",
+      "status": "active",
+      "question": "Can one policy trained on episode-stable BM25/E5 mixtures match both specialists without backend metadata?",
+      "entrypoint": "experiments/EXP-003/run.sh",
+      "parent": "EXP-002"
+    },
+    {
+      "id": "EXP-004",
+      "slug": "mixed-backend-id-oracle",
+      "status": "active",
+      "question": "How much does explicit backend metadata improve a shared mixed-backend policy?",
+      "entrypoint": "experiments/EXP-004/run.sh",
+      "parent": "EXP-003"
+    },
+    {
+      "id": "EXP-005",
+      "slug": "evidence-aware-reward",
+      "status": "active",
+      "question": "Does adding terminal supporting-evidence recall to the GRPO reward reveal retriever-specific acquisition behavior hidden by answer-only reward?",
+      "entrypoint": "experiments/EXP-005/run.sh",
+      "parent": "EXP-002"
+    },
+    {
+      "id": "EXP-006",
+      "slug": "heldout-hybrid-rrf",
+      "status": "active",
+      "question": "How do base, specialist, and mixed policies transfer to a held-out BM25+E5 RRF backend?",
+      "entrypoint": "experiments/EXP-006/run.sh",
+      "parent": "EXP-003"
+    }
+  ]
+}
