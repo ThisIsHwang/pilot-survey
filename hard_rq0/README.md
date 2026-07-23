@@ -72,6 +72,22 @@ During evaluation:
 
 Training uses top-k 3. Every policy is evaluated at top-k 3, 5, and 10.
 
+### Search-R1 rollout limits
+
+Specialist training uses the retrieval-context geometry from the pinned
+Search-R1 recipe: a 4096-token prompt limit, 500-token generated responses,
+a 2048-token initial prompt, at most 500 retrieved-content tokens per search,
+four search turns, and top-k 3 retrieval.
+
+The upstream message
+`[WARNING] OBSERVATION TOO LONG, CONSIDER CHANGING YOUR CONFIG, N & 500` is
+expected when any retrieval result in a rollout batch exceeds that budget. The
+pinned implementation concatenates ranked passages and keeps the first 500
+tokens; it does not indicate a failed or stalled training step. Raising the
+limit merely to silence the warning would change the paper-aligned protocol.
+The separate Stage-2 transfer pilot intentionally retains its historical
+top-k-10, three-turn protocol.
+
 ## Manual execution
 
 The remaining sections are for inspecting individual phases. They are not

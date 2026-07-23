@@ -37,6 +37,14 @@ if [[ -z ${E5_MODEL_REVISION:-} ]]; then
 fi
 N_AGENT=${N_AGENT:-4}
 TOPK=${TOPK:-3}
+# Search-R1 Appendix B.2 and the pinned v0.2 GRPO recipe use this rollout
+# geometry. Keep these values explicit so the training signature records the
+# scientific protocol instead of relying only on the wrapper's file hash.
+readonly MAX_PROMPT_LENGTH=4096
+readonly MAX_RESPONSE_LENGTH=500
+readonly MAX_START_LENGTH=2048
+readonly MAX_OBS_LENGTH=500
+readonly MAX_TURNS=4
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-100}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-true}
 LOGGER=${LOGGER:-"['console']"}
@@ -289,7 +297,9 @@ TRAIN_SIGNATURE=$("$SEARCH_R1_PYTHON" - \
   "$TRAIN_DATA" "$VAL_DATA" "$BASE_MODEL" "$BASE_MODEL_REVISION" \
   "$BACKEND" "$SEED" "$PROFILE" "$TRAIN_BATCH" "$VAL_BATCH" \
   "$MINI_BATCH" "$MICRO_BATCH" "$LOG_PROB_MICRO_BATCH" "$N_AGENT" \
-  "$TOPK" "$TOTAL_UPDATES" "$TRAINER_STOP_STEP" "$TOTAL_EPOCHS" \
+  "$TOPK" "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" "$MAX_START_LENGTH" \
+  "$MAX_OBS_LENGTH" "$MAX_TURNS" \
+  "$TOTAL_UPDATES" "$TRAINER_STOP_STEP" "$TOTAL_EPOCHS" \
   "$SAVE_FREQ" "$TEST_FREQ" "$VAL_BEFORE_TRAIN" "$ROLLOUT_GPU_MEMORY" "$ATTENTION_BACKEND" \
   "$TRAIN_GPUS" "$N_GPUS" "$E5_GPU" "$PORT" "$SEARCH_R1_COMMIT" "$SEARCH_R1_DIRTY_SHA" \
   "$RETRIEVER_MODEL" "$E5_MODEL_REVISION" "$RETRIEVER_MODEL_REVISION" \
@@ -318,6 +328,11 @@ from pathlib import Path
     log_prob_micro_batch,
     n_agent,
     topk,
+    max_prompt_length,
+    max_response_length,
+    max_start_length,
+    max_obs_length,
+    max_turns,
     total_updates,
     trainer_stop_step,
     total_epochs,
@@ -410,6 +425,10 @@ payload = {
         "log_prob_micro_batch": int(log_prob_micro_batch),
         "n_agent": int(n_agent),
         "topk": int(topk),
+        "max_prompt_length": int(max_prompt_length),
+        "max_response_length": int(max_response_length),
+        "max_start_length": int(max_start_length),
+        "max_obs_length": int(max_obs_length),
         "total_updates": int(total_updates),
         "trainer_stop_step": int(trainer_stop_step),
         "total_epochs": int(total_epochs),
@@ -422,7 +441,7 @@ payload = {
         "n_gpus": int(n_gpus),
         "e5_gpu": int(e5_gpu),
         "retriever_port": int(port),
-        "max_turns": 4,
+        "max_turns": int(max_turns),
     },
     "search_r1_commit": search_r1_commit,
     "search_r1_dirty_sha256": search_r1_dirty_sha,
@@ -572,10 +591,10 @@ cd "$SEARCH_R1"
   data.val_files="$VAL_DATA" \
   data.train_batch_size="$TRAIN_BATCH" \
   data.val_batch_size="$VAL_BATCH" \
-  data.max_prompt_length=4096 \
-  data.max_response_length=500 \
-  data.max_start_length=2048 \
-  data.max_obs_length=700 \
+  data.max_prompt_length="$MAX_PROMPT_LENGTH" \
+  data.max_response_length="$MAX_RESPONSE_LENGTH" \
+  data.max_start_length="$MAX_START_LENGTH" \
+  data.max_obs_length="$MAX_OBS_LENGTH" \
   data.shuffle_train_dataloader=true \
   algorithm.adv_estimator=grpo \
   actor_rollout_ref.model.path="$BASE_MODEL" \
@@ -613,7 +632,7 @@ cd "$SEARCH_R1"
   trainer.total_training_steps="$TRAINER_STOP_STEP" \
   trainer.default_local_dir="$CHECKPOINT_DIR" \
   trainer.default_hdfs_dir=null \
-  max_turns=4 \
+  max_turns="$MAX_TURNS" \
   retriever.url="http://127.0.0.1:${PORT}/retrieve" \
   retriever.topk="$TOPK" \
   2>&1 | tee "$LOG_FILE"
@@ -625,7 +644,8 @@ completed_checkpoint=$(latest_checkpoint) || {
 "$SEARCH_R1_PYTHON" - \
   "$COMPLETE_MARKER" "$completed_checkpoint" "$EXP" "$BACKEND" "$SEED" \
   "$PROFILE" "$TOTAL_UPDATES" "$TRAINER_STOP_STEP" "$TRAIN_SIGNATURE" \
-  "$BASE_MODEL" "$TOPK" "$SEARCH_R1_COMMIT" <<'PY'
+  "$BASE_MODEL" "$TOPK" "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" \
+  "$MAX_START_LENGTH" "$MAX_OBS_LENGTH" "$MAX_TURNS" "$SEARCH_R1_COMMIT" <<'PY'
 import json
 import os
 import sys
@@ -644,10 +664,15 @@ from pathlib import Path
     signature,
     base_model,
     topk,
+    max_prompt_length,
+    max_response_length,
+    max_start_length,
+    max_obs_length,
+    max_turns,
     search_r1_commit,
 ) = sys.argv[1:]
 payload = {
-    "schema": 1,
+    "schema": 2,
     "experiment": experiment,
     "backend": backend,
     "seed": int(seed),
@@ -658,6 +683,13 @@ payload = {
     "checkpoint": str(Path(checkpoint).resolve()),
     "base_model": str(Path(base_model).resolve()),
     "retrieval_topk": int(topk),
+    "rollout_protocol": {
+        "max_prompt_length": int(max_prompt_length),
+        "max_response_length": int(max_response_length),
+        "max_start_length": int(max_start_length),
+        "max_obs_length": int(max_obs_length),
+        "max_turns": int(max_turns),
+    },
     "search_r1_commit": search_r1_commit,
     "completed_at": datetime.now(timezone.utc).isoformat(),
 }

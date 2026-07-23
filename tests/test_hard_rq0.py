@@ -64,6 +64,36 @@ from stackpilot.validate_hard_results import validate_frame
 
 
 class HardRQ0Tests(unittest.TestCase):
+    def test_specialist_rollout_uses_pinned_searchr1_retrieval_budget(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "hard_rq0" / "train_specialist.sh").read_text(
+            encoding="utf-8"
+        )
+        expected_constants = (
+            "readonly MAX_PROMPT_LENGTH=4096",
+            "readonly MAX_RESPONSE_LENGTH=500",
+            "readonly MAX_START_LENGTH=2048",
+            "readonly MAX_OBS_LENGTH=500",
+            "readonly MAX_TURNS=4",
+            "TOPK=${TOPK:-3}",
+        )
+        for assignment in expected_constants:
+            self.assertIn(assignment, script)
+
+        expected_overrides = (
+            'data.max_prompt_length="$MAX_PROMPT_LENGTH"',
+            'data.max_response_length="$MAX_RESPONSE_LENGTH"',
+            'data.max_start_length="$MAX_START_LENGTH"',
+            'data.max_obs_length="$MAX_OBS_LENGTH"',
+            'max_turns="$MAX_TURNS"',
+            'retriever.topk="$TOPK"',
+        )
+        for override in expected_overrides:
+            self.assertIn(override, script)
+
+        self.assertNotIn("data.max_obs_length=700", script)
+        self.assertIn('"max_obs_length": int(max_obs_length)', script)
+
     def test_hard_asset_contract_is_pinned_and_never_adopts_legacy_files(self) -> None:
         self.assertEqual(E5_INDEX_SIZE, sum(part[1] for part in E5_PARTS))
         self.assertEqual(source_identity()["corpus"]["documents"], EXPECTED_DOCUMENTS)
