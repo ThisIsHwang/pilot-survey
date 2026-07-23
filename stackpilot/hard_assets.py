@@ -234,9 +234,6 @@ def _last_nonempty_line(path: Path) -> bytes:
         position = handle.tell()
         if position == 0:
             return b""
-        handle.seek(-1, os.SEEK_END)
-        if handle.read(1) != b"\n":
-            raise RuntimeError(f"wiki-18 corpus has an incomplete final row: {path}")
         buffer = b""
         while position > 0:
             amount = min(EDGE_BYTES, position)
@@ -666,39 +663,86 @@ def assemble_e5(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     }
 
 
-def decompress_gzip_counted(source: Path, target: Path) -> tuple[int, int]:
-    """Decompress a JSONL gzip stream and return (bytes, newline-delimited rows)."""
+def _count_jsonl_stream(
+    source: BinaryIO, target: BinaryIO | None = None
+) -> tuple[int, int]:
+    """Count JSONL bytes/rows, accepting a valid final row without a newline."""
     copied = 0
     rows = 0
     final_byte = b""
+    while chunk := source.read(HASH_CHUNK_SIZE):
+        if target is not None:
+            target.write(chunk)
+        copied += len(chunk)
+        rows += chunk.count(b"\n")
+        final_byte = chunk[-1:]
+    if copied == 0:
+        raise RuntimeError("JSONL corpus is empty")
+    if final_byte != b"\n":
+        rows += 1
+    return copied, rows
+
+
+def count_jsonl_file(path: Path) -> tuple[int, int]:
+    """Count an existing JSONL artifact without rewriting it."""
+    with path.open("rb") as source:
+        return _count_jsonl_stream(source)
+
+
+def decompress_gzip_counted(source: Path, target: Path) -> tuple[int, int]:
+    """Decompress a JSONL gzip stream and return (bytes, logical rows)."""
     with gzip.open(source, "rb") as compressed, target.open("wb") as destination:
-        while chunk := compressed.read(HASH_CHUNK_SIZE):
-            destination.write(chunk)
-            copied += len(chunk)
-            rows += chunk.count(b"\n")
-            final_byte = chunk[-1:]
+        copied, rows = _count_jsonl_stream(compressed, destination)
         destination.flush()
         os.fsync(destination.fileno())
-    if copied == 0 or final_byte != b"\n":
-        raise RuntimeError(
-            f"Decompressed corpus is empty or lacks a final newline: {target}"
-        )
     return copied, rows
 
 
 def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
-    from huggingface_hub import hf_hub_download
-
     target = root / "wiki-18.jsonl"
-    archive = Path(
-        hf_hub_download(
-            repo_id=CORPUS_REPO,
-            filename=CORPUS_ARCHIVE,
-            repo_type="dataset",
-            revision=CORPUS_REVISION,
-            local_dir=root,
+    temporary = root / ".wiki-18.jsonl.decompressing"
+
+    # The pinned upstream JSONL has a valid final JSON object without a trailing
+    # newline. Older code rejected it only after fully decompressing the 5+ GB
+    # archive. Recover that completed output in place instead of deleting it and
+    # repeating the download/decompression.
+    if temporary.is_file():
+        try:
+            _, rows = count_jsonl_file(temporary)
+            if rows != EXPECTED_DOCUMENTS:
+                raise RuntimeError(
+                    f"wiki-18 corpus has {rows:,} documents; "
+                    f"expected {EXPECTED_DOCUMENTS:,}"
+                )
+            metadata = {
+                **validate_corpus(temporary),
+                "documents": rows,
+                "source_archive": source_identity()["corpus"]["archive"],
+            }
+        except RuntimeError as exc:
+            print(f"Existing decompressed corpus is not reusable ({exc}); rebuilding.")
+            temporary.unlink(missing_ok=True)
+        else:
+            metadata["path"] = target.name
+            os.replace(temporary, target)
+            if not keep_sources:
+                (root / CORPUS_ARCHIVE).unlink(missing_ok=True)
+            print(f"Reused completed decompressed corpus: {target}")
+            return metadata
+
+    archive = root / CORPUS_ARCHIVE
+    if not archive.is_file():
+        from huggingface_hub import hf_hub_download
+
+        archive = Path(
+            hf_hub_download(
+                repo_id=CORPUS_REPO,
+                filename=CORPUS_ARCHIVE,
+                repo_type="dataset",
+                revision=CORPUS_REVISION,
+                local_dir=root,
+            )
         )
-    )
     try:
         verify_file(
             archive,
@@ -709,8 +753,6 @@ def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     except RuntimeError:
         archive.unlink(missing_ok=True)
         raise
-    temporary = root / ".wiki-18.jsonl.decompressing"
-    temporary.unlink(missing_ok=True)
     _, rows = decompress_gzip_counted(archive, temporary)
     if rows != EXPECTED_DOCUMENTS:
         raise RuntimeError(

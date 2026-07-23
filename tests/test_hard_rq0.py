@@ -23,6 +23,7 @@ from stackpilot.hard_assets import (
     E5_PARTS,
     EXPECTED_DOCUMENTS,
     check as check_hard_assets,
+    decompress_corpus,
     decompress_gzip_counted,
     download as download_hard_assets,
     download_bm25,
@@ -403,17 +404,47 @@ class HardRQ0Tests(unittest.TestCase):
             self.assertEqual(prefix, 4)
             self.assertEqual(path.read_bytes(), b"aaaa")
 
-    def test_counted_corpus_decompression_requires_complete_jsonl(self) -> None:
+    def test_counted_corpus_decompression_accepts_final_row_without_newline(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             source = root / "sample.jsonl.gz"
             target = root / "sample.jsonl"
-            payload = b'{"id": 1}\n{"id": 2}\n'
+            payload = b'{"id": 1}\n{"id": 2}'
             with gzip.open(source, "wb") as handle:
                 handle.write(payload)
             copied, rows = decompress_gzip_counted(source, target)
             self.assertEqual((copied, rows), (len(payload), 2))
             self.assertEqual(target.read_bytes(), payload)
+
+    def test_corpus_decompression_reuses_completed_temporary_file(self) -> None:
+        payload = (
+            json.dumps({"id": 1, "contents": "a" * 1000}).encode("utf-8")
+            + b"\n"
+            + json.dumps({"id": 2, "contents": "b" * 1000}).encode("utf-8")
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "wiki-18.jsonl.gz"
+            staging = root / ".wiki-18.jsonl.decompressing"
+            with gzip.open(archive, "wb") as handle:
+                handle.write(payload)
+            staging.write_bytes(payload)
+
+            with (
+                patch("stackpilot.hard_assets.EXPECTED_DOCUMENTS", 2),
+                patch(
+                    "stackpilot.hard_assets.CORPUS_ARCHIVE_SIZE",
+                    archive.stat().st_size,
+                ),
+            ):
+                metadata = decompress_corpus(root, keep_sources=True)
+
+            self.assertEqual(metadata["documents"], 2)
+            self.assertEqual((root / "wiki-18.jsonl").read_bytes(), payload)
+            self.assertFalse(staging.exists())
+            self.assertTrue(archive.exists())
 
     def test_hard_asset_download_reuses_completed_components(self) -> None:
         corpus = {"path": "wiki-18.jsonl", "size": 1}
