@@ -25,8 +25,9 @@ E5_PORT=${E5_PORT:-8102}
 E5_GPU=${E5_GPU:-7}
 TRAIN_GPUS=${TRAIN_GPUS:-0,1,2,3,4,5,6}
 N_GPUS=${N_GPUS:-7}
-LLM_GPUS=${LLM_GPUS:-0,1}
-TP=${TP:-2}
+LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}
+TP=${TP:-1}
+DP=${DP:-7}
 LLM_PORT=${LLM_PORT:-9000}
 READY_TIMEOUT=${HARD_RETRIEVER_READY_TIMEOUT:-14400}
 PROBE_TIMEOUT=${HARD_RETRIEVER_PROBE_TIMEOUT:-300}
@@ -66,6 +67,7 @@ validate_port E5_PORT "$E5_PORT"
 validate_port LLM_PORT "$LLM_PORT"
 validate_positive_integer N_GPUS "$N_GPUS"
 validate_positive_integer TP "$TP"
+validate_positive_integer DP "$DP"
 validate_positive_integer HARD_RETRIEVER_READY_TIMEOUT "$READY_TIMEOUT"
 validate_positive_integer HARD_RETRIEVER_PROBE_TIMEOUT "$PROBE_TIMEOUT"
 if [[ "$N_GPUS" != 7 ]]; then
@@ -79,7 +81,8 @@ fi
 
 validate_gpu_list "$E5_GPU" 1 "Hard-RQ0 E5 retrieval"
 validate_gpu_list "$TRAIN_GPUS" "$N_GPUS" "Hard-RQ0 training"
-validate_gpu_list "$LLM_GPUS" "$TP" "Hard-RQ0 vLLM evaluation"
+validate_gpu_list "$LLM_GPUS" "$((TP * DP))" \
+  "Hard-RQ0 vLLM TP=$TP x DP=$DP evaluation"
 if [[ ",$TRAIN_GPUS," == *",$E5_GPU,"* ]]; then
   echo "E5_GPU=$E5_GPU overlaps TRAIN_GPUS=$TRAIN_GPUS." >&2
   exit 2
@@ -171,7 +174,8 @@ wait_for_http "$BM25_PID" "http://127.0.0.1:${BM25_PORT}/health" \
   "$READY_TIMEOUT" "$BM25_LOG" '"backend":"bm25"'
 
 E5_LOG=$LOG_ROOT/e5.log
-E5_PID=$(HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES="$E5_GPU" \
+E5_PID=$(HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
+  RETRIEVER_DISABLE_CUDA_EMPTY_CACHE=1 CUDA_VISIBLE_DEVICES="$E5_GPU" \
   start_managed_process \
   "$PILOT_PYTHON" "$E5_LOG" "$PILOT_PYTHON" -m stackpilot.searchr1_server \
   --search-r1-root "$ROOT/upstream/Search-R1" \

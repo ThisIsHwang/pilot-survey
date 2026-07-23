@@ -25,6 +25,8 @@ configure_vllm_launch() {
   SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
   LLM_GPUS=${LLM_GPUS:-0,1,2,3}
   TP=${TP:-4}
+  DP=${DP:-1}
+  VLLM_API_SERVER_COUNT=${VLLM_API_SERVER_COUNT:-$DP}
   LLM_PORT=${LLM_PORT:-9000}
   GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
   MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
@@ -40,7 +42,17 @@ configure_vllm_launch() {
     return 2
   fi
 
-  validate_gpu_list "$LLM_GPUS" "$TP" "vLLM tensor parallelism" || return 1
+  if [[ ! "$TP" =~ ^[1-9][0-9]*$ || ! "$DP" =~ ^[1-9][0-9]*$ ]]; then
+    echo "TP and DP must be positive integers; got TP='$TP' DP='$DP'." >&2
+    return 2
+  fi
+  if [[ ! "$VLLM_API_SERVER_COUNT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "VLLM_API_SERVER_COUNT must be a positive integer; got '$VLLM_API_SERVER_COUNT'." >&2
+    return 2
+  fi
+  local required_gpus=$((TP * DP))
+  validate_gpu_list "$LLM_GPUS" "$required_gpus" \
+    "vLLM TP=$TP x DP=$DP" || return 1
   if ! command -v nvidia-smi >/dev/null 2>&1; then
     echo "nvidia-smi is required to launch vLLM." >&2
     return 1
@@ -116,7 +128,8 @@ PY
   fi
 
   VLLM_NO_USAGE_STATS=${VLLM_NO_USAGE_STATS:-1}
-  export MODEL_PATH MODEL_REVISION SERVED_MODEL_NAME LLM_GPUS TP LLM_PORT VLLM_NO_USAGE_STATS VLLM_MODEL_IS_LOCAL
+  export MODEL_PATH MODEL_REVISION SERVED_MODEL_NAME LLM_GPUS TP DP \
+    VLLM_API_SERVER_COUNT LLM_PORT VLLM_NO_USAGE_STATS VLLM_MODEL_IS_LOCAL
   # Consumed by the launcher scripts after this helper is sourced.
   # shellcheck disable=SC2034
   VLLM_ARGS=(
@@ -124,6 +137,8 @@ PY
     --host 127.0.0.1
     --served-model-name "$SERVED_MODEL_NAME"
     --tensor-parallel-size "$TP"
+    --data-parallel-size "$DP"
+    --api-server-count "$VLLM_API_SERVER_COUNT"
     --distributed-executor-backend mp
     --dtype bfloat16
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"

@@ -7,8 +7,14 @@ import json
 import os
 import re
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - the production downloader runs on Linux
+    fcntl = None  # type: ignore[assignment]
 
 
 SCHEMA = 2
@@ -562,6 +568,33 @@ def _e5_assembly_state(completed: list[str]) -> dict[str, Any]:
     }
 
 
+def repair_e5_assembly_prefix(
+    temporary: Path,
+    completed: list[str],
+    parts: tuple[tuple[str, int, str], ...] = E5_PARTS,
+) -> tuple[list[str], int]:
+    """Keep verified parts while discarding only an interrupted partial part."""
+    valid_names = [name for name, _, _ in parts]
+    if completed != valid_names[: len(completed)]:
+        completed = []
+    expected_prefix = sum(
+        size for name, size, _ in parts if name in set(completed)
+    )
+    if not temporary.is_file():
+        completed = []
+        expected_prefix = 0
+        temporary.touch()
+    else:
+        actual_size = temporary.stat().st_size
+        if actual_size < expected_prefix:
+            completed = []
+            expected_prefix = 0
+        if actual_size != expected_prefix:
+            with temporary.open("r+b") as handle:
+                handle.truncate(expected_prefix)
+    return completed, expected_prefix
+
+
 def assemble_e5(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     from huggingface_hub import hf_hub_download
 
@@ -579,19 +612,7 @@ def assemble_e5(root: Path, *, keep_sources: bool) -> dict[str, Any]:
                 completed = [str(value) for value in payload.get("completed", [])]
         except (OSError, json.JSONDecodeError, AttributeError):
             completed = []
-    valid_names = [name for name, _, _ in E5_PARTS]
-    if completed != valid_names[: len(completed)]:
-        completed = []
-    expected_prefix = sum(size for name, size, _ in E5_PARTS if name in set(completed))
-    if not temporary.is_file():
-        completed = []
-        expected_prefix = 0
-        temporary.touch()
-    elif temporary.stat().st_size != expected_prefix:
-        completed = []
-        expected_prefix = 0
-        with temporary.open("r+b") as handle:
-            handle.truncate(0)
+    completed, expected_prefix = repair_e5_assembly_prefix(temporary, completed)
     atomic_json(state_path, _e5_assembly_state(completed))
 
     for name, expected_size, expected_sha256 in E5_PARTS[len(completed) :]:
@@ -818,7 +839,26 @@ def download_bm25(root: Path) -> dict[str, Any]:
     return staged_record
 
 
-def download(root: Path, *, min_free_gib: int, keep_sources: bool) -> dict[str, Any]:
+@contextmanager
+def asset_download_lock(root: Path) -> Iterator[None]:
+    """Prevent two download/assembly processes from sharing temporary files."""
+    root.mkdir(parents=True, exist_ok=True)
+    lock_path = root / ".hard-rq0-assets.lock"
+    with lock_path.open("a+b") as handle:
+        if fcntl is None:
+            yield
+            return
+        print(f"Acquiring Hard-RQ0 asset lock: {lock_path}")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _download(
+    root: Path, *, min_free_gib: int, keep_sources: bool
+) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     manifest = root / MANIFEST_NAME
     reusable, errors = reusable_artifacts(root)
@@ -876,6 +916,13 @@ def download(root: Path, *, min_free_gib: int, keep_sources: bool) -> dict[str, 
     for name, artifact in checked["artifacts"].items():
         print(f"  {name}: {artifact['size'] / 1024**3:.1f} GiB")
     return checked
+
+
+def download(root: Path, *, min_free_gib: int, keep_sources: bool) -> dict[str, Any]:
+    with asset_download_lock(root):
+        return _download(
+            root, min_free_gib=min_free_gib, keep_sources=keep_sources
+        )
 
 
 def parse_args() -> argparse.Namespace:

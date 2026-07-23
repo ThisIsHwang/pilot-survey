@@ -41,8 +41,13 @@ if [[ -z ${E5_MODEL_REVISION:-} ]]; then
     E5_MODEL_REVISION=main
   fi
 fi
-LLM_GPUS=${LLM_GPUS:-0,1}
-TP=${TP:-2}
+LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}
+TP=${TP:-1}
+DP=${DP:-7}
+VLLM_API_SERVER_COUNT=${VLLM_API_SERVER_COUNT:-$DP}
+HARD_EVAL_WORKERS=${HARD_EVAL_WORKERS:-112}
+VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
 LLM_PORT=${LLM_PORT:-9000}
 KEEP_VLLM=${KEEP_VLLM:-0}
 RETRIEVER_PROBE_TIMEOUT=${HARD_RETRIEVER_PROBE_TIMEOUT:-300}
@@ -101,8 +106,30 @@ if [[ "$BM25_PORT" == "$E5_PORT" || "$BM25_PORT" == "$LLM_PORT" || "$E5_PORT" ==
 fi
 
 validate_positive_integer TP "$TP"
+validate_positive_integer DP "$DP"
+validate_positive_integer VLLM_API_SERVER_COUNT "$VLLM_API_SERVER_COUNT"
+validate_positive_integer HARD_EVAL_WORKERS "$HARD_EVAL_WORKERS"
+if ! "$PILOT_PYTHON" - "$GPU_MEMORY_UTILIZATION" <<'PY'
+import math
+import sys
+
+try:
+    value = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if math.isfinite(value) and 0.0 < value < 1.0 else 1)
+PY
+then
+  echo "GPU_MEMORY_UTILIZATION must be a number strictly between 0 and 1; got '$GPU_MEMORY_UTILIZATION'." >&2
+  exit 2
+fi
+if [[ "$VLLM_BATCH_INVARIANT" != 0 && "$VLLM_BATCH_INVARIANT" != 1 ]]; then
+  echo "VLLM_BATCH_INVARIANT must be 0 or 1; got '$VLLM_BATCH_INVARIANT'." >&2
+  exit 2
+fi
 validate_gpu_list "$E5_GPU" 1 "Hard-RQ0 E5 retrieval"
-validate_gpu_list "$LLM_GPUS" "$TP" "Hard-RQ0 vLLM evaluation"
+validate_gpu_list "$LLM_GPUS" "$((TP * DP))" \
+  "Hard-RQ0 vLLM TP=$TP x DP=$DP evaluation"
 if [[ ",$LLM_GPUS," == *",$E5_GPU,"* ]]; then
   echo "E5_GPU=$E5_GPU overlaps LLM_GPUS=$LLM_GPUS." >&2
   exit 2
@@ -177,8 +204,10 @@ export MODEL_PATH=$MODEL_REF
 export MODEL_REVISION
 export HARD_ASSET_ROOT=$ASSET_ROOT
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen2.5-3B-Instruct}
-export LLM_GPUS TP LLM_PORT
+export LLM_GPUS TP DP VLLM_API_SERVER_COUNT GPU_MEMORY_UTILIZATION \
+  LLM_PORT VLLM_BATCH_INVARIANT
 export MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+export VLLM_READY_TIMEOUT=${VLLM_READY_TIMEOUT:-1800}
 if [[ -z "$SERVED_MODEL_NAME" || ! "$MAX_MODEL_LEN" =~ ^[1-9][0-9]*$ ]]; then
   echo "SERVED_MODEL_NAME must be non-empty and MAX_MODEL_LEN must be a positive integer." >&2
   exit 2
@@ -291,6 +320,7 @@ ARGS=(
   --data-file "$DATA_FILE"
   --tag "$TAG"
   --seed "$SEED"
+  --workers "$HARD_EVAL_WORKERS"
 )
 if [[ -n "$LIMIT" ]]; then
   ARGS+=(--limit "$LIMIT")

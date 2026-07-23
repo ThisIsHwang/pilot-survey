@@ -4,11 +4,14 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
+import threading
+import time
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Iterable, Iterator, TypeVar
 
 import pandas as pd
 import requests
@@ -46,6 +49,8 @@ from stackpilot.service_checks import check_vllm, effective_model_name
 
 TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 ASSET_MANIFEST_NAME = ".hard-rq0-assets-manifest.json"
+JobT = TypeVar("JobT")
+ResultT = TypeVar("ResultT")
 
 
 def normalize_title(value: str) -> str:
@@ -112,6 +117,7 @@ def evaluation_context(
     backends: list[str] | tuple[str, ...],
     topks: list[int] | tuple[int, ...],
     retriever_identities: dict[str, dict[str, Any]] | None = None,
+    workers: int | None = None,
 ) -> dict[str, Any]:
     data_manifest_path = data_file.parent / DATA_MANIFEST_NAME
     data_manifest = require_json_manifest(data_manifest_path, "hard-RQ0 data")
@@ -152,9 +158,29 @@ def evaluation_context(
         "hard_policy_eval.py",
         "hard_rq0_contract.py",
         "react_agent_eval.py",
+        "retrieval_concurrency.py",
         "retrieval_clients.py",
+        "searchr1_server.py",
         "service_checks.py",
     )
+    batch_invariant = os.environ.get("VLLM_BATCH_INVARIANT", "0") == "1"
+    serving = {
+        "tensor_parallel_size": int(os.environ.get("TP", "1")),
+        "data_parallel_size": int(os.environ.get("DP", "1")),
+        "api_server_count": int(
+            os.environ.get(
+                "VLLM_API_SERVER_COUNT",
+                os.environ.get("DP", "1"),
+            )
+        ),
+        "gpu_memory_utilization": float(
+            os.environ.get("GPU_MEMORY_UTILIZATION", "0.88")
+        ),
+        "max_model_len": int(os.environ.get("MAX_MODEL_LEN", "16384")),
+        "batch_invariant": batch_invariant,
+    }
+    if not batch_invariant:
+        serving["evaluation_workers"] = workers or 1
     return {
         "schema": RESULT_SCHEMA,
         "data": {
@@ -189,6 +215,7 @@ def evaluation_context(
                 "temperature": cfg["llm"]["temperature"],
                 "max_tokens": cfg["llm"]["max_tokens"],
             },
+            "serving": serving,
         },
     }
 
@@ -212,7 +239,7 @@ def run_signature(
 
 def check_retriever(
     name: str, port: int, expected_index: Path, expected_corpus: Path
-) -> dict[str, str | bool | int]:
+) -> dict[str, Any]:
     response = requests.get(f"http://127.0.0.1:{port}/health", timeout=10)
     response.raise_for_status()
     payload = response.json()
@@ -240,7 +267,16 @@ def check_retriever(
             f"{name} corpus has {corpus_documents:,} documents, "
             f"expected {EXPECTED_DOCUMENTS:,}"
         )
-    identity: dict[str, str | bool | int] = {
+    expected_server_files = {
+        filename: file_digest(Path(__file__).with_name(filename))
+        for filename in ("retrieval_concurrency.py", "searchr1_server.py")
+    }
+    if payload.get("server_files") != expected_server_files:
+        raise RuntimeError(
+            f"{name} retriever is running stale server code; restart "
+            f"hard_rq0/launch_retrievers.sh: {payload.get('server_files')}"
+        )
+    identity: dict[str, Any] = {
         "backend": name,
         "index_path": str(actual_index),
         "corpus_path": str(actual_corpus),
@@ -253,6 +289,15 @@ def check_retriever(
             or int(payload.get("faiss_gpu_count", 0)) != 1
         ):
             raise RuntimeError(f"E5 retriever is not using one FAISS GPU: {payload}")
+        if payload.get("gpu_search_serialized") is not True:
+            raise RuntimeError(
+                f"E5 retriever does not serialize its shared GPU index: {payload}"
+            )
+        if payload.get("cuda_empty_cache_disabled") is not True:
+            raise RuntimeError(
+                f"E5 retriever still synchronizes CUDA allocator cleanup; restart "
+                f"hard_rq0/launch_retrievers.sh: {payload}"
+            )
         retriever_model = str(payload.get("retriever_model", "")).strip()
         retriever_model_revision = str(
             payload.get("retriever_model_revision", "")
@@ -269,8 +314,16 @@ def check_retriever(
                 "retriever_model_revision": retriever_model_revision,
                 "faiss_gpu": payload.get("faiss_gpu") is True,
                 "faiss_gpu_count": int(payload.get("faiss_gpu_count", 0)),
+                "gpu_search_serialized": True,
+                "cuda_empty_cache_disabled": payload.get(
+                    "cuda_empty_cache_disabled"
+                )
+                is True,
+                "server_files": expected_server_files,
             }
         )
+    else:
+        identity["server_files"] = expected_server_files
     return identity
 
 
@@ -526,6 +579,173 @@ def atomic_write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def parallel_job_results(
+    jobs: Iterable[JobT],
+    worker: Callable[[JobT], ResultT],
+    max_workers: int,
+    max_in_flight: int | None = None,
+) -> Iterator[tuple[JobT, ResultT]]:
+    """Run bounded independent jobs, abandoning daemon workers on interruption."""
+    if max_workers < 1:
+        raise ValueError("max_workers must be positive")
+    capacity = max_workers * 2 if max_in_flight is None else max_in_flight
+    if capacity < max_workers:
+        raise ValueError("max_in_flight must be at least max_workers")
+
+    pending_jobs = iter(jobs)
+    work_queue: queue.Queue[Any] = queue.Queue(maxsize=capacity)
+    result_queue: queue.Queue[
+        tuple[JobT, bool, ResultT | BaseException]
+    ] = queue.Queue()
+    sentinel = object()
+    stop_event = threading.Event()
+    start_lock = threading.Lock()
+    exhausted = False
+    outstanding = 0
+
+    def run_worker() -> None:
+        while True:
+            entry = work_queue.get()
+            try:
+                if entry is sentinel:
+                    return
+                job = entry
+                # Checking and declaring a job started share a lock with
+                # request_stop(). Once stop is set, queued jobs can be removed
+                # or observed by workers, but the user worker is never called.
+                with start_lock:
+                    if stop_event.is_set():
+                        return
+                try:
+                    result = worker(job)
+                except BaseException as exc:
+                    # Stop queued work at the point the first failure is
+                    # observed, before the coordinator receives its result.
+                    with start_lock:
+                        stop_event.set()
+                    result_queue.put((job, False, exc))
+                else:
+                    result_queue.put((job, True, result))
+            finally:
+                work_queue.task_done()
+            if stop_event.is_set():
+                return
+
+    threads = [
+        threading.Thread(
+            target=run_worker,
+            name=f"hard-rq0-eval-{index}",
+            daemon=True,
+        )
+        for index in range(max_workers)
+    ]
+    for thread in threads:
+        thread.start()
+
+    def fill() -> None:
+        nonlocal exhausted, outstanding
+        while (
+            not exhausted
+            and not stop_event.is_set()
+            and outstanding < capacity
+        ):
+            try:
+                job = next(pending_jobs)
+            except StopIteration:
+                exhausted = True
+                return
+            work_queue.put(job)
+            outstanding += 1
+
+    def request_stop() -> None:
+        with start_lock:
+            stop_event.set()
+        # Discard work that no worker has taken. Workers that raced with this
+        # drain re-check stop_event under start_lock before invoking worker().
+        while True:
+            try:
+                work_queue.get_nowait()
+            except queue.Empty:
+                break
+            else:
+                work_queue.task_done()
+        # Wake workers already blocked in get(). The bounded queue is at least
+        # as large as the worker count, so all sentinels fit after the drain.
+        for _ in threads:
+            work_queue.put_nowait(sentinel)
+
+    def stop_normally() -> None:
+        for _ in threads:
+            work_queue.put(sentinel)
+        for thread in threads:
+            thread.join()
+
+    completed_normally = False
+    try:
+        fill()
+        while outstanding:
+            # A finite poll keeps KeyboardInterrupt responsive on platforms
+            # where an unbounded Queue.get() cannot be interrupted.
+            while True:
+                try:
+                    first_outcome = result_queue.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    continue
+            outcomes = [first_outcome]
+            while True:
+                try:
+                    outcomes.append(result_queue.get_nowait())
+                except queue.Empty:
+                    break
+            outstanding -= len(outcomes)
+
+            successful: list[tuple[JobT, ResultT]] = []
+            first_error: BaseException | None = None
+            for job, succeeded, payload in outcomes:
+                if succeeded:
+                    successful.append((job, payload))  # type: ignore[arg-type]
+                elif first_error is None:
+                    first_error = payload  # type: ignore[assignment]
+
+            if first_error is not None:
+                request_stop()
+                # Preserve durability semantics: results completing alongside
+                # the error get yielded before it, without waiting on a stuck
+                # peer. Queued jobs cannot start because stop_event is set.
+                deadline = time.monotonic() + 0.25
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        job, succeeded, payload = result_queue.get(
+                            timeout=remaining
+                        )
+                    except queue.Empty:
+                        break
+                    if succeeded:
+                        successful.append(
+                            (job, payload)  # type: ignore[arg-type]
+                        )
+
+            for item in successful:
+                yield item
+            if first_error is not None:
+                raise first_error
+            fill()
+        completed_normally = True
+    finally:
+        if completed_normally:
+            try:
+                stop_normally()
+            except BaseException:
+                request_stop()
+                raise
+        else:
+            request_stop()
+
+
 def prepare_result_cache(
     output_path: Path,
     existing: list[dict[str, Any]],
@@ -596,6 +816,12 @@ def parse_args() -> argparse.Namespace:
         "--backends", nargs="+", choices=("bm25", "e5"), default=("bm25", "e5")
     )
     parser.add_argument("--topks", nargs="+", type=int, default=None)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=int(os.environ.get("HARD_EVAL_WORKERS", "112")),
+        help="Concurrent evaluation episodes (default: 112, or HARD_EVAL_WORKERS)",
+    )
     return parser.parse_args()
 
 
@@ -607,6 +833,8 @@ def main() -> None:
     backends = list(args.backends)
     validate_policy_selection(args.tag, args.limit, backends, topks)
     validate_policy_seed(args.tag, args.seed, cfg["training"]["seeds"])
+    if args.workers < 1:
+        raise RuntimeError("--workers must be a positive integer")
 
     data_file = Path(args.data_file).resolve()
     if not data_file.is_file():
@@ -639,7 +867,7 @@ def main() -> None:
         )
 
     context = evaluation_context(
-        cfg, data_file, rows, backends, topks, retriever_identities
+        cfg, data_file, rows, backends, topks, retriever_identities, args.workers
     )
     evaluation_id = signature(context)
     run_id = run_signature(cfg, evaluation_id, args.tag, args.seed)
@@ -667,48 +895,101 @@ def main() -> None:
         int(cfg["agent"]["max_search_turns"]),
     )
 
-    clients = {
+    retrievers = {
         backend: RetrievalClient(backend, f"http://127.0.0.1:{ports[backend]}/retrieve")
         for backend in backends
     }
-    client = OpenAI(
-        base_url=cfg["llm"]["api_base"],
-        api_key=cfg["llm"]["api_key"],
-        timeout=180.0,
-        max_retries=5,
-    )
     model = effective_model_name(cfg)
+    thread_state = threading.local()
+    client_registry: list[OpenAI] = []
+    client_registry_lock = threading.Lock()
+
+    def llm_client() -> OpenAI:
+        client = getattr(thread_state, "llm_client", None)
+        if client is None:
+            client = OpenAI(
+                base_url=cfg["llm"]["api_base"],
+                api_key=cfg["llm"]["api_key"],
+                timeout=180.0,
+                max_retries=5,
+            )
+            thread_state.llm_client = client
+            with client_registry_lock:
+                client_registry.append(client)
+        return client
+
+    EvaluationJob = tuple[dict[str, Any], str, int, tuple[str, str, int]]
+
+    def evaluate(job: EvaluationJob) -> dict[str, Any]:
+        item, backend, topk, key = job
+        try:
+            return run_episode(
+                llm_client(),
+                model,
+                retrievers[backend],
+                item,
+                cfg,
+                topk,
+                args.seed,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Hard-RQ0 episode failed: {key}") from exc
 
     total = len(expected_keys)
     progress = tqdm(total=total, desc=f"hard RQ0 eval: {args.tag}/seed{args.seed}")
+    progress.update(len(row_by_key))
+    jobs: list[EvaluationJob] = []
     for item in rows:
         for backend in backends:
             for topk in topks:
                 key = (str(item["id"]), backend, int(topk))
                 if key not in row_by_key:
-                    result = run_episode(
-                        client,
-                        model,
-                        clients[backend],
-                        item,
-                        cfg,
-                        int(topk),
-                        args.seed,
-                    )
-                    result.update(
-                        {
-                            "schema": RESULT_SCHEMA,
-                            "run_signature": run_id,
-                            "evaluation_signature": evaluation_id,
-                            "policy_tag": args.tag,
-                            "seed": args.seed,
-                            "served_model": model,
-                        }
-                    )
-                    append_jsonl(output_path, [result])
-                    row_by_key[key] = result
-                progress.update(1)
-    progress.close()
+                    jobs.append((item, backend, int(topk), key))
+
+    checkpoint_rows: list[dict[str, Any]] = []
+    checkpoint_size = min(32, args.workers)
+    try:
+        for job, result in parallel_job_results(jobs, evaluate, args.workers):
+            key = job[3]
+            result.update(
+                {
+                    "schema": RESULT_SCHEMA,
+                    "run_signature": run_id,
+                    "evaluation_signature": evaluation_id,
+                    "policy_tag": args.tag,
+                    "seed": args.seed,
+                    "served_model": model,
+                }
+            )
+            checkpoint_rows.append(result)
+            row_by_key[key] = result
+            if len(checkpoint_rows) >= checkpoint_size:
+                append_jsonl(output_path, checkpoint_rows)
+                checkpoint_rows.clear()
+            progress.update(1)
+        if checkpoint_rows:
+            append_jsonl(output_path, checkpoint_rows)
+            checkpoint_rows.clear()
+    except BaseException:
+        if checkpoint_rows:
+            try:
+                append_jsonl(output_path, checkpoint_rows)
+                checkpoint_rows.clear()
+            except Exception as checkpoint_error:
+                print(
+                    f"Unable to flush the final evaluation checkpoint: "
+                    f"{checkpoint_error}",
+                    flush=True,
+                )
+        with client_registry_lock:
+            for active_client in client_registry:
+                try:
+                    active_client.close()
+                except Exception:
+                    pass
+        raise
+    finally:
+        progress.close()
 
     actual_keys = set(row_by_key)
     if actual_keys != expected_keys or len(row_by_key) != total:

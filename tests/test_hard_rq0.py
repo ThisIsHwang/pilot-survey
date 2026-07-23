@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import threading
+import textwrap
 import types
 import unittest
-import gzip
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -22,6 +27,7 @@ from stackpilot.hard_assets import (
     download as download_hard_assets,
     download_bm25,
     ensure_bm25_link,
+    repair_e5_assembly_prefix,
     required_free_gib,
     source_identity,
 )
@@ -33,6 +39,7 @@ from stackpilot.hard_policy_eval import (
     balanced_limit,
     check_retriever,
     evaluation_context,
+    parallel_job_results,
     prepare_result_cache,
     recall_at,
     run_signature,
@@ -60,10 +67,277 @@ from stackpilot.prepare_hard_rq0 import (
     to_searchr1_row,
 )
 from stackpilot.retrieval_clients import normalize_document
+from stackpilot.retrieval_concurrency import batch_search
 from stackpilot.validate_hard_results import validate_frame
 
 
 class HardRQ0Tests(unittest.TestCase):
+    def test_hard_evaluation_runs_a_bounded_concurrent_window(self) -> None:
+        barrier = threading.Barrier(4)
+        state_lock = threading.Lock()
+        active = 0
+        peak = 0
+
+        def worker(job: int) -> int:
+            nonlocal active, peak
+            with state_lock:
+                active += 1
+                peak = max(peak, active)
+            if job < 4:
+                barrier.wait(timeout=2)
+            with state_lock:
+                active -= 1
+            return job * 2
+
+        completed = dict(
+            parallel_job_results(
+                range(12), worker, max_workers=4, max_in_flight=4
+            )
+        )
+
+        self.assertEqual(completed, {job: job * 2 for job in range(12)})
+        self.assertEqual(peak, 4)
+        self.assertFalse(
+            [
+                thread.name
+                for thread in threading.enumerate()
+                if thread.name.startswith("hard-rq0-eval-")
+            ],
+            "normal completion must join every evaluation worker",
+        )
+        with self.assertRaisesRegex(ValueError, "at least max_workers"):
+            list(
+                parallel_job_results(
+                    [1], lambda value: value, max_workers=1, max_in_flight=0
+                )
+            )
+
+    def test_parallel_evaluation_yields_successes_before_peer_error(self) -> None:
+        barrier = threading.Barrier(2)
+        success_finished = threading.Event()
+
+        def worker(job: int) -> int:
+            barrier.wait(timeout=2)
+            if job == 1:
+                if not success_finished.wait(timeout=2):
+                    raise AssertionError("successful peer did not finish")
+                raise RuntimeError("failed job")
+            success_finished.set()
+            return job
+
+        completed = []
+        with self.assertRaisesRegex(RuntimeError, "failed job"):
+            for item in parallel_job_results(
+                [0, 1], worker, max_workers=2, max_in_flight=2
+            ):
+                completed.append(item)
+        self.assertEqual(completed, [(0, 0)])
+
+    def test_parallel_evaluation_does_not_start_queued_jobs_after_error(
+        self,
+    ) -> None:
+        started = []
+
+        def worker(job: int) -> int:
+            started.append(job)
+            if job == 0:
+                raise RuntimeError("failed first job")
+            return job
+
+        with self.assertRaisesRegex(RuntimeError, "failed first job"):
+            list(
+                parallel_job_results(
+                    range(8), worker, max_workers=1, max_in_flight=4
+                )
+            )
+        self.assertEqual(started, [0])
+
+    def test_parallel_evaluation_aborts_blocked_daemon_workers_in_subprocess(
+        self,
+    ) -> None:
+        root = Path(__file__).resolve().parents[1]
+        script = textwrap.dedent(
+            """
+            import _thread
+            import sys
+            import threading
+            import time
+
+            from stackpilot.hard_policy_eval import parallel_job_results
+
+            mode = sys.argv[1]
+            started = threading.Event()
+            never = threading.Event()
+
+            def worker(job):
+                if job == "block":
+                    started.set()
+                    never.wait()
+                    return job
+                if not started.wait(timeout=2):
+                    raise RuntimeError("blocking peer did not start")
+                if job == "error":
+                    raise RuntimeError("intentional worker failure")
+                return job
+
+            if mode == "error":
+                try:
+                    list(
+                        parallel_job_results(
+                            ["block", "error"],
+                            worker,
+                            max_workers=2,
+                            max_in_flight=2,
+                        )
+                    )
+                except RuntimeError:
+                    pass
+                else:
+                    raise SystemExit("worker failure was not propagated")
+            elif mode == "close":
+                results = parallel_job_results(
+                    ["block", "success"],
+                    worker,
+                    max_workers=2,
+                    max_in_flight=2,
+                )
+                if next(results) != ("success", "success"):
+                    raise SystemExit("successful peer result was not yielded")
+                results.close()
+            elif mode == "keyboard":
+                def interrupt():
+                    if not started.wait(timeout=2):
+                        return
+                    time.sleep(0.05)
+                    _thread.interrupt_main()
+
+                threading.Thread(target=interrupt, daemon=True).start()
+                try:
+                    list(
+                        parallel_job_results(
+                            ["block"],
+                            worker,
+                            max_workers=1,
+                            max_in_flight=1,
+                        )
+                    )
+                except KeyboardInterrupt:
+                    pass
+                else:
+                    raise SystemExit("KeyboardInterrupt was not propagated")
+            else:
+                raise SystemExit(f"unknown mode: {mode}")
+
+            print(f"aborted:{mode}", flush=True)
+            """
+        )
+        for mode in ("error", "close", "keyboard"):
+            with self.subTest(mode=mode):
+                completed = subprocess.run(
+                    [sys.executable, "-c", script, mode],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0,
+                    completed.stdout + completed.stderr,
+                )
+                self.assertIn(f"aborted:{mode}", completed.stdout)
+
+    def test_gpu_faiss_server_serializes_searches(self) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        second_started = threading.Event()
+
+        class FakeRetriever:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def batch_search(self, queries, topk, return_scores):
+                self.calls += 1
+                if self.calls == 1:
+                    entered.set()
+                    self.assertions(queries, topk, return_scores)
+                    self.wait_for_release()
+                return [[{"id": self.calls}]], [[1.0]]
+
+            @staticmethod
+            def assertions(queries, topk, return_scores) -> None:
+                if queries != ["q"] or topk != 3 or return_scores is not True:
+                    raise AssertionError((queries, topk, return_scores))
+
+            @staticmethod
+            def wait_for_release() -> None:
+                if not release.wait(timeout=2):
+                    raise AssertionError("test did not release the first search")
+
+        retriever = FakeRetriever()
+        search_lock = threading.Lock()
+
+        def second_search():
+            second_started.set()
+            return batch_search(retriever, ["q"], 3, search_lock)
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first = executor.submit(
+                batch_search, retriever, ["q"], 3, search_lock
+            )
+            self.assertTrue(entered.wait(timeout=2))
+            second = executor.submit(second_search)
+            self.assertTrue(second_started.wait(timeout=2))
+            self.assertEqual(retriever.calls, 1)
+            release.set()
+            first.result(timeout=2)
+            second.result(timeout=2)
+        self.assertEqual(retriever.calls, 2)
+
+    def test_h100_evaluation_and_prefetch_defaults_are_wired(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        evaluator = (root / "hard_rq0" / "eval_policy.sh").read_text("utf-8")
+        launcher = (root / "scripts" / "lib" / "vllm_launch.sh").read_text(
+            "utf-8"
+        )
+        pipeline = (root / "scripts" / "run_full_pipeline.sh").read_text(
+            "utf-8"
+        )
+
+        self.assertIn("LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}", evaluator)
+        self.assertIn("TP=${TP:-1}", evaluator)
+        self.assertIn("DP=${DP:-7}", evaluator)
+        self.assertIn("HARD_EVAL_WORKERS=${HARD_EVAL_WORKERS:-112}", evaluator)
+        self.assertIn("VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}", evaluator)
+        self.assertIn('--data-parallel-size "$DP"', launcher)
+        self.assertIn('--api-server-count "$VLLM_API_SERVER_COUNT"', launcher)
+        self.assertLess(
+            pipeline.index(
+                'bash "$ROOT/scripts/prefetch_future_models.sh" --stage2'
+            ),
+            pipeline.index('if [[ "$RUN_STAGE0" == 1 ]]'),
+        )
+        stage2_boundary = pipeline.index(
+            'SKIP_BOOTSTRAP=1 bash "$ROOT/searchr1_stage2/run_all.sh"'
+        )
+        self.assertLess(
+            pipeline.index("wait_background_job STAGE2_MODEL_PREFETCH_PID"),
+            stage2_boundary,
+        )
+        self.assertGreater(
+            pipeline.index("wait_background_job HARD_MODEL_PREFETCH_PID"),
+            stage2_boundary,
+        )
+        self.assertIn("SEARCHR1_DEFER_GPU_PROBE=1", pipeline)
+        self.assertIn("CUDA_VISIBLE_DEVICES=", pipeline)
+        self.assertIn('flock -n "$PIPELINE_LOCK_FD"', pipeline)
+        self.assertIn('"$ROOT/scripts/session_runner.py"', pipeline)
+        self.assertLess(
+            pipeline.index('bash "$ROOT/hard_rq0/preflight_storage.sh"'),
+            pipeline.index("start_background_job HARD_ASSET_PREFETCH_PID"),
+        )
+
     def test_specialist_rollout_uses_pinned_searchr1_retrieval_budget(self) -> None:
         root = Path(__file__).resolve().parents[1]
         script = (root / "hard_rq0" / "train_specialist.sh").read_text(
@@ -111,6 +385,23 @@ class HardRQ0Tests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(RuntimeError, "manifest is missing"):
                 check_hard_assets(Path(temporary), adopt_legacy=True)
+
+    def test_interrupted_e5_part_keeps_the_verified_prefix(self) -> None:
+        parts = (
+            ("part_a", 4, "a" * 64),
+            ("part_b", 6, "b" * 64),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / ".assembling"
+            path.write_bytes(b"aaaabbb")
+
+            completed, prefix = repair_e5_assembly_prefix(
+                path, ["part_a"], parts
+            )
+
+            self.assertEqual(completed, ["part_a"])
+            self.assertEqual(prefix, 4)
+            self.assertEqual(path.read_bytes(), b"aaaa")
 
     def test_counted_corpus_decompression_requires_complete_jsonl(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -271,6 +562,11 @@ class HardRQ0Tests(unittest.TestCase):
     def test_retriever_health_requires_the_full_pinned_corpus(self) -> None:
         from stackpilot.hard_assets import EXPECTED_DOCUMENTS
 
+        source_root = Path(__file__).resolve().parents[1] / "stackpilot"
+        server_files = {
+            name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+            for name in ("retrieval_concurrency.py", "searchr1_server.py")
+        }
         response = Mock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
@@ -280,6 +576,7 @@ class HardRQ0Tests(unittest.TestCase):
             "corpus_path": "/data/wiki-18.jsonl",
             "index_documents": EXPECTED_DOCUMENTS,
             "corpus_documents": EXPECTED_DOCUMENTS,
+            "server_files": server_files,
         }
         with patch("stackpilot.hard_policy_eval.requests.get", return_value=response):
             identity = check_retriever(
@@ -295,6 +592,26 @@ class HardRQ0Tests(unittest.TestCase):
             check_retriever(
                 "bm25", 8101, Path("/idx/bm25"), Path("/data/wiki-18.jsonl")
             )
+
+        response.json.return_value.update(
+            {
+                "backend": "e5",
+                "index_path": "/idx/e5",
+                "index_documents": EXPECTED_DOCUMENTS,
+                "faiss_gpu": True,
+                "faiss_gpu_count": 1,
+                "gpu_search_serialized": True,
+                "cuda_empty_cache_disabled": True,
+                "retriever_model": "/models/e5/snapshots/revision",
+                "retriever_model_revision": "revision",
+            }
+        )
+        with patch("stackpilot.hard_policy_eval.requests.get", return_value=response):
+            identity = check_retriever(
+                "e5", 8102, Path("/idx/e5"), Path("/data/wiki-18.jsonl")
+            )
+        self.assertTrue(identity["gpu_search_serialized"])
+        self.assertTrue(identity["cuda_empty_cache_disabled"])
 
     def test_evaluation_limit_is_balanced_across_datasets(self) -> None:
         rows = [{"id": f"a:{index}", "dataset": "a"} for index in range(5)] + [
@@ -750,7 +1067,6 @@ class HardRQ0Tests(unittest.TestCase):
             asset_dir.mkdir()
             data_file = data_dir / "eval_all.jsonl"
             data_file.write_text('{"id":"q1"}\n', encoding="utf-8")
-            import hashlib
 
             data_hash = hashlib.sha256(data_file.read_bytes()).hexdigest()
             atomic_write_json(
@@ -778,23 +1094,79 @@ class HardRQ0Tests(unittest.TestCase):
                 "agent": {"max_search_turns": 4, "result_snippet_chars": 700},
                 "llm": {"temperature": 0.0, "max_tokens": 512},
             }
-            context = evaluation_context(
-                config,
-                data_file.resolve(),
-                [{"id": "q1"}],
-                ["e5", "bm25"],
-                [10, 3],
-                {
-                    "bm25": {"backend": "bm25", "index_path": "/idx/bm25"},
-                    "e5": {
-                        "backend": "e5",
-                        "index_path": "/idx/e5",
-                        "retriever_model": "/models/e5/snapshots/revision",
-                        "retriever_model_revision": "revision",
-                        "faiss_gpu": True,
-                        "faiss_gpu_count": 1,
-                    },
+            retriever_identities = {
+                "bm25": {"backend": "bm25", "index_path": "/idx/bm25"},
+                "e5": {
+                    "backend": "e5",
+                    "index_path": "/idx/e5",
+                    "retriever_model": "/models/e5/snapshots/revision",
+                    "retriever_model_revision": "revision",
+                    "faiss_gpu": True,
+                    "faiss_gpu_count": 1,
                 },
+            }
+            with patch.dict(
+                os.environ,
+                {
+                    "TP": "1",
+                    "DP": "7",
+                    "VLLM_API_SERVER_COUNT": "7",
+                    "GPU_MEMORY_UTILIZATION": "0.88",
+                    "MAX_MODEL_LEN": "16384",
+                    "VLLM_BATCH_INVARIANT": "1",
+                },
+                clear=False,
+            ):
+                context = evaluation_context(
+                    config,
+                    data_file.resolve(),
+                    [{"id": "q1"}],
+                    ["e5", "bm25"],
+                    [10, 3],
+                    retriever_identities,
+                    112,
+                )
+            self.assertEqual(
+                context["protocol"]["serving"],
+                {
+                    "tensor_parallel_size": 1,
+                    "data_parallel_size": 7,
+                    "api_server_count": 7,
+                    "gpu_memory_utilization": 0.88,
+                    "max_model_len": 16384,
+                    "batch_invariant": True,
+                },
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "TP": "1",
+                    "DP": "7",
+                    "VLLM_API_SERVER_COUNT": "7",
+                    "GPU_MEMORY_UTILIZATION": "0.88",
+                    "MAX_MODEL_LEN": "16384",
+                    "VLLM_BATCH_INVARIANT": "0",
+                },
+                clear=False,
+            ):
+                non_invariant = [
+                    evaluation_context(
+                        config,
+                        data_file.resolve(),
+                        [{"id": "q1"}],
+                        ["e5", "bm25"],
+                        [10, 3],
+                        retriever_identities,
+                        workers,
+                    )
+                    for workers in (56, 112)
+                ]
+            self.assertEqual(
+                [
+                    item["protocol"]["serving"]["evaluation_workers"]
+                    for item in non_invariant
+                ],
+                [56, 112],
             )
             self.assertEqual(context["question_ids"], ["q1"])
             self.assertEqual(context["backends"], ["bm25", "e5"])

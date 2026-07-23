@@ -39,8 +39,9 @@ and cross-evaluates six specialists, builds both reports, and cleans up. A rerun
 reuses verified environments, downloads, data, completed evaluations, and exact
 final checkpoints.
 
-Plan at least 270 GiB free before an uncached pilot-only hard-RQ0 run and at
-least 128 GiB available host RAM. The script checks this before downloading.
+Plan at least 270 GiB free before an uncached pilot-only hard-RQ0 run, at least
+192 GiB available host RAM, and at least 22 affinity-visible physical CPU
+cores. The script checks these before downloading.
 Set `HF_HOME` to an existing shared cache if desired; omitting it uses
 `$PWD/.cache/huggingface`.
 
@@ -56,6 +57,13 @@ Pinned Hugging Face commit snapshots are checked in the local `HF_HOME` cache
 first and downloaded only when missing or incomplete. A mutable custom branch
 or tag still needs the Hub to resolve its current commit.
 
+When this experiment is reached through `scripts/run_full_pipeline.sh`, its
+model snapshots and roughly 100 GB of full-wiki assets begin downloading as
+low-priority, GPU-hidden background work during Stage 0. The hard stage waits
+for that resumable job only at its own boundary. Use
+`PREFETCH_FUTURE_WORK=0` for sequential preparation; logs are in
+`logs/prefetch/`.
+
 ## One-node GPU layout
 
 During GRPO training:
@@ -66,11 +74,16 @@ During GRPO training:
 
 During evaluation:
 
-- GPUs 0-1: vLLM policy server with tensor parallel size 2
+- GPUs 0-6: seven vLLM policy replicas (`TP=1`, `DP=7`)
 - GPU 7: E5 retrieval
 - CPU: BM25 retrieval
 
-Training uses top-k 3. Every policy is evaluated at top-k 3, 5, and 10.
+Training uses top-k 3. Every policy is evaluated at top-k 3, 5, and 10. The
+default evaluator runs 112 independent episodes concurrently to feed all seven
+replicas. Turns within an episode remain sequential, seeded output is protected
+with vLLM batch invariance, and E5 GPU-FAISS calls are serialized around the
+single GPU resource. Override concurrency with `HARD_EVAL_WORKERS`; a custom
+serving layout must provide exactly `TP * DP` IDs in `LLM_GPUS`.
 
 ### Search-R1 rollout limits
 
@@ -115,7 +128,9 @@ compressed corpus is removed after atomic promotion.
 The completion manifest tracks the corpus, BM25 index, and E5 index
 independently. Subsequent runs validate and reuse each good component and
 download or rebuild only a missing or invalid one; for example, a missing BM25
-index does not force the 64.6 GB E5 index to be assembled again.
+index does not force the 64.6 GB E5 index to be assembled again. The downloader
+holds an exclusive Linux file lock, so a foreground retry safely waits for an
+already-running background assembly instead of corrupting its temporary files.
 
 ### 3. Prepare existing benchmark annotations
 
