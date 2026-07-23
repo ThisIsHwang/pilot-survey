@@ -4,6 +4,11 @@ import argparse
 import re
 from pathlib import Path
 
+try:
+    from hard_rq0.patch_searchr1_experiment_env import patch as patch_experiment_env
+except ModuleNotFoundError:  # direct `python hard_rq0/...py` execution
+    from patch_searchr1_experiment_env import patch as patch_experiment_env
+
 MARKER = "# STACKPILOT_MIXED_ROUTING_V1"
 
 
@@ -15,6 +20,7 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 
 
 def patch(search_r1_root: Path) -> None:
+    patch_experiment_env(search_r1_root)
     target = search_r1_root / "search_r1" / "llm_agent" / "generation.py"
     text = target.read_text(encoding="utf-8")
     if MARKER in text:
@@ -47,7 +53,7 @@ def patch(search_r1_root: Path) -> None:
                 )
                 backend_ids = []
                 pattern = re.compile(
-                    r"<retrieval_environment>\\s*(bm25|e5)\\s*</retrieval_environment>",
+                    r"<retrieval_environment>\s*(bm25|e5)\s*</retrieval_environment>",
                     re.IGNORECASE,
                 )
                 for index, prompt in enumerate(prompts):
