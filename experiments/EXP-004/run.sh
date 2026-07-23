@@ -28,7 +28,7 @@ for seed in $SEEDS; do
   )
   EXPERIMENT_ID=EXP-004 TAG=mixed-backend-id SEED="$seed" PROFILE="$PROFILE" VARIANT=backend-id \
     MODEL_REF="$ROOT/work/experiments/EXP-004/merged/$run_id" \
-    LIMIT="$LIMIT" TOPKS="$TOPKS" BACKENDS="bm25 e5" \
+    LIMIT="$LIMIT" TOPKS="$TOPKS" BACKENDS="bm25 e5" INJECT_BACKEND_ID=1 \
     bash experiments/eval_numbered_policy.sh
 done
 
