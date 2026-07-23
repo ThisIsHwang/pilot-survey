@@ -43,12 +43,21 @@ for backend in $BACKEND_LIST; do
       .venv-pilot/bin/python -m stackpilot.experiment_registry run-id EXP-005 \
         --seed "$seed" --profile "$PROFILE" --variant "$variant"
     )
+    trainer_checkpoint="$ROOT/work/hard_rq0/checkpoints/$run_id"
+    numbered_checkpoint="$ROOT/work/experiments/EXP-005/checkpoints/$run_id"
     EXP="$run_id" \
-    CHECKPOINT_DIR="$ROOT/work/experiments/EXP-005/checkpoints/$run_id" \
+    CHECKPOINT_DIR="$trainer_checkpoint" \
     LOG_FILE="$ROOT/logs/experiments/EXP-005/${run_id}.log" \
     BACKEND="$backend" SEED="$seed" PROFILE="$PROFILE" \
     BASE_MODEL="$BASE_MODEL" BASE_MODEL_REVISION="$BASE_MODEL_REVISION" \
       bash hard_rq0/train_specialist.sh
+
+    mkdir -p "$(dirname "$numbered_checkpoint")"
+    if [[ -e "$numbered_checkpoint" && ! -L "$numbered_checkpoint" ]]; then
+      echo "Refusing to replace non-symlink numbered checkpoint: $numbered_checkpoint" >&2
+      exit 1
+    fi
+    ln -sfn "$trainer_checkpoint" "$numbered_checkpoint"
 
     EXPERIMENT_ID=EXP-005 SEED="$seed" PROFILE="$PROFILE" VARIANT="$variant" \
       RUN_ID="$run_id" bash experiments/merge_numbered_checkpoint.sh
