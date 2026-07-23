@@ -34,7 +34,7 @@ reward_suffix="a${ANSWER_REWARD_WEIGHT}-e${EVIDENCE_REWARD_WEIGHT}-c${SEARCH_COS
 
 for backend in $BACKEND_LIST; do
   for seed in $SEEDS; do
-    # Bootstrap preserves verified local patches; the evidence patch is idempotent.
+    bash experiments/reset_searchr1_experiment_files.sh
     bash scripts/bootstrap_searchr1.sh
     .venv-searchr1/bin/python hard_rq0/patch_searchr1_evidence_reward.py \
       --search-r1-root upstream/Search-R1
