@@ -137,6 +137,16 @@ Useful controls are `RUN_STAGE0=0`, `RUN_HARD_RQ0=0`, `RUN_SMOKE=0`,
 `HARD_LIMIT=<n>`, and `FORCE_TRAIN=1`. The last option archives a completed
 checkpoint directory and trains again; it does not delete it.
 
+After Stage 0 has completed, resume Stage 2 and every later experiment with:
+
+```bash
+bash scripts/resume_after_stage0.sh
+```
+
+This wrapper exports the controls before starting the child shell. Do not enter
+`RUN_STAGE0=0`, `SKIP_BOOTSTRAP=1`, and the final `bash` as unrelated lines:
+unexported shell variables are not inherited by the pipeline process.
+
 ## Manual Stage-0 run
 
 Use this sequence when observing each phase separately:

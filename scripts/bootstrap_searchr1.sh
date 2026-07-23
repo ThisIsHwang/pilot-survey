@@ -22,7 +22,6 @@ fi
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
 SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
-RUNTIME_PATCH=$ROOT/searchr1_stage2/searchr1-runtime.patch
 
 if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
   echo "Search-R1 bootstrap requires Linux x86_64." >&2
@@ -80,16 +79,7 @@ fi
 
 # The pinned trainer issued unbounded localhost retrieval calls. Apply the
 # small idempotent runtime patch without resetting any unrelated user edits.
-if git -C "$SEARCH_R1" apply --unidiff-zero --reverse --check "$RUNTIME_PATCH" >/dev/null 2>&1; then
-  echo "Search-R1 retrieval-timeout patch is already applied."
-elif git -C "$SEARCH_R1" apply --unidiff-zero --check "$RUNTIME_PATCH" >/dev/null 2>&1; then
-  git -C "$SEARCH_R1" apply --unidiff-zero "$RUNTIME_PATCH"
-  echo "Applied Search-R1 retrieval-timeout patch."
-else
-  echo "Unable to apply $RUNTIME_PATCH cleanly to pinned Search-R1." >&2
-  echo "Preserving the upstream checkout; inspect its local changes." >&2
-  exit 1
-fi
+bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
 
 # Apply the hard-RQ0 rollout-seed hook before any Stage-2 signature is computed.
 # With RQ0_SEED unset it preserves Stage-2's original seed=0 behavior, while
@@ -108,6 +98,7 @@ CORE_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
   --input "$SEARCH_R1/pyproject.toml" \
   --input "$SEARCH_R1/verl/version/version" \
   --input "$ROOT/scripts/bootstrap_searchr1.sh" \
+  --input "$ROOT/scripts/apply_searchr1_runtime_patch.sh" \
   --input "$ROOT/scripts/lib/bootstrap_env.sh" \
   --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
   --value "uv=0.11.30" --value "torch_backend=cu121" \

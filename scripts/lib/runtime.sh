@@ -134,7 +134,15 @@ stop_managed_pid() {
   done
   echo "Managed process $signal_target did not stop after SIGTERM; sending SIGKILL." >&2
   kill -KILL -- "$signal_target" 2>/dev/null || true
-  rm -f -- "$pid_file"
+  for _ in $(seq 1 40); do
+    if ! kill -0 -- "$signal_target" 2>/dev/null; then
+      rm -f -- "$pid_file"
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo "Managed process $signal_target is still visible after SIGKILL; preserving $pid_file and refusing an immediate GPU restart." >&2
+  return 1
 }
 
 show_log_tail() {

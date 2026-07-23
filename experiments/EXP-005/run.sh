@@ -47,9 +47,10 @@ reward_suffix="a${ANSWER_REWARD_WEIGHT}-e${EVIDENCE_REWARD_WEIGHT}-c${SEARCH_COS
 for backend in $BACKEND_LIST; do
   for seed in $SEEDS; do
     bash experiments/reset_searchr1_experiment_files.sh
-    if [[ ${NUMBERED_SETUP_READY:-0} != 1 ]]; then
-      bash scripts/bootstrap_searchr1.sh
-    fi
+    # train_specialist.sh runs a strict preflight that requires the common
+    # bounded retrieval request. NUMBERED_SETUP_READY skips the full bootstrap,
+    # so restore this small idempotent runtime patch after every reset.
+    bash scripts/apply_searchr1_runtime_patch.sh
     .venv-searchr1/bin/python hard_rq0/patch_searchr1_evidence_reward.py \
       --search-r1-root "${SEARCH_R1_ROOT:-upstream/Search-R1}"
     variant="${backend}-evidence-${reward_suffix}"

@@ -181,6 +181,7 @@ def main() -> None:
     def health():
         return {
             "status": "ok",
+            "process_id": os.getpid(),
             "backend": args.retriever_name,
             "index_path": str(Path(args.index_path).resolve()),
             "corpus_path": str(Path(args.corpus_path).resolve()),

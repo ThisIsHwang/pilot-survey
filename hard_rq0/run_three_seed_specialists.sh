@@ -19,6 +19,7 @@ fi
 LIMIT=${LIMIT:-}
 BM25_PORT=${BM25_PORT:-8101}
 E5_PORT=${E5_PORT:-8102}
+E5_GPU=${E5_GPU:-7}
 BACKENDS=${BACKENDS:-"bm25 e5"}
 TOPKS=${TOPKS:-"3 5 10"}
 
@@ -45,25 +46,16 @@ BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
   bash "$ROOT/scripts/resolve_hf_model.sh" \
     "$BASE_MODEL" "$BASE_MODEL_REVISION" "$ROOT/.venv-pilot/bin/python")
 
-for endpoint in "bm25:$BM25_PORT" "e5:$E5_PORT"; do
-  backend=${endpoint%%:*}
-  port=${endpoint#*:}
-  response=$(curl --noproxy '*' -fsS --connect-timeout 3 --max-time 30 \
-    "http://127.0.0.1:${port}/health") || {
-    echo "Hard-RQ0 $backend retriever is not ready on port $port." >&2
-    exit 1
-  }
-  "$ROOT/.venv-pilot/bin/python" -c \
-    'import json,sys; p=json.loads(sys.argv[1]); ok=p.get("status")=="ok" and p.get("backend")==sys.argv[2]; sys.exit(None if ok else f"Unexpected retriever health: {p}")' \
-    "$response" "$backend"
-done
+BM25_PORT="$BM25_PORT" E5_PORT="$E5_PORT" E5_GPU="$E5_GPU" \
+  bash "$ROOT/hard_rq0/ensure_retrievers.sh"
 
 for backend in bm25 e5; do
   if [[ "$backend" == bm25 ]]; then port=$BM25_PORT; else port=$E5_PORT; fi
   for seed in "${seed_args[@]}"; do
     echo "=== train ${backend} specialist, seed ${seed}, profile ${PROFILE} ==="
-    BACKEND=$backend PORT=$port SEED=$seed PROFILE=$PROFILE BASE_MODEL=$BASE_MODEL \
-      AUTO_LAUNCH_RETRIEVERS=0 bash "$ROOT/hard_rq0/train_specialist.sh"
+    BACKEND=$backend PORT=$port SEED=$seed PROFILE=$PROFILE \
+      BASE_MODEL=$BASE_MODEL BASE_MODEL_REVISION=$BASE_MODEL_REVISION \
+      bash "$ROOT/hard_rq0/train_specialist.sh"
 
     BACKEND=$backend SEED=$seed PROFILE=$PROFILE \
       bash "$ROOT/hard_rq0/merge_specialist.sh"

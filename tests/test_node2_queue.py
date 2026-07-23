@@ -56,6 +56,10 @@ class Node2QueueTests(unittest.TestCase):
         self.assertIn("LOW_PRIORITY=(ionice -c 3 nice -n 10)", self.queue)
         self.assertIn("DEFAULT_E5_MODEL=intfloat/e5-base-v2", self.queue)
         self.assertIn("scripts/resolve_hf_model.sh", self.queue)
+        self.assertIn("No experiment has started.", self.queue)
+        self.assertIn("RUN_EXP006=0 RUN_REPORT=0", self.queue)
+        self.assertIn("Refusing to mix node-local and external", self.queue)
+        self.assertIn("KEEP_VLLM=1 is unsafe", self.queue)
         self.assertIn('payload.get("schema") != 2', self.watcher)
         self.assertIn(
             "hard-rq0-{backend}-seed{seed}-{profile}", self.watcher
@@ -81,6 +85,17 @@ class Node2QueueTests(unittest.TestCase):
             'OVERLAP_VLLM_SETUP" == 1 && "$FORCE_TRAIN" == 1', self.queue
         )
         self.assertIn("OVERLAP_VLLM_SETUP=0", self.queue)
+
+    def test_exp005_restores_the_runtime_timeout_after_each_reset(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        exp005 = (root / "experiments" / "EXP-005" / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        reset = exp005.index("reset_searchr1_experiment_files.sh")
+        runtime = exp005.index("apply_searchr1_runtime_patch.sh", reset)
+        evidence = exp005.index("patch_searchr1_evidence_reward.py", runtime)
+        self.assertLess(reset, runtime)
+        self.assertLess(runtime, evidence)
 
 
 if __name__ == "__main__":

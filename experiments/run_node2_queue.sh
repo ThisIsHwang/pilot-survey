@@ -13,19 +13,24 @@ RUN_REPORT=${RUN_REPORT:-1}
 PREFETCH_MODELS=${PREFETCH_MODELS:-1}
 OVERLAP_VLLM_SETUP=${OVERLAP_VLLM_SETUP:-1}
 FORCE_TRAIN=${FORCE_TRAIN:-0}
+KEEP_VLLM=${KEEP_VLLM:-0}
 EXP002_RESULT_SET=${EXP002_RESULT_SET:-$PROFILE}
 EXP002_WAIT_TIMEOUT=${EXP002_WAIT_TIMEOUT:-172800}
 EXP002_POLL_SECONDS=${EXP002_POLL_SECONDS:-30}
 
 for flag in \
   RUN_EXP003 RUN_EXP004 RUN_EXP005 RUN_EXP006 RUN_REPORT PREFETCH_MODELS \
-  OVERLAP_VLLM_SETUP FORCE_TRAIN; do
+  OVERLAP_VLLM_SETUP FORCE_TRAIN KEEP_VLLM; do
   value=${!flag}
   [[ "$value" == 0 || "$value" == 1 ]] || {
     echo "$flag must be 0 or 1; got '$value'." >&2
     exit 2
   }
 done
+if [[ "$KEEP_VLLM" == 1 ]]; then
+  echo "KEEP_VLLM=1 is unsafe in the sequential node-2 queue because the next training stage needs GPUs 0-6; leave it at 0." >&2
+  exit 2
+fi
 if [[ "$OVERLAP_VLLM_SETUP" == 1 && "$FORCE_TRAIN" == 1 ]]; then
   echo "FORCE_TRAIN=1 disables vLLM/training overlap to avoid training the first seed twice."
   OVERLAP_VLLM_SETUP=0
@@ -144,10 +149,14 @@ if [[ -n ${EXP002_ARTIFACT_ROOT:-} ]]; then
 elif [[ "$RUN_EXP006" == 1 || "$RUN_REPORT" == 1 ]]; then
   cat >&2 <<EOF
 EXP002_ARTIFACT_ROOT is required when EXP-006 or the combined report is enabled.
+No experiment has started.
 Point it at the completed/in-progress EXP-002 directory from node 1, for example:
   EXP002_ARTIFACT_ROOT=/node1/pilot-survey/work/hard_rq0 \\
     bash experiments/run_node2_queue.sh
 The directory is only read; EXP-002 is never launched by this queue.
+
+To intentionally run only the independent EXP-003/004/005 stages:
+  RUN_EXP006=0 RUN_REPORT=0 bash experiments/run_node2_queue.sh
 EOF
   exit 2
 fi
@@ -407,8 +416,9 @@ link_read_only_component() {
     return
   fi
   if [[ -e "$destination" ]]; then
-    echo "Reusing node-local Hard-RQ0 component: $destination"
-    return
+    echo "Refusing to mix node-local and external EXP-002 $component data." >&2
+    echo "Move or remove this node-2 path, then rerun so it can be linked read-only: $destination" >&2
+    return 1
   fi
   ln -s "$source" "$destination"
   echo "Linked read-only EXP-002 $component: $destination -> $source"

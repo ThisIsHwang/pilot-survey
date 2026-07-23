@@ -41,13 +41,18 @@ if [[ -n "$LIMIT" && ! "$LIMIT" =~ ^[1-9][0-9]*$ ]]; then
   echo "LIMIT must be empty or a positive integer; got '$LIMIT'." >&2
   exit 2
 fi
-for flag_name in SKIP_BOOTSTRAP SKIP_ASSETS SKIP_DATA RUN_REPORT KEEP_HARD_SERVERS; do
+for flag_name in \
+  SKIP_BOOTSTRAP SKIP_ASSETS SKIP_DATA RUN_REPORT KEEP_HARD_SERVERS KEEP_VLLM; do
   flag_value=${!flag_name:-0}
   if [[ "$flag_value" != 0 && "$flag_value" != 1 ]]; then
     echo "$flag_name must be 0 or 1; got '$flag_value'." >&2
     exit 2
   fi
 done
+if [[ ${KEEP_VLLM:-0} == 1 ]]; then
+  echo "KEEP_VLLM=1 is unsafe in the sequential Hard-RQ0 pipeline because the next training stage needs GPUs 0-6; leave it at 0." >&2
+  exit 2
+fi
 read -r -a seed_args <<< "$SEEDS"
 if [[ ${#seed_args[@]} -eq 0 ]]; then
   echo "SEEDS must contain at least one integer." >&2
@@ -174,6 +179,7 @@ base_eval=(
   "TAG=base-qwen"
   "SEED=0"
   "MODEL_REF=$BASE_MODEL"
+  "MODEL_REVISION=$BASE_MODEL_REVISION"
   "RESULT_SET=$RESULT_SET"
   "SPECIALIST_SEEDS=$SEEDS"
   "BACKENDS=$BACKENDS"
@@ -187,6 +193,7 @@ specialist_run=(
   "RESULT_SET=$RESULT_SET"
   "SEEDS=$SEEDS"
   "BASE_MODEL=$BASE_MODEL"
+  "BASE_MODEL_REVISION=$BASE_MODEL_REVISION"
   "LIMIT=$LIMIT"
   "SPECIALIST_SEEDS=$SEEDS"
   "BACKENDS=$BACKENDS"

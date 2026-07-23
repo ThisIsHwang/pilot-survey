@@ -144,7 +144,7 @@ if [[ -n "$E5_RESOLVED_REVISION" ]]; then
   E5_MODEL_REVISION_ARGS=(--retriever-model-revision "$E5_RESOLVED_REVISION")
 fi
 
-bash "$ROOT/hard_rq0/stop_retrievers.sh" || true
+bash "$ROOT/hard_rq0/stop_retrievers.sh"
 for port in "$BM25_PORT" "$E5_PORT"; do
   if port_is_open "$PILOT_PYTHON" "$port"; then
     echo "Hard-RQ0 port $port is already in use after managed cleanup." >&2
@@ -152,6 +152,8 @@ for port in "$BM25_PORT" "$E5_PORT"; do
     exit 1
   fi
 done
+
+E5_GPU="$E5_GPU" bash "$ROOT/hard_rq0/preflight_faiss_gpu.sh"
 
 launch_complete=0
 cleanup_started() {
@@ -246,6 +248,12 @@ if expected_backend == "e5":
         raise SystemExit(f"E5 did not use FP16 FAISS storage: {payload}")
     if int(payload.get("faiss_temp_memory_mib", 0)) != int(expected_faiss_temp_memory_mib):
         raise SystemExit(f"E5 used unexpected FAISS scratch memory: {payload}")
+    expected_index_bytes = int(expected_documents) * 768 * 2
+    if int(payload.get("faiss_index_bytes", 0)) != expected_index_bytes:
+        raise SystemExit(
+            "E5 loaded an incomplete FP16 vector payload: "
+            f"{payload.get('faiss_index_bytes')} != {expected_index_bytes}"
+        )
     if str(payload.get("cuda_visible_devices")) != expected_e5_gpu:
         raise SystemExit(f"E5 is running on an unexpected CUDA device: {payload}")
     if Path(str(payload.get("retriever_model", ""))).resolve() != Path(expected_model).resolve():

@@ -395,6 +395,19 @@ class HardRQ0Tests(unittest.TestCase):
         retriever_launcher = (
             root / "hard_rq0" / "launch_retrievers.sh"
         ).read_text("utf-8")
+        retriever_ensure = (
+            root / "hard_rq0" / "ensure_retrievers.sh"
+        ).read_text("utf-8")
+        specialist_runner = (
+            root / "hard_rq0" / "run_three_seed_specialists.sh"
+        ).read_text("utf-8")
+        hard_runner = (root / "hard_rq0" / "run_all.sh").read_text("utf-8")
+        faiss_preflight = (
+            root / "hard_rq0" / "preflight_faiss_gpu.sh"
+        ).read_text("utf-8")
+        resume = (root / "scripts" / "resume_after_stage0.sh").read_text(
+            "utf-8"
+        )
 
         self.assertIn("LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}", evaluator)
         self.assertIn("TP=${TP:-1}", evaluator)
@@ -415,6 +428,21 @@ class HardRQ0Tests(unittest.TestCase):
             'E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}',
             retriever_launcher,
         )
+        self.assertIn("preflight_faiss_gpu.sh", retriever_launcher)
+        self.assertIn("EXPECTED_E5_INDEX_BYTES", retriever_ensure)
+        self.assertIn("/retrieve", retriever_ensure)
+        self.assertIn("process_id", retriever_ensure)
+        self.assertIn("hard_rq0/ensure_retrievers.sh", specialist_runner)
+        self.assertIn(
+            "BASE_MODEL_REVISION=$BASE_MODEL_REVISION", specialist_runner
+        )
+        self.assertIn('"MODEL_REVISION=$BASE_MODEL_REVISION"', hard_runner)
+        self.assertIn('"BASE_MODEL_REVISION=$BASE_MODEL_REVISION"', hard_runner)
+        self.assertIn("KEEP_VLLM=1 is unsafe", hard_runner)
+        self.assertIn("paged_flat_gpu_loader", faiss_preflight)
+        self.assertIn("gpu_index.search", faiss_preflight)
+        self.assertIn("export RUN_STAGE0=0", resume)
+        self.assertIn('exec bash "$ROOT/scripts/run_full_pipeline.sh"', resume)
         self.assertLess(
             pipeline.index(
                 'bash "$ROOT/scripts/prefetch_future_models.sh" --stage2'
