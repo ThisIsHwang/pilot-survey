@@ -68,7 +68,7 @@ def specialist_oracle(hard: pd.DataFrame, metric: str) -> pd.DataFrame:
     )
     return (
         selected.groupby(
-            ["subset", "question_id", "dataset", "backend", "topk"],
+            ["subset", "seed", "question_id", "dataset", "backend", "topk"],
             as_index=False,
         )[metric]
         .mean()
@@ -81,10 +81,13 @@ def mixed_regret(hard: pd.DataFrame, mixed: pd.DataFrame, metric: str) -> pd.Dat
     policy = mixed[mixed["policy_tag"] == "mixed-blind"][
         ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
     ].rename(columns={metric: "mixed_score"})
-    merged = policy.merge(
-        oracle,
-        on=["subset", "question_id", "dataset", "backend", "topk"],
-        validate="many_to_one",
+    common_seeds = sorted(set(policy["seed"]) & set(oracle["seed"]))
+    if not common_seeds:
+        raise RuntimeError("EXP-002 specialists and EXP-003 have no common seeds")
+    merged = policy[policy["seed"].isin(common_seeds)].merge(
+        oracle[oracle["seed"].isin(common_seeds)],
+        on=["subset", "seed", "question_id", "dataset", "backend", "topk"],
+        validate="one_to_one",
     )
     merged["metric"] = metric
     merged["mixed_regret"] = merged["specialist_oracle"] - merged["mixed_score"]
@@ -145,7 +148,14 @@ def evidence_reward_value(
 def aggregate(
     frame: pd.DataFrame, value: str, extra_groups: list[str] | None = None
 ) -> pd.DataFrame:
-    groups = ["subset", "dataset", "topk", "metric", *(extra_groups or [])]
+    groups = [
+        "subset",
+        "dataset",
+        "backend",
+        "topk",
+        "metric",
+        *(extra_groups or []),
+    ]
     return (
         frame.groupby(groups)[value]
         .agg(**{value: "mean", f"{value}_std": "std", "cells": "count"})
@@ -190,9 +200,9 @@ def main() -> None:
     lines = [
         "# Numbered mixed-policy experiment report",
         "",
-        "## EXP-003 specialist-oracle regret",
+        "## EXP-003 seed-matched specialist-oracle regret",
         "",
-        "Positive values mean the specialist oracle remains better than mixed-blind.",
+        "Positive values mean the same-seed specialist oracle remains better than mixed-blind.",
         "",
         markdown_table(regret_summary),
         "",
