@@ -10,6 +10,7 @@ NEW_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
         for env_name in (
             'RQ0_SEED',
             'SEARCH_R1_MIXED_MODE',
+            'SEARCH_R1_N_AGENT',
             'SEARCH_R1_RETRIEVER_TIMEOUT',
             'ANSWER_REWARD_WEIGHT',
             'EVIDENCE_REWARD_WEIGHT',
