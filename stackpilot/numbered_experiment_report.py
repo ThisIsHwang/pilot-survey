@@ -32,7 +32,15 @@ def load_jsonl_tree(root: Path) -> pd.DataFrame:
     if not rows:
         raise RuntimeError(f"No JSONL results under {root}")
     frame = pd.DataFrame(rows)
-    required = {"policy_tag", "seed", "question_id", "dataset", "backend", "topk", *REPORT_METRICS}
+    required = {
+        "policy_tag",
+        "seed",
+        "question_id",
+        "dataset",
+        "backend",
+        "topk",
+        *REPORT_METRICS,
+    }
     missing = required - set(frame.columns)
     if missing:
         raise RuntimeError(f"Missing result columns under {root}: {sorted(missing)}")
@@ -60,7 +68,8 @@ def specialist_oracle(hard: pd.DataFrame, metric: str) -> pd.DataFrame:
     )
     return (
         selected.groupby(
-            ["subset", "question_id", "dataset", "backend", "topk"], as_index=False
+            ["subset", "question_id", "dataset", "backend", "topk"],
+            as_index=False,
         )[metric]
         .mean()
         .rename(columns={metric: "specialist_oracle"})
@@ -102,7 +111,9 @@ def metadata_value(blind: pd.DataFrame, oracle: pd.DataFrame, metric: str) -> pd
     return merged
 
 
-def evidence_reward_value(hard: pd.DataFrame, evidence: pd.DataFrame, metric: str) -> pd.DataFrame:
+def evidence_reward_value(
+    hard: pd.DataFrame, evidence: pd.DataFrame, metric: str
+) -> pd.DataFrame:
     rows = []
     for evidence_tag, answer_tag in EVIDENCE_TO_ANSWER_POLICY.items():
         evidence_rows = evidence[evidence["policy_tag"] == evidence_tag][
@@ -131,13 +142,14 @@ def evidence_reward_value(hard: pd.DataFrame, evidence: pd.DataFrame, metric: st
     return pd.concat(rows, ignore_index=True)
 
 
-def aggregate(frame: pd.DataFrame, value: str, extra_groups: list[str] | None = None) -> pd.DataFrame:
+def aggregate(
+    frame: pd.DataFrame, value: str, extra_groups: list[str] | None = None
+) -> pd.DataFrame:
     groups = ["subset", "dataset", "topk", "metric", *(extra_groups or [])]
     return (
-        frame.groupby(groups, as_index=False)[value]
-        .agg(["mean", "std", "count"])
+        frame.groupby(groups)[value]
+        .agg(**{value: "mean", f"{value}_std": "std", "cells": "count"})
         .reset_index()
-        .rename(columns={"mean": value, "std": f"{value}_std", "count": "cells"})
         .sort_values(groups)
     )
 
@@ -159,10 +171,12 @@ def main() -> None:
     exp004 = add_subsets(load_jsonl_tree(Path(args.exp004_results)), matched)
 
     regrets = pd.concat(
-        [mixed_regret(hard, exp003, metric) for metric in REPORT_METRICS], ignore_index=True
+        [mixed_regret(hard, exp003, metric) for metric in REPORT_METRICS],
+        ignore_index=True,
     )
     values = pd.concat(
-        [metadata_value(exp003, exp004, metric) for metric in REPORT_METRICS], ignore_index=True
+        [metadata_value(exp003, exp004, metric) for metric in REPORT_METRICS],
+        ignore_index=True,
     )
     regret_summary = aggregate(regrets, "mixed_regret")
     metadata_summary = aggregate(values, "metadata_value")
@@ -197,10 +211,16 @@ def main() -> None:
             ignore_index=True,
         )
         evidence_summary = aggregate(
-            evidence_values, "evidence_reward_value", extra_groups=["evidence_policy"]
+            evidence_values,
+            "evidence_reward_value",
+            extra_groups=["evidence_policy"],
         )
-        evidence_values.to_csv(Path(output_dir) / "evidence_reward_value_cells.csv", index=False)
-        evidence_summary.to_csv(Path(output_dir) / "evidence_reward_value_summary.csv", index=False)
+        evidence_values.to_csv(
+            Path(output_dir) / "evidence_reward_value_cells.csv", index=False
+        )
+        evidence_summary.to_csv(
+            Path(output_dir) / "evidence_reward_value_summary.csv", index=False
+        )
         lines.extend(
             [
                 "## EXP-005 evidence-aware reward value",
@@ -215,12 +235,16 @@ def main() -> None:
     if args.exp006_results:
         hybrid = load_jsonl_tree(Path(args.exp006_results))
         hybrid_summary = (
-            hybrid.groupby(["policy_tag", "seed", "dataset", "topk"], as_index=False)[REPORT_METRICS]
+            hybrid.groupby(["policy_tag", "seed", "dataset", "topk"], as_index=False)[
+                REPORT_METRICS
+            ]
             .mean()
             .sort_values(["dataset", "topk", "policy_tag", "seed"])
         )
         hybrid_summary.to_csv(Path(output_dir) / "hybrid_summary.csv", index=False)
-        lines.extend(["## EXP-006 held-out hybrid RRF", "", markdown_table(hybrid_summary), ""])
+        lines.extend(
+            ["## EXP-006 held-out hybrid RRF", "", markdown_table(hybrid_summary), ""]
+        )
 
     lines.extend(
         [
