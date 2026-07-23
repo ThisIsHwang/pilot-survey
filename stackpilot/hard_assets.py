@@ -7,7 +7,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any, BinaryIO
 
@@ -366,9 +365,12 @@ def source_identity() -> dict[str, Any]:
 
 def locate_bm25(root: Path) -> Path:
     link = root / "bm25"
+    canonical = root / f"bm25-pinned-{BM25_REVISION}" / "bm25"
     preferred = root / "bm25-download" / "bm25"
     if link.is_dir():
         return link
+    if canonical.is_dir():
+        return canonical
     if preferred.is_dir():
         return preferred
     raise RuntimeError(f"BM25 Lucene index is missing under {root}")
@@ -415,53 +417,107 @@ def _validate_recorded_hashes(record: dict[str, Any], label: str) -> None:
             )
 
 
+def _validate_recorded_e5(root: Path, record: Any, manifest: Path) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise RuntimeError(f"E5 provenance is missing from: {manifest}")
+    actual = validate_e5(root / "e5_Flat.index")
+    expected = {
+        **actual,
+        "assembled_from": source_identity()["e5"]["parts"],
+    }
+    if record != expected:
+        raise RuntimeError(f"E5 index does not match its completion manifest: {manifest}")
+    return record
+
+
+def _validate_recorded_corpus(
+    root: Path, record: Any, manifest: Path
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise RuntimeError(f"wiki-18 corpus provenance is missing from: {manifest}")
+    actual = validate_corpus(root / "wiki-18.jsonl")
+    expected = {
+        **actual,
+        "documents": EXPECTED_DOCUMENTS,
+        "source_archive": source_identity()["corpus"]["archive"],
+    }
+    if record != expected:
+        raise RuntimeError(
+            f"wiki-18 corpus does not match its completion manifest: {manifest}"
+        )
+    return record
+
+
+def _validate_recorded_bm25(
+    root: Path, record: Any, manifest: Path
+) -> dict[str, Any]:
+    if not isinstance(record, dict):
+        raise RuntimeError(f"BM25 provenance is missing from: {manifest}")
+    _validate_recorded_hashes(record, "BM25")
+    if record.get("files") != source_identity()["bm25"]["files"]:
+        raise RuntimeError(f"BM25 hashes do not match pinned provenance: {manifest}")
+    recorded_path = record.get("path")
+    if not isinstance(recorded_path, str) or not recorded_path:
+        raise RuntimeError(f"BM25 manifest path is invalid: {manifest}")
+    actual = validate_bm25(root / recorded_path, root)
+    if _without_hashes(record) != actual:
+        raise RuntimeError(
+            f"BM25 index does not match its completion manifest: {manifest}"
+        )
+    return record
+
+
+def reusable_artifacts(
+    root: Path,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Return independently reusable artifacts from a trusted current manifest."""
+    manifest = root / MANIFEST_NAME
+    try:
+        recorded = _load_manifest(manifest)
+        if recorded.get("sources") != source_identity():
+            raise RuntimeError(
+                f"Hard-RQ0 asset source provenance does not match: {manifest}"
+            )
+        artifacts = recorded.get("artifacts")
+        if not isinstance(artifacts, dict):
+            raise RuntimeError(f"Hard-RQ0 asset manifest has no artifacts: {manifest}")
+    except RuntimeError as exc:
+        message = str(exc)
+        return {}, {name: message for name in ("corpus", "bm25", "e5")}
+
+    validators = {
+        "corpus": _validate_recorded_corpus,
+        "bm25": _validate_recorded_bm25,
+        "e5": _validate_recorded_e5,
+    }
+    reusable: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for name, validator in validators.items():
+        try:
+            reusable[name] = validator(root, artifacts.get(name), manifest)
+        except (OSError, RuntimeError) as exc:
+            errors[name] = str(exc)
+    return reusable, errors
+
+
 def check(root: Path, *, adopt_legacy: bool = False) -> dict[str, Any]:
     """Validate a schema-2 cache cheaply; never bless unverified legacy files."""
     # Retained only for CLI/API compatibility; adoption is intentionally disabled.
     del adopt_legacy
-    manifest = root / MANIFEST_NAME
-    recorded = _load_manifest(manifest)
-    if recorded.get("sources") != source_identity():
+    reusable, errors = reusable_artifacts(root)
+    if errors or set(reusable) != {"corpus", "e5", "bm25"}:
+        raise RuntimeError(f"Hard-RQ0 asset validation failed: {errors}")
+    link = root / "bm25"
+    recorded_bm25 = root / str(reusable["bm25"]["path"])
+    if not link.is_dir() or link.resolve() != recorded_bm25.resolve():
         raise RuntimeError(
-            f"Hard-RQ0 asset source provenance does not match: {manifest}"
+            f"BM25 compatibility link is missing or stale: {link} -> {recorded_bm25}"
         )
-    artifacts = recorded.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != {"corpus", "e5", "bm25"}:
-        raise RuntimeError(
-            f"Hard-RQ0 asset manifest has unexpected artifacts: {manifest}"
-        )
-
-    actual_e5 = validate_e5(root / "e5_Flat.index")
-    if artifacts.get("e5") != {
-        **actual_e5,
-        "assembled_from": source_identity()["e5"]["parts"],
-    }:
-        raise RuntimeError(
-            f"E5 index does not match its completion manifest: {manifest}"
-        )
-
-    actual_corpus = validate_corpus(root / "wiki-18.jsonl")
-    if artifacts.get("corpus") != {
-        **actual_corpus,
-        "documents": EXPECTED_DOCUMENTS,
-        "source_archive": source_identity()["corpus"]["archive"],
-    }:
-        raise RuntimeError(
-            f"wiki-18 corpus does not match its completion manifest: {manifest}"
-        )
-
-    recorded_bm25 = artifacts.get("bm25")
-    if not isinstance(recorded_bm25, dict):
-        raise RuntimeError(f"BM25 provenance is missing from: {manifest}")
-    _validate_recorded_hashes(recorded_bm25, "BM25")
-    if recorded_bm25.get("files") != source_identity()["bm25"]["files"]:
-        raise RuntimeError(f"BM25 hashes do not match pinned provenance: {manifest}")
-    actual_bm25 = validate_bm25(locate_bm25(root), root)
-    if _without_hashes(recorded_bm25) != actual_bm25:
-        raise RuntimeError(
-            f"BM25 index does not match its completion manifest: {manifest}"
-        )
-    return recorded
+    return {
+        "schema": SCHEMA,
+        "sources": source_identity(),
+        "artifacts": reusable,
+    }
 
 
 def ensure_free_space(root: Path, minimum_gib: int) -> None:
@@ -471,10 +527,31 @@ def ensure_free_space(root: Path, minimum_gib: int) -> None:
     required = minimum_gib * 1024**3
     if available < required:
         raise RuntimeError(
-            f"Incomplete full-wiki assets require at least {minimum_gib} GiB free under "
+            f"Remaining full-wiki assets require at least {minimum_gib} GiB free under "
             f"{root}; found {available / 1024**3:.1f} GiB. Set HARD_ASSET_MIN_FREE_GIB "
             "only after confirming the remaining asset sizes."
         )
+
+
+def _required_free_gib(missing: set[str], full_min_gib: int) -> int:
+    if full_min_gib < 1:
+        raise ValueError("--full-min-gib must be positive")
+    if not missing:
+        return 0
+    if "e5" in missing:
+        return full_min_gib
+    # The caller's full-cache override remains an upper bound so an operator who
+    # deliberately lowers it is not silently overruled for a smaller component.
+    component_default = 40 if "corpus" in missing else 10
+    return min(full_min_gib, component_default)
+
+
+def required_free_gib(root: Path, *, full_min_gib: int) -> int:
+    """Return conservative free-space headroom for only the missing components."""
+    reusable, _ = reusable_artifacts(root)
+    return _required_free_gib(
+        {"corpus", "bm25", "e5"} - set(reusable), full_min_gib
+    )
 
 
 def _e5_assembly_state(completed: list[str]) -> dict[str, Any]:
@@ -637,82 +714,162 @@ def _remove_path(path: Path) -> None:
         shutil.rmtree(path)
 
 
+def _unused_backup_path(path: Path, label: str) -> Path:
+    base = path.parent / f".{path.name}.{label}.{os.getpid()}"
+    candidate = base
+    suffix = 0
+    while candidate.exists() or candidate.is_symlink():
+        suffix += 1
+        candidate = base.with_name(f"{base.name}.{suffix}")
+    return candidate
+
+
+def ensure_bm25_link(root: Path, installed_index: Path) -> None:
+    """Atomically point the compatibility path at a verified installed index."""
+    installed_index = installed_index.resolve()
+    if not installed_index.is_dir():
+        raise RuntimeError(f"Verified BM25 index directory is missing: {installed_index}")
+    try:
+        relative_target = installed_index.relative_to(root.resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            f"BM25 index resolves outside the asset root: {installed_index}"
+        ) from exc
+
+    link = root / "bm25"
+    if link.is_dir() and link.resolve() == installed_index:
+        return
+
+    legacy_backup: Path | None = None
+    if link.is_symlink() or link.is_file():
+        link.unlink()
+    elif link.is_dir():
+        legacy_backup = _unused_backup_path(link, "unselected")
+        link.replace(legacy_backup)
+
+    temporary_link = root / f".bm25-link.{os.getpid()}.tmp"
+    temporary_link.unlink(missing_ok=True)
+    try:
+        temporary_link.symlink_to(relative_target, target_is_directory=True)
+        os.replace(temporary_link, link)
+    except BaseException:
+        temporary_link.unlink(missing_ok=True)
+        if legacy_backup is not None and not link.exists() and not link.is_symlink():
+            legacy_backup.replace(link)
+        raise
+
+    if legacy_backup is not None:
+        print(f"Removing unverified legacy BM25 index: {legacy_backup}")
+        _remove_path(legacy_backup)
+
+
 def download_bm25(root: Path) -> dict[str, Any]:
     from huggingface_hub import snapshot_download
 
-    staging = Path(tempfile.mkdtemp(prefix=".bm25-download.", dir=root))
+    staging = root / f".bm25-download-{BM25_REVISION}"
     canonical = root / f"bm25-pinned-{BM25_REVISION}"
-    canonical_backup = root / f".{canonical.name}.previous.{os.getpid()}"
-    legacy_backup = root / f".bm25-legacy.previous.{os.getpid()}"
+    installed_index = canonical / "bm25"
+
+    # A crash after installation but before the manifest write must not trigger
+    # another network transfer. Full pinned hashes make this safe to adopt.
     try:
-        snapshot_download(
-            repo_id=BM25_REPO,
-            repo_type="dataset",
-            revision=BM25_REVISION,
-            local_dir=staging,
-            allow_patterns=["bm25/*"],
-        )
-        staged_index = staging / "bm25"
-        staged_record = validate_bm25(staged_index, staging, hash_files=True)
+        installed_record = validate_bm25(installed_index, root, hash_files=True)
+        ensure_bm25_link(root, installed_index)
+        _remove_path(staging)
+        return installed_record
+    except RuntimeError:
+        pass
 
-        _remove_path(canonical_backup)
-        if canonical.exists() or canonical.is_symlink():
-            canonical.replace(canonical_backup)
+    # A stable local_dir lets huggingface_hub retain and resume partial blobs.
+    staging.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=BM25_REPO,
+        repo_type="dataset",
+        revision=BM25_REVISION,
+        local_dir=staging,
+        allow_patterns=["bm25/*"],
+    )
+    staged_index = staging / "bm25"
+    staged_record = validate_bm25(staged_index, staging, hash_files=True)
+
+    canonical_backup: Path | None = None
+    if canonical.exists() or canonical.is_symlink():
+        canonical_backup = _unused_backup_path(canonical, "previous")
+        canonical.replace(canonical_backup)
+    try:
         staging.replace(canonical)
-        installed_index = canonical / "bm25"
+    except BaseException:
+        if canonical_backup is not None and not canonical.exists():
+            canonical_backup.replace(canonical)
+        raise
 
-        link = root / "bm25"
-        _remove_path(legacy_backup)
-        if link.is_symlink() or link.is_file():
-            link.unlink()
-        elif link.is_dir():
-            link.replace(legacy_backup)
-        temporary_link = root / f".bm25-link.{os.getpid()}.tmp"
-        temporary_link.unlink(missing_ok=True)
-        temporary_link.symlink_to(
-            installed_index.relative_to(root), target_is_directory=True
-        )
-        os.replace(temporary_link, link)
-
+    try:
         fast_record = validate_bm25(installed_index, root)
         staged_record["path"] = fast_record["path"]
         if _without_hashes(staged_record) != fast_record:
             raise RuntimeError("Installed BM25 index changed after pinned verification")
+        ensure_bm25_link(root, installed_index)
+    except BaseException:
+        # Keep the fully downloaded canonical tree (and old backup, if any). A
+        # retry validates it locally and only repeats the interrupted link step.
+        raise
+    if canonical_backup is not None:
         _remove_path(canonical_backup)
-        if legacy_backup.exists():
-            print(f"Removing unverified legacy BM25 index: {legacy_backup}")
-            _remove_path(legacy_backup)
-        return staged_record
-    finally:
-        _remove_path(staging)
+    return staged_record
 
 
 def download(root: Path, *, min_free_gib: int, keep_sources: bool) -> dict[str, Any]:
     root.mkdir(parents=True, exist_ok=True)
     manifest = root / MANIFEST_NAME
-    try:
-        state = check(root)
-        (root / ".hard-rq0-assets-incomplete").unlink(missing_ok=True)
-        print(f"Reusing provenance-verified hard-RQ0 assets: {root}")
-        return state
-    except RuntimeError as exc:
-        print(f"Hard-RQ0 assets require a provenance-safe rebuild: {exc}")
-
-    ensure_free_space(root, min_free_gib)
-    incomplete = root / ".hard-rq0-assets-incomplete"
-    incomplete.write_text(f"schema={SCHEMA}\npid={os.getpid()}\n", encoding="utf-8")
-    # Finish the smaller corpus/BM25 downloads first. E5 is assembled last so
-    # a later download failure cannot force a verified 64.6 GB index rebuild;
-    # interrupted E5 assembly itself resumes from its durable part checkpoint.
-    corpus = decompress_corpus(root, keep_sources=keep_sources)
-    bm25 = download_bm25(root)
-    e5 = assemble_e5(root, keep_sources=keep_sources)
+    reusable, errors = reusable_artifacts(root)
+    missing = {"corpus", "bm25", "e5"} - set(reusable)
     state = {
         "schema": SCHEMA,
         "sources": source_identity(),
-        "artifacts": {"corpus": corpus, "e5": e5, "bm25": bm25},
+        "artifacts": dict(reusable),
     }
+
+    if reusable:
+        print("Reusing provenance-verified hard-RQ0 components: " + ", ".join(reusable))
+    for name in sorted(missing):
+        print(f"Hard-RQ0 component {name} requires completion: {errors.get(name)}")
+
+    if "bm25" in reusable:
+        ensure_bm25_link(root, root / str(reusable["bm25"]["path"]))
+
+    if not missing:
+        atomic_json(manifest, state)
+        checked = check(root)
+        (root / ".hard-rq0-assets-incomplete").unlink(missing_ok=True)
+        print(f"Reusing provenance-verified hard-RQ0 assets: {root}")
+        return checked
+
+    ensure_free_space(root, _required_free_gib(missing, min_free_gib))
+    incomplete = root / ".hard-rq0-assets-incomplete"
+    incomplete.write_text(
+        f"schema={SCHEMA}\npid={os.getpid()}\nmissing={','.join(sorted(missing))}\n",
+        encoding="utf-8",
+    )
+    # Persist every already-verified component before doing network or assembly
+    # work. Each following component is committed independently for restart.
     atomic_json(manifest, state)
+    # Finish the smaller corpus/BM25 downloads first. E5 is assembled last so
+    # a later download failure cannot force a verified 64.6 GB index rebuild;
+    # interrupted E5 assembly itself resumes from its durable part checkpoint.
+    builders = {
+        "corpus": lambda: decompress_corpus(root, keep_sources=keep_sources),
+        "bm25": lambda: download_bm25(root),
+        "e5": lambda: assemble_e5(root, keep_sources=keep_sources),
+    }
+    for name in ("corpus", "bm25", "e5"):
+        if name not in missing:
+            continue
+        artifact = builders[name]()
+        state["artifacts"][name] = artifact
+        atomic_json(manifest, state)
+        if name == "bm25":
+            ensure_bm25_link(root, root / str(artifact["path"]))
+
     checked = check(root)
     incomplete.unlink(missing_ok=True)
     print(f"Hard-RQ0 assets ready with pinned provenance: {root}")
@@ -726,7 +883,7 @@ def parse_args() -> argparse.Namespace:
         description="Download and validate hard-RQ0 assets"
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for name in ("download", "check"):
+    for name in ("download", "check", "required-free"):
         child = subparsers.add_parser(name)
         child.add_argument("--root", required=True)
     downloader = subparsers.choices["download"]
@@ -736,6 +893,12 @@ def parse_args() -> argparse.Namespace:
         "--adopt-legacy",
         action="store_true",
         help="Deprecated compatibility flag; legacy assets are never auto-adopted.",
+    )
+    subparsers.choices["required-free"].add_argument(
+        "--full-min-gib",
+        type=int,
+        default=150,
+        help="Free-space threshold used when the E5 component is missing.",
     )
     return parser.parse_args()
 
@@ -749,9 +912,11 @@ def main() -> None:
             min_free_gib=args.min_free_gib,
             keep_sources=args.keep_source_archives,
         )
-    else:
+    elif args.command == "check":
         state = check(root, adopt_legacy=args.adopt_legacy)
         print(json.dumps(state, sort_keys=True))
+    else:
+        print(required_free_gib(root, full_min_gib=args.full_min_gib))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p upstream work logs
+source "$ROOT/scripts/lib/bootstrap_env.sh"
+validate_bootstrap_flag
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 CUDA_BACKEND=cu129
@@ -101,27 +103,47 @@ git -C upstream/Search-R1 checkout --detach "$SEARCH_R1_COMMIT"
 # Build the environment with uv, bypassing stdlib venv/ensurepip entirely.
 source "$ROOT/scripts/lib/bootstrap_uv.sh"
 ensure_uv "$ROOT"
-"$UV_BIN" venv \
-  --clear \
-  --no-project \
-  --python "$PYTHON_BIN" \
-  .venv-pilot
+BOOTSTRAP_ENV=pilot
+BOOTSTRAP_MARKER=$ROOT/.venv-pilot/.stackpilot-bootstrap.json
+BOOTSTRAP_SIGNATURE=$("$PYTHON_BIN" -m stackpilot.bootstrap_cache signature \
+  --root "$ROOT" --environment "$BOOTSTRAP_ENV" --python "$PYTHON_BIN" \
+  --input "$ROOT/requirements-pilot.txt" \
+  --input "$ROOT/pyproject.toml" \
+  --input "$ROOT/compat/faiss-cpu-gpu-shim/pyproject.toml" \
+  --input "$ROOT/compat/llama-index-core-shim/pyproject.toml" \
+  --input "$ROOT/scripts/bootstrap.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_env.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_java.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
+  --value "uv=0.11.30" --value "torch_backend=$CUDA_BACKEND")
 VENV_PYTHON=$ROOT/.venv-pilot/bin/python
 
-# Resolve torch and all pilot dependencies together. uv routes PyTorch packages only
-# to the CUDA 12.9 index, while normal packages continue to come from PyPI.
-UV_DEFAULT_INDEX=https://pypi.org/simple \
-UV_TORCH_BACKEND=$CUDA_BACKEND \
-UV_LINK_MODE=copy \
-  "$UV_BIN" pip install \
+install_pilot_environment() {
+  # Resolve torch and all pilot dependencies together. uv reuses compatible
+  # artifacts in the persistent cache and fetches only cache misses.
+  UV_DEFAULT_INDEX=https://pypi.org/simple \
+  UV_TORCH_BACKEND=$CUDA_BACKEND \
+  UV_LINK_MODE=copy \
+    uv_pip_install_cached_first "$UV_BIN" \
     --python "$VENV_PYTHON" \
     -r requirements-pilot.txt \
     -e compat/faiss-cpu-gpu-shim \
     -e compat/llama-index-core-shim \
     -e .
+}
 
-"$UV_BIN" pip check --python "$VENV_PYTHON"
-"$VENV_PYTHON" - <<'PY'
+pilot_install_is_valid() {
+  [[ -x "$VENV_PYTHON" ]] || return 1
+  "$VENV_PYTHON" "$ROOT/stackpilot/bootstrap_cache.py" verify-requirements \
+    --requirements "$ROOT/requirements-pilot.txt" \
+    --require 'faiss-cpu==1.14.3' \
+    --require 'llama-index==0.14.23' \
+    --require 'stack-adapt-pilot==0.1.0' \
+    --editable "faiss-cpu=$ROOT/compat/faiss-cpu-gpu-shim" \
+    --editable "llama-index=$ROOT/compat/llama-index-core-shim" \
+    --editable "stack-adapt-pilot=$ROOT" >/dev/null || return 1
+  "$UV_BIN" pip check --python "$VENV_PYTHON" || return 1
+  "$VENV_PYTHON" - <<'PY' || return 1
 import faiss
 import torch
 
@@ -130,29 +152,15 @@ if torch.version.cuda != "12.9":
         f"Expected a CUDA 12.9 PyTorch wheel, found torch {torch.__version__} "
         f"with CUDA {torch.version.cuda!r}."
     )
-if not torch.cuda.is_available():
-    raise SystemExit("PyTorch cannot initialize CUDA on this node.")
-if torch.cuda.device_count() != 8:
-    raise SystemExit(f"Expected 8 visible H100s, found {torch.cuda.device_count()} GPUs.")
-for index in range(8):
-    props = torch.cuda.get_device_properties(index)
-    if "H100" not in props.name:
-        raise SystemExit(f"GPU {index} is not an H100: {props.name}")
-    if props.total_memory < 70 * 1024**3:
-        raise SystemExit(f"GPU {index} appears to be a MIG slice ({props.total_memory / 1024**3:.1f} GiB).")
-torch.ones(1, device="cuda").add_(1)
-print(f"PyTorch {torch.__version__}; wheel CUDA {torch.version.cuda}; visible H100s: {torch.cuda.device_count()}")
 if not hasattr(faiss, "StandardGpuResources"):
     raise SystemExit("The installed FAISS module has no GPU support.")
-if faiss.get_num_gpus() != 8:
-    raise SystemExit(f"FAISS sees {faiss.get_num_gpus()} GPUs; expected exactly 8.")
-print(f"FAISS {faiss.__version__}; GPU resources visible: {faiss.get_num_gpus()}")
+print(f"Pilot native imports passed: PyTorch {torch.__version__}; FAISS {faiss.__version__}")
 PY
 
-source "$ROOT/scripts/lib/bootstrap_java.sh"
-ensure_java "$ROOT"
+  source "$ROOT/scripts/lib/bootstrap_java.sh"
+  ensure_java "$ROOT" || return 1
 
-"$VENV_PYTHON" - <<'PY'
+  "$VENV_PYTHON" - <<'PY' || return 1
 import sys
 from pathlib import Path
 
@@ -186,6 +194,70 @@ print(
     "policy/RQ0/hard-RQ0 modules, and Search-R1 imports passed."
 )
 PY
+}
+
+pilot_hardware_is_valid() {
+  "$VENV_PYTHON" - <<'PY'
+import faiss
+import torch
+
+if not torch.cuda.is_available():
+    raise SystemExit("PyTorch cannot initialize CUDA on this node.")
+if torch.cuda.device_count() != 8:
+    raise SystemExit(f"Expected 8 visible H100s, found {torch.cuda.device_count()} GPUs.")
+for index in range(8):
+    props = torch.cuda.get_device_properties(index)
+    if "H100" not in props.name:
+        raise SystemExit(f"GPU {index} is not an H100: {props.name}")
+    if props.total_memory < 70 * 1024**3:
+        raise SystemExit(
+            f"GPU {index} appears to be a MIG slice "
+            f"({props.total_memory / 1024**3:.1f} GiB)."
+        )
+torch.ones(1, device="cuda").add_(1)
+if faiss.get_num_gpus() != 8:
+    raise SystemExit(f"FAISS sees {faiss.get_num_gpus()} GPUs; expected exactly 8.")
+print(
+    f"PyTorch {torch.__version__}; wheel CUDA {torch.version.cuda}; "
+    f"visible H100s: {torch.cuda.device_count()}"
+)
+print(f"FAISS {faiss.__version__}; GPU resources visible: {faiss.get_num_gpus()}")
+PY
+}
+
+cache_hit=0
+if [[ ${FORCE_BOOTSTRAP:-0} != 1 ]] && \
+   bootstrap_marker_matches \
+     "$PYTHON_BIN" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE" && \
+   pilot_install_is_valid; then
+  cache_hit=1
+  echo "Reusing verified pilot environment: $ROOT/.venv-pilot"
+elif [[ ${FORCE_BOOTSTRAP:-0} != 1 && -x "$VENV_PYTHON" ]] && \
+     bootstrap_interpreter_compatible "$PYTHON_BIN" "$VENV_PYTHON" "$PYTHON_BIN" && \
+     pilot_install_is_valid; then
+  cache_hit=1
+  write_bootstrap_marker \
+    "$VENV_PYTHON" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE"
+  echo "Adopted the existing verified pilot environment without reinstalling packages."
+fi
+
+if [[ $cache_hit -ne 1 ]]; then
+  rm -f -- "$BOOTSTRAP_MARKER"
+  prepare_cached_venv \
+    "$PYTHON_BIN" "$PYTHON_BIN" "$VENV_PYTHON" "$ROOT/.venv-pilot" "$UV_BIN"
+  install_pilot_environment
+  if ! pilot_install_is_valid; then
+    echo "Incremental pilot-environment repair did not validate; rebuilding it once." >&2
+    "$UV_BIN" venv --clear --no-project --python "$PYTHON_BIN" "$ROOT/.venv-pilot"
+    install_pilot_environment
+    pilot_install_is_valid
+  fi
+  write_bootstrap_marker \
+    "$VENV_PYTHON" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE"
+fi
+
+# Hardware failures never invalidate or rebuild a verified package cache.
+pilot_hardware_is_valid
 
 cat <<MSG
 Bootstrap complete.

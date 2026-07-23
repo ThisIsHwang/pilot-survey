@@ -4,6 +4,8 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p upstream work logs
+source "$ROOT/scripts/lib/bootstrap_env.sh"
+validate_bootstrap_flag
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
@@ -85,35 +87,183 @@ fi
 
 source "$ROOT/scripts/lib/bootstrap_uv.sh"
 ensure_uv "$ROOT"
-"$UV_BIN" venv --clear --no-project --python "$PYTHON_BASE" .venv-searchr1
 SEARCH_R1_PYTHON=$ROOT/.venv-searchr1/bin/python
+CORE_ENV=searchr1
+CORE_MARKER=$ROOT/.venv-searchr1/.stackpilot-bootstrap.json
+CORE_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
+  --root "$ROOT" --environment "$CORE_ENV" --python "$PYTHON_BASE" \
+  --input "$ROOT/requirements-searchr1.txt" \
+  --input "$SEARCH_R1/pyproject.toml" \
+  --input "$SEARCH_R1/verl/version/version" \
+  --input "$ROOT/scripts/bootstrap_searchr1.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_env.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
+  --value "uv=0.11.30" --value "torch_backend=cu121" \
+  --value "search_r1_commit=$SEARCH_R1_COMMIT")
+FLASH_ENV=searchr1-flash-attn
+FLASH_MARKER=$ROOT/.venv-searchr1/.stackpilot-flash-attn.json
+NVCC_SIGNATURE=$("$CUDA_HOME/bin/nvcc" --version | tr '\n' ' ')
+GXX_SIGNATURE=$(g++ -dumpfullversion -dumpversion)
+FLASH_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
+  --root "$ROOT" --environment "$FLASH_ENV" --python "$PYTHON_BASE" \
+  --input "$ROOT/requirements-searchr1.txt" \
+  --input "$ROOT/scripts/bootstrap_searchr1.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_env.sh" \
+  --value "flash_attn=2.8.3" --value "cuda_arch=90" \
+  --value "cuda_home=$CUDA_HOME" --value "nvcc=$NVCC_SIGNATURE" \
+  --value "gxx=$GXX_SIGNATURE" --value "torch_backend=cu121")
 
-# Search-R1's embedded veRL 0.1 is API-coupled to vLLM 0.6.3, whose wheel
-# requires torch 2.4/cu121. Keep this compatibility runtime isolated: the host
-# driver/toolkit remains CUDA 12.9 and the pilot/vLLM serving envs remain cu129.
-UV_DEFAULT_INDEX=https://pypi.org/simple \
-UV_TORCH_BACKEND=cu121 \
-UV_LINK_MODE=copy \
-  "$UV_BIN" pip install \
+install_searchr1_core() {
+  # Search-R1's embedded veRL is API-coupled to vLLM 0.6.3/torch cu121.
+  # Reuse local wheels first and download only a missing dependency delta.
+  UV_DEFAULT_INDEX=https://pypi.org/simple \
+  UV_TORCH_BACKEND=cu121 \
+  UV_LINK_MODE=copy \
+    uv_pip_install_cached_first "$UV_BIN" \
     --python "$SEARCH_R1_PYTHON" \
     -r requirements-searchr1.txt
 
-# flash-attn must see the installed torch and the host CUDA compiler, so it is
-# intentionally a second, non-isolated source build.
-MAX_JOBS=${FLASH_ATTN_MAX_JOBS:-4} \
-FLASH_ATTN_CUDA_ARCHS=90 \
-FLASH_ATTENTION_FORCE_BUILD=TRUE \
-UV_LINK_MODE=copy \
-  "$UV_BIN" pip install \
+  UV_LINK_MODE=copy \
+    uv_pip_install_cached_first "$UV_BIN" \
+      --python "$SEARCH_R1_PYTHON" --no-deps -e "$SEARCH_R1"
+}
+
+install_searchr1_flash() {
+  # Rebuild only when explicitly forced or when the existing native extension
+  # cannot be imported; a compatible build is adopted with the current
+  # torch/CUDA/compiler signature.
+  MAX_JOBS=${FLASH_ATTN_MAX_JOBS:-4} \
+  FLASH_ATTN_CUDA_ARCHS=90 \
+  FLASH_ATTENTION_FORCE_BUILD=TRUE \
+  UV_LINK_MODE=copy \
+    uv_pip_install_cached_first "$UV_BIN" \
     --python "$SEARCH_R1_PYTHON" \
     --no-build-isolation \
+    --reinstall-package flash-attn \
     flash-attn==2.8.3
+}
 
-UV_LINK_MODE=copy \
-  "$UV_BIN" pip install \
-    --python "$SEARCH_R1_PYTHON" \
-    --no-deps \
-    -e "$SEARCH_R1"
+searchr1_core_is_valid() {
+  [[ -x "$SEARCH_R1_PYTHON" ]] || return 1
+  "$SEARCH_R1_PYTHON" "$ROOT/stackpilot/bootstrap_cache.py" \
+    verify-requirements --requirements "$ROOT/requirements-searchr1.txt" \
+    --require 'verl==0.1' --editable "verl=$SEARCH_R1" >/dev/null || return 1
+  "$UV_BIN" pip check --python "$SEARCH_R1_PYTHON" || return 1
+  "$SEARCH_R1_PYTHON" - <<'PY' || return 1
+import importlib.metadata
+
+import ray
+import tensordict
+import torch
+import transformers
+import vllm
+import vllm._C  # noqa: F401
+
+expected = {
+    "torch": "2.4.0",
+    "vllm": "0.6.3",
+    "transformers": "4.47.1",
+    "tensordict": "0.5.0",
+    "ray": "2.42.1",
+}
+actual_versions = {}
+for package, version in expected.items():
+    actual = importlib.metadata.version(package).split("+")[0]
+    actual_versions[package] = actual
+    if actual != version:
+        raise SystemExit(f"Expected {package} {version}, found {actual}")
+if torch.version.cuda != "12.1":
+    raise SystemExit(f"Search-R1 compatibility torch must be cu121; found {torch.version.cuda}")
+print(
+    f"Search-R1 core imports passed: torch {torch.__version__}, "
+    f"vLLM {vllm.__version__}, transformers {transformers.__version__}, "
+    f"Ray {ray.__version__}, tensordict {actual_versions['tensordict']}"
+)
+PY
+}
+
+searchr1_flash_is_valid() {
+  [[ -x "$SEARCH_R1_PYTHON" ]] || return 1
+  "$SEARCH_R1_PYTHON" - <<'PY' || return 1
+import importlib.metadata
+
+import flash_attn
+from flash_attn import flash_attn_func  # noqa: F401
+
+actual = importlib.metadata.version("flash-attn").split("+")[0]
+if actual != "2.8.3":
+    raise SystemExit(f"Expected flash-attn 2.8.3, found {actual}")
+print(f"flash-attn native import passed: {flash_attn.__version__}")
+PY
+}
+
+searchr1_combined_imports_are_valid() {
+  "$SEARCH_R1_PYTHON" - <<'PY' || return 1
+from search_r1.llm_agent.generation import LLMGenerationManager  # noqa: F401
+from verl.trainer.main_ppo import RewardManager  # noqa: F401
+
+print("Search-R1/veRL training imports passed.")
+PY
+}
+
+core_hit=0
+if [[ ${FORCE_BOOTSTRAP:-0} != 1 ]] && \
+   bootstrap_marker_matches \
+     "$PYTHON_BASE" "$CORE_MARKER" "$CORE_ENV" "$CORE_SIGNATURE" && \
+   searchr1_core_is_valid; then
+  core_hit=1
+  echo "Reusing verified Search-R1 core environment."
+elif [[ ${FORCE_BOOTSTRAP:-0} != 1 && -x "$SEARCH_R1_PYTHON" ]] && \
+     bootstrap_interpreter_compatible \
+       "$PYTHON_BASE" "$SEARCH_R1_PYTHON" "$PYTHON_BASE" && \
+     searchr1_core_is_valid; then
+  core_hit=1
+  write_bootstrap_marker \
+    "$SEARCH_R1_PYTHON" "$CORE_MARKER" "$CORE_ENV" "$CORE_SIGNATURE"
+  echo "Adopted the existing verified Search-R1 core without reinstalling packages."
+fi
+
+if [[ $core_hit -ne 1 ]]; then
+  rm -f -- "$CORE_MARKER"
+  prepare_cached_venv \
+    "$PYTHON_BASE" "$PYTHON_BASE" "$SEARCH_R1_PYTHON" \
+    "$ROOT/.venv-searchr1" "$UV_BIN"
+  install_searchr1_core
+  if ! searchr1_core_is_valid; then
+    echo "Incremental Search-R1 repair did not validate; rebuilding it once." >&2
+    "$UV_BIN" venv --clear --no-project --python "$PYTHON_BASE" \
+      "$ROOT/.venv-searchr1"
+    install_searchr1_core
+    searchr1_core_is_valid
+  fi
+  write_bootstrap_marker \
+    "$SEARCH_R1_PYTHON" "$CORE_MARKER" "$CORE_ENV" "$CORE_SIGNATURE"
+fi
+
+flash_hit=0
+if [[ ${FORCE_BOOTSTRAP:-0} != 1 ]] && \
+   bootstrap_marker_matches \
+     "$PYTHON_BASE" "$FLASH_MARKER" "$FLASH_ENV" "$FLASH_SIGNATURE" && \
+   searchr1_flash_is_valid; then
+  flash_hit=1
+  echo "Reusing verified flash-attn build."
+elif [[ ${FORCE_BOOTSTRAP:-0} != 1 ]] && \
+     searchr1_flash_is_valid; then
+  flash_hit=1
+  write_bootstrap_marker \
+    "$SEARCH_R1_PYTHON" "$FLASH_MARKER" "$FLASH_ENV" "$FLASH_SIGNATURE"
+  echo "Adopted the existing compatible flash-attn build without recompiling it."
+fi
+
+if [[ $flash_hit -ne 1 ]]; then
+  rm -f -- "$FLASH_MARKER"
+  install_searchr1_flash
+  searchr1_flash_is_valid
+  write_bootstrap_marker \
+    "$SEARCH_R1_PYTHON" "$FLASH_MARKER" "$FLASH_ENV" "$FLASH_SIGNATURE"
+fi
+
+searchr1_combined_imports_are_valid
 
 "$UV_BIN" pip check --python "$SEARCH_R1_PYTHON"
 "$SEARCH_R1_PYTHON" - <<'PY'

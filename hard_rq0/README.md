@@ -36,13 +36,25 @@ three-seed `pilot` profile. It bootstraps all three isolated environments,
 performs CUDA/FAISS/Java/Search-R1/capacity preflights, downloads pinned assets
 and models, prepares data, launches both retrievers, evaluates base Qwen, trains
 and cross-evaluates six specialists, builds both reports, and cleans up. A rerun
-reuses verified downloads, data, completed evaluations, and exact final
-checkpoints.
+reuses verified environments, downloads, data, completed evaluations, and exact
+final checkpoints.
 
 Plan at least 270 GiB free before an uncached pilot-only hard-RQ0 run and at
 least 128 GiB available host RAM. The script checks this before downloading.
 Set `HF_HOME` to an existing shared cache if desired; omitting it uses
 `$PWD/.cache/huggingface`.
+
+Bootstrap reruns validate and reuse `.venv-pilot`, `.venv-vllm`, and
+`.venv-searchr1`. The persistent `uv` package cache defaults to
+`$PWD/.cache/uv`; missing packages are repaired in place and only the uncached
+delta is downloaded. Set `UV_CACHE_DIR` to share that cache, use
+`FORCE_BOOTSTRAP=1` for an intentional clean rebuild, or use `UV_OFFLINE=1` to
+require every Python package to be present in the cache. Offline package mode
+does not disable model or dataset downloads.
+
+Pinned Hugging Face commit snapshots are checked in the local `HF_HOME` cache
+first and downloaded only when missing or incomplete. A mutable custom branch
+or tag still needs the Hub to resolve its current commit.
 
 ## One-node GPU layout
 
@@ -84,8 +96,10 @@ This downloads immutable Search-R1 wiki-18 corpus, BM25-index, and E5-index
 revisions. The E5 split parts total 64.6 GB and are assembled incrementally;
 each source part is removed after a durable assembly checkpoint and the
 compressed corpus is removed after atomic promotion.
-The completion manifest lets subsequent runs validate and reuse the final files
-without downloading or rebuilding them.
+The completion manifest tracks the corpus, BM25 index, and E5 index
+independently. Subsequent runs validate and reuse each good component and
+download or rebuild only a missing or invalid one; for example, a missing BM25
+index does not force the 64.6 GB E5 index to be assembled again.
 
 ### 3. Prepare existing benchmark annotations
 
@@ -242,6 +256,7 @@ PROFILE=smoke RESULT_SET=smoke LIMIT=20 SEEDS="13" \
 A smoke run defaults to `LIMIT=20` and skips the final report. It still needs the
 full-wiki assets. `SKIP_BOOTSTRAP=1`, `SKIP_ASSETS=1`, and `SKIP_DATA=1` are
 available for an already verified installation; skipped assets and data are
-still validated before use. `FORCE_TRAIN=1` archives a completed checkpoint and
-starts that run again. A custom remote model should also set its full immutable
+still validated before use. Normal bootstrap reuse does not require
+`SKIP_BOOTSTRAP=1`. `FORCE_TRAIN=1` archives a completed checkpoint and starts
+that run again. A custom remote model should also set its full immutable
 `BASE_MODEL_REVISION`; the bundled Qwen model is already pinned.

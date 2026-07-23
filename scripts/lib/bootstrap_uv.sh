@@ -21,6 +21,10 @@ ensure_uv() {
   local uv_version=0.11.30
   local path_uv
 
+  UV_CACHE_DIR=${UV_CACHE_DIR:-$project_root/.cache/uv}
+  mkdir -p "$UV_CACHE_DIR"
+  export UV_CACHE_DIR
+
   if uv_has_exact_version "$install_dir/uv" "$uv_version"; then
     UV_BIN=$install_dir/uv
   elif path_uv=$(command -v uv 2>/dev/null) && \
@@ -115,4 +119,5 @@ PY
 
   export UV_BIN
   "$UV_BIN" --version
+  echo "UV_CACHE_DIR=$UV_CACHE_DIR"
 }

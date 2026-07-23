@@ -21,6 +21,7 @@ ensure_java() {
   local python_bin
   local uv_bin
   local bundled_home
+  local -a offline_args=()
 
   if [[ -n "${JAVA_HOME:-}" ]] && _java_is_compatible "$JAVA_HOME/bin/java"; then
     java_home=$JAVA_HOME
@@ -54,8 +55,12 @@ ensure_java() {
       fi
 
       echo "Installing bundled Java 21 from PyPI into .venv-pilot"
+      if [[ ${UV_OFFLINE:-0} == 1 ]]; then
+        offline_args=(--offline)
+      fi
       UV_DEFAULT_INDEX=https://pypi.org/simple UV_LINK_MODE=copy \
         "$uv_bin" pip install \
+          "${offline_args[@]}" \
           --python "$python_bin" \
           'jdk4py==21.0.8.2'
       bundled_home=$("$python_bin" -c \

@@ -3,6 +3,8 @@ set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
+source "$ROOT/scripts/lib/bootstrap_env.sh"
+validate_bootstrap_flag
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 # vLLM 0.19.0 is intentionally pinned: its PyPI wheel is natively built for
@@ -62,24 +64,34 @@ done
 
 source "$ROOT/scripts/lib/bootstrap_uv.sh"
 ensure_uv "$ROOT"
-"$UV_BIN" venv \
-  --clear \
-  --no-project \
-  --python "$PYTHON_BIN" \
-  .venv-vllm
+BOOTSTRAP_ENV=vllm
+BOOTSTRAP_MARKER=$ROOT/.venv-vllm/.stackpilot-bootstrap.json
+BOOTSTRAP_SIGNATURE=$("$PYTHON_BIN" -m stackpilot.bootstrap_cache signature \
+  --root "$ROOT" --environment "$BOOTSTRAP_ENV" --python "$PYTHON_BIN" \
+  --input "$ROOT/requirements-vllm.txt" \
+  --input "$ROOT/scripts/bootstrap_vllm.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_env.sh" \
+  --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
+  --value "uv=0.11.30" --value "torch_backend=$CUDA_BACKEND")
 VENV_PYTHON=$ROOT/.venv-vllm/bin/python
 
-# This comes only from PyPI/PyTorch's package index, avoiding GitHub release
-# redirects. Version 0.19.0's main binary and its exact torch build are cu129.
-UV_DEFAULT_INDEX=https://pypi.org/simple \
-UV_LINK_MODE=copy \
-  "$UV_BIN" pip install \
+install_vllm_environment() {
+  # uv reuses compatible artifacts in the persistent cache and downloads only
+  # packages absent from it.
+  UV_DEFAULT_INDEX=https://pypi.org/simple \
+  UV_LINK_MODE=copy \
+    uv_pip_install_cached_first "$UV_BIN" \
     --python "$VENV_PYTHON" \
     --torch-backend "$CUDA_BACKEND" \
     -r requirements-vllm.txt
+}
 
-"$UV_BIN" pip check --python "$VENV_PYTHON"
-"$VENV_PYTHON" - <<'PY'
+vllm_install_is_valid() {
+  [[ -x "$VENV_PYTHON" ]] || return 1
+  "$VENV_PYTHON" "$ROOT/stackpilot/bootstrap_cache.py" verify-requirements \
+    --requirements "$ROOT/requirements-vllm.txt" >/dev/null || return 1
+  "$UV_BIN" pip check --python "$VENV_PYTHON" || return 1
+  "$VENV_PYTHON" - <<'PY' || return 1
 import torch
 import vllm
 import vllm._C  # noqa: F401
@@ -94,6 +106,18 @@ if torch.version.cuda != "12.9":
     )
 if envs.VLLM_MAIN_CUDA_VERSION != "12.9":
     raise SystemExit(f"vLLM binary targets CUDA {envs.VLLM_MAIN_CUDA_VERSION}, not 12.9.")
+print(
+    f"vLLM native imports passed: vLLM {vllm.__version__}; "
+    f"PyTorch {torch.__version__}; wheel CUDA {torch.version.cuda}"
+)
+PY
+}
+
+vllm_hardware_is_valid() {
+  "$VENV_PYTHON" - <<'PY'
+import torch
+import vllm
+
 if not torch.cuda.is_available():
     raise SystemExit("vLLM's PyTorch cannot initialize CUDA on this node.")
 if torch.cuda.device_count() != 8:
@@ -110,5 +134,40 @@ print(
     f"wheel CUDA {torch.version.cuda}; visible H100s: {torch.cuda.device_count()}"
 )
 PY
+}
+
+cache_hit=0
+if [[ ${FORCE_BOOTSTRAP:-0} != 1 ]] && \
+   bootstrap_marker_matches \
+     "$PYTHON_BIN" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE" && \
+   vllm_install_is_valid; then
+  cache_hit=1
+  echo "Reusing verified vLLM environment: $ROOT/.venv-vllm"
+elif [[ ${FORCE_BOOTSTRAP:-0} != 1 && -x "$VENV_PYTHON" ]] && \
+     bootstrap_interpreter_compatible "$PYTHON_BIN" "$VENV_PYTHON" "$PYTHON_BIN" && \
+     vllm_install_is_valid; then
+  cache_hit=1
+  write_bootstrap_marker \
+    "$VENV_PYTHON" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE"
+  echo "Adopted the existing verified vLLM environment without reinstalling packages."
+fi
+
+if [[ $cache_hit -ne 1 ]]; then
+  rm -f -- "$BOOTSTRAP_MARKER"
+  prepare_cached_venv \
+    "$PYTHON_BIN" "$PYTHON_BIN" "$VENV_PYTHON" "$ROOT/.venv-vllm" "$UV_BIN"
+  install_vllm_environment
+  if ! vllm_install_is_valid; then
+    echo "Incremental vLLM repair did not validate; rebuilding it once." >&2
+    "$UV_BIN" venv --clear --no-project --python "$PYTHON_BIN" "$ROOT/.venv-vllm"
+    install_vllm_environment
+    vllm_install_is_valid
+  fi
+  write_bootstrap_marker \
+    "$VENV_PYTHON" "$BOOTSTRAP_MARKER" "$BOOTSTRAP_ENV" "$BOOTSTRAP_SIGNATURE"
+fi
+
+# A driver/GPU problem is reported without deleting the verified environment.
+vllm_hardware_is_valid
 
 echo "vLLM environment ready: source $ROOT/.venv-vllm/bin/activate"

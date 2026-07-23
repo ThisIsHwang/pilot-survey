@@ -52,6 +52,15 @@ download progress is therefore visible and is not hidden behind vLLM's old
 index, policy-evaluation, and completed-training caches. Full-wiki E5 startup
 also has a four-hour default readiness window.
 
+The three bootstraps are cache-aware too. A normal rerun validates and reuses
+`.venv-pilot`, `.venv-vllm`, and `.venv-searchr1`; when a requirement changes or
+a package is missing, `uv` repairs that environment in place and downloads only
+the missing package delta. Its persistent cache defaults to `$PWD/.cache/uv`
+and can be shared by setting `UV_CACHE_DIR`. Use `FORCE_BOOTSTRAP=1` only for an
+intentional clean environment rebuild. `UV_OFFLINE=1` disables the online
+fallback for Python package installation and fails if a required package is not
+already cached; it does not make model or dataset downloads offline.
+
 The four entry points are deliberately explicit:
 
 - `scripts/run_all.sh`: Stage 0 only
@@ -100,11 +109,11 @@ skips its multi-seed report. A fresh hard smoke still downloads the full wiki-18
 assets; use `RUN_HARD_RQ0=0` when only a lightweight Stage-0/2 code-path check is
 wanted. A smoke run is not a complete experiment.
 
-After all three bootstraps have succeeded once, avoid recreating the
-environments on a rerun:
+No bootstrap flag is needed for a normal cached rerun. To deliberately discard
+and rebuild all three environments instead:
 
 ```bash
-SKIP_BOOTSTRAP=1 \
+FORCE_BOOTSTRAP=1 \
   bash scripts/run_full_pipeline.sh
 ```
 
@@ -206,7 +215,9 @@ The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
   may point at an existing shared cache before running the scripts. Remote
   model refs are converted to concrete `snapshots/<commit>` directories before
   evaluation or training, so a moved `main` cannot reuse results from different
-  weights.
+  weights. Immutable commit revisions are checked in the local Hugging Face
+  cache first and contact the Hub only when the snapshot is missing or
+  incomplete; mutable branches and tags still require online resolution.
 - Prepared data has a configuration-and-SHA-256 manifest and is reused only
   when its counts, settings, and output files match. Existing valid pilot data
   is upgraded to the stronger manifest without downloading it again. Use
@@ -226,9 +237,11 @@ The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
   so an interrupted run is moved to `.incomplete.<timestamp>` and restarted
   from the base model instead of pretending to resume.
 - Hard-RQ0 pins the corpus, BM25, E5, FlashRAG, Qwen, E5 encoder, and query
-  analysis model revisions. Its 64.6 GB E5 index is assembled incrementally;
-  each downloaded split is removed after its durable assembly checkpoint, and
-  the compressed corpus is removed after successful promotion, unless
+  analysis model revisions. Corpus, BM25, and E5 validity is tracked
+  independently, so a rerun downloads or rebuilds only a missing or invalid
+  component. Its 64.6 GB E5 index is assembled incrementally; each downloaded
+  split is removed after its durable assembly checkpoint, and the compressed
+  corpus is removed after successful promotion, unless
   `KEEP_HARD_SOURCE_ARCHIVES=1` is set.
 - Hard-RQ0 assets and prepared data have strict manifests. Policy rows resume by
   a shared evaluation signature and a model-specific run signature; stale rows

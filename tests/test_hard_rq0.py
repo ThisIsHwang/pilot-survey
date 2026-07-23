@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 import gzip
 from pathlib import Path
@@ -18,6 +19,10 @@ from stackpilot.hard_assets import (
     EXPECTED_DOCUMENTS,
     check as check_hard_assets,
     decompress_gzip_counted,
+    download as download_hard_assets,
+    download_bm25,
+    ensure_bm25_link,
+    required_free_gib,
     source_identity,
 )
 
@@ -77,6 +82,131 @@ class HardRQ0Tests(unittest.TestCase):
             copied, rows = decompress_gzip_counted(source, target)
             self.assertEqual((copied, rows), (len(payload), 2))
             self.assertEqual(target.read_bytes(), payload)
+
+    def test_hard_asset_download_reuses_completed_components(self) -> None:
+        corpus = {"path": "wiki-18.jsonl", "size": 1}
+        bm25 = {"path": "bm25-pinned-revision/bm25", "size": 2}
+        e5 = {"path": "e5_Flat.index", "size": 3}
+        checked = {
+            "schema": 2,
+            "sources": source_identity(),
+            "artifacts": {"corpus": corpus, "bm25": bm25, "e5": e5},
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch(
+                    "stackpilot.hard_assets.reusable_artifacts",
+                    return_value=(
+                        {"corpus": corpus, "bm25": bm25},
+                        {"e5": "missing"},
+                    ),
+                ),
+                patch("stackpilot.hard_assets.ensure_free_space") as free_space,
+                patch("stackpilot.hard_assets.ensure_bm25_link") as repair_link,
+                patch("stackpilot.hard_assets.decompress_corpus") as corpus_build,
+                patch("stackpilot.hard_assets.download_bm25") as bm25_build,
+                patch(
+                    "stackpilot.hard_assets.assemble_e5", return_value=e5
+                ) as e5_build,
+                patch("stackpilot.hard_assets.check", return_value=checked),
+            ):
+                result = download_hard_assets(
+                    root, min_free_gib=150, keep_sources=False
+                )
+
+            self.assertEqual(result, checked)
+            corpus_build.assert_not_called()
+            bm25_build.assert_not_called()
+            e5_build.assert_called_once_with(root, keep_sources=False)
+            free_space.assert_called_once_with(root, 150)
+            repair_link.assert_called_once_with(root, root / bm25["path"])
+            manifest = json.loads(
+                (root / ".hard-rq0-assets-manifest.json").read_text("utf-8")
+            )
+            self.assertEqual(manifest["artifacts"], checked["artifacts"])
+            self.assertFalse((root / ".hard-rq0-assets-incomplete").exists())
+
+    def test_hard_asset_manifest_keeps_progress_after_later_failure(self) -> None:
+        corpus = {"path": "wiki-18.jsonl", "size": 1}
+        bm25 = {"path": "bm25-pinned-revision/bm25", "size": 2}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch(
+                    "stackpilot.hard_assets.reusable_artifacts",
+                    return_value=(
+                        {"corpus": corpus},
+                        {"bm25": "missing", "e5": "missing"},
+                    ),
+                ),
+                patch("stackpilot.hard_assets.ensure_free_space"),
+                patch("stackpilot.hard_assets.ensure_bm25_link"),
+                patch("stackpilot.hard_assets.decompress_corpus") as corpus_build,
+                patch("stackpilot.hard_assets.download_bm25", return_value=bm25),
+                patch(
+                    "stackpilot.hard_assets.assemble_e5",
+                    side_effect=RuntimeError("interrupted"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "interrupted"),
+            ):
+                download_hard_assets(root, min_free_gib=150, keep_sources=False)
+
+            corpus_build.assert_not_called()
+            manifest = json.loads(
+                (root / ".hard-rq0-assets-manifest.json").read_text("utf-8")
+            )
+            self.assertEqual(manifest["artifacts"], {"corpus": corpus, "bm25": bm25})
+            self.assertTrue((root / ".hard-rq0-assets-incomplete").is_file())
+
+    def test_required_free_space_tracks_only_missing_components(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cases = (
+                ({"corpus": {}, "bm25": {}, "e5": {}}, 0),
+                ({"corpus": {}, "bm25": {}}, 150),
+                ({"bm25": {}, "e5": {}}, 40),
+                ({"corpus": {}, "e5": {}}, 10),
+            )
+            for reusable, expected in cases:
+                with (
+                    self.subTest(reusable=set(reusable)),
+                    patch(
+                        "stackpilot.hard_assets.reusable_artifacts",
+                        return_value=(reusable, {}),
+                    ),
+                ):
+                    self.assertEqual(
+                        required_free_gib(root, full_min_gib=150), expected
+                    )
+
+    def test_bm25_download_keeps_stable_staging_after_interruption(self) -> None:
+        fake_hub = types.ModuleType("huggingface_hub")
+        fake_hub.snapshot_download = Mock(side_effect=RuntimeError("network stopped"))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.dict(sys.modules, {"huggingface_hub": fake_hub}),
+                self.assertRaisesRegex(RuntimeError, "network stopped"),
+            ):
+                download_bm25(root)
+            staging = root / f".bm25-download-{source_identity()['bm25']['revision']}"
+            self.assertTrue(staging.is_dir())
+
+    @unittest.skipIf(os.name == "nt", "directory symlink creation targets Linux")
+    def test_bm25_compatibility_link_is_repaired(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            installed = root / "bm25-pinned-test" / "bm25"
+            installed.mkdir(parents=True)
+            stale = root / "bm25"
+            stale.mkdir()
+            (stale / "legacy").write_text("old", encoding="utf-8")
+
+            ensure_bm25_link(root, installed)
+
+            self.assertTrue(stale.is_symlink())
+            self.assertEqual(stale.resolve(), installed.resolve())
 
     def test_crossed_bootstrap_requires_a_complete_seed_question_grid(self) -> None:
         frame = pd.DataFrame(
