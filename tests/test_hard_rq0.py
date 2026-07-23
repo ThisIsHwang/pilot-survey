@@ -93,6 +93,17 @@ class HardRQ0Tests(unittest.TestCase):
 
         self.assertNotIn("data.max_obs_length=700", script)
         self.assertIn('"max_obs_length": int(max_obs_length)', script)
+        self.assertIn('"schema": 2,', script)
+
+        merger = (root / "hard_rq0" / "merge_specialist.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('if payload.get("schema") != 2:', merger)
+        self.assertIn('"max_obs_length": 500', merger)
+        self.assertIn(
+            'if payload.get("rollout_protocol") != expected_rollout_protocol:',
+            merger,
+        )
 
     def test_hard_asset_contract_is_pinned_and_never_adopts_legacy_files(self) -> None:
         self.assertEqual(E5_INDEX_SIZE, sum(part[1] for part in E5_PARTS))

@@ -55,7 +55,7 @@ try:
     payload = json.loads(Path(marker_path).read_text(encoding="utf-8"))
 except (OSError, json.JSONDecodeError) as exc:
     raise SystemExit(f"Invalid completion marker {marker_path}: {exc}") from exc
-if payload.get("schema") != 1:
+if payload.get("schema") != 2:
     raise SystemExit(f"Unsupported completion marker schema: {payload.get('schema')!r}")
 expected = {
     "experiment": experiment,
@@ -68,6 +68,18 @@ for key, value in expected.items():
         raise SystemExit(
             f"Completion marker {key}={payload.get(key)!r}, expected {value!r}"
         )
+expected_rollout_protocol = {
+    "max_prompt_length": 4096,
+    "max_response_length": 500,
+    "max_start_length": 2048,
+    "max_obs_length": 500,
+    "max_turns": 4,
+}
+if payload.get("rollout_protocol") != expected_rollout_protocol:
+    raise SystemExit(
+        "Completion marker has an unexpected rollout protocol: "
+        f"{payload.get('rollout_protocol')!r}"
+    )
 if not payload.get("training_signature"):
     raise SystemExit("Completion marker has no training signature")
 updates = int(payload.get("total_updates", 0))
