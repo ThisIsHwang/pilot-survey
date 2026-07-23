@@ -19,8 +19,12 @@ LLM_GPUS=${LLM_GPUS:-0,1}
 TP=${TP:-2}
 LLM_PORT=${LLM_PORT:-9000}
 KEEP_VLLM=${KEEP_VLLM:-0}
+INJECT_BACKEND_ID=${INJECT_BACKEND_ID:-0}
 
 [[ -n "$MODEL_REF" ]] || { echo "Set MODEL_REF or MODEL_PATH" >&2; exit 2; }
+[[ "$INJECT_BACKEND_ID" == 0 || "$INJECT_BACKEND_ID" == 1 ]] || {
+  echo "INJECT_BACKEND_ID must be 0 or 1" >&2; exit 2;
+}
 PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
 [[ -x "$PILOT_PYTHON" ]] || { echo "Run scripts/bootstrap.sh first" >&2; exit 1; }
 RUN_ID=${RUN_ID:-$(
@@ -58,6 +62,8 @@ trap cleanup EXIT INT TERM
 
 limit_args=()
 if [[ -n "$LIMIT" ]]; then limit_args=(--limit "$LIMIT"); fi
+backend_id_args=()
+if [[ "$INJECT_BACKEND_ID" == 1 ]]; then backend_id_args=(--inject-backend-id); fi
 read -r -a backend_args <<< "$BACKENDS"
 read -r -a topk_args <<< "$TOPKS"
 
@@ -68,6 +74,6 @@ read -r -a topk_args <<< "$TOPKS"
   --tag "$TAG" --seed "$SEED" \
   --api-base "http://127.0.0.1:${LLM_PORT}/v1" --model "$SERVED_MODEL_NAME" \
   --backends "${backend_args[@]}" --topks "${topk_args[@]}" \
-  "${limit_args[@]}"
+  "${backend_id_args[@]}" "${limit_args[@]}"
 
 echo "Numbered results: $OUTPUT_DIR"
