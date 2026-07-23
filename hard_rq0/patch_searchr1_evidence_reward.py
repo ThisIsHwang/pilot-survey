@@ -36,8 +36,18 @@ def _normalize_evidence_title(value):
 
 
 def _support_recall_from_sequence(sequence, support_titles):
-    blocks = re.findall(r"<information>(.*?)</information>", sequence, re.IGNORECASE | re.DOTALL)
-    normalized_blocks = [_normalize_evidence_title(block) for block in blocks]
+    blocks = re.findall(
+        r"<information>(.*?)</information>",
+        sequence,
+        re.IGNORECASE | re.DOTALL,
+    )
+    retrieved = set()
+    for block in blocks:
+        # Search-R1 formats every result as: Doc N(Title: TITLE) passage text
+        for title in re.findall(r"Doc\\s+\\d+\\(Title:\\s*(.*?)\\)\\s", block):
+            normalized = _normalize_evidence_title(title)
+            if normalized:
+                retrieved.add(normalized)
     gold = {
         _normalize_evidence_title(title)
         for title in (support_titles or [])
@@ -45,12 +55,7 @@ def _support_recall_from_sequence(sequence, support_titles):
     }
     if not gold:
         return 0.0
-    found = {
-        title
-        for title in gold
-        if any(title in block for block in normalized_blocks)
-    }
-    return len(found) / len(gold)
+    return len(gold & retrieved) / len(gold)
 
 
 class RewardManager():
