@@ -179,6 +179,11 @@ def evaluation_context(
         ),
         "max_model_len": int(os.environ.get("MAX_MODEL_LEN", "16384")),
         "batch_invariant": batch_invariant,
+        "attention_backend": (
+            os.environ.get("VLLM_ATTENTION_BACKEND", "FLASH_ATTN")
+            if batch_invariant
+            else os.environ.get("VLLM_ATTENTION_BACKEND") or "auto"
+        ),
     }
     if not batch_invariant:
         serving["evaluation_workers"] = workers or 1

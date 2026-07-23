@@ -403,6 +403,13 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}", evaluator)
         self.assertIn('--data-parallel-size "$DP"', launcher)
         self.assertIn('--api-server-count "$VLLM_API_SERVER_COUNT"', launcher)
+        self.assertIn(
+            '--attention-backend "$VLLM_ATTENTION_BACKEND"', launcher
+        )
+        self.assertIn(
+            "VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}",
+            evaluator,
+        )
         self.assertIn("--faiss-gpu-paged-load", retriever_launcher)
         self.assertIn(
             'E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}',
@@ -1364,6 +1371,7 @@ class HardRQ0Tests(unittest.TestCase):
                     "gpu_memory_utilization": 0.88,
                     "max_model_len": 16384,
                     "batch_invariant": True,
+                    "attention_backend": "FLASH_ATTN",
                 },
             )
             with patch.dict(

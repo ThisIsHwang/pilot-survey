@@ -30,6 +30,8 @@ configure_vllm_launch() {
   LLM_PORT=${LLM_PORT:-9000}
   GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
   MAX_MODEL_LEN=${MAX_MODEL_LEN:-16384}
+  VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-0}
+  VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-}
   if [[ -z ${MODEL_REVISION:-} ]]; then
     if [[ "$MODEL_PATH" == "$default_model_ref" ]]; then
       MODEL_REVISION=$default_model_revision
@@ -49,6 +51,23 @@ configure_vllm_launch() {
   if [[ ! "$VLLM_API_SERVER_COUNT" =~ ^[1-9][0-9]*$ ]]; then
     echo "VLLM_API_SERVER_COUNT must be a positive integer; got '$VLLM_API_SERVER_COUNT'." >&2
     return 2
+  fi
+  if [[ "$VLLM_BATCH_INVARIANT" != 0 && "$VLLM_BATCH_INVARIANT" != 1 ]]; then
+    echo "VLLM_BATCH_INVARIANT must be 0 or 1; got '$VLLM_BATCH_INVARIANT'." >&2
+    return 2
+  fi
+  if [[ "$VLLM_BATCH_INVARIANT" == 1 ]]; then
+    # vLLM 0.19 initializes batch-invariance before automatic backend
+    # selection. Pinning a supported backend is therefore mandatory; without
+    # this, every data-parallel worker exits with attention backend 'None'.
+    VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
+    case "$VLLM_ATTENTION_BACKEND" in
+      FLASH_ATTN|TRITON_ATTN) ;;
+      *)
+        echo "Qwen batch-invariant serving requires VLLM_ATTENTION_BACKEND=FLASH_ATTN or TRITON_ATTN; got '$VLLM_ATTENTION_BACKEND'." >&2
+        return 2
+        ;;
+    esac
   fi
   local required_gpus=$((TP * DP))
   validate_gpu_list "$LLM_GPUS" "$required_gpus" \
@@ -129,7 +148,8 @@ PY
 
   VLLM_NO_USAGE_STATS=${VLLM_NO_USAGE_STATS:-1}
   export MODEL_PATH MODEL_REVISION SERVED_MODEL_NAME LLM_GPUS TP DP \
-    VLLM_API_SERVER_COUNT LLM_PORT VLLM_NO_USAGE_STATS VLLM_MODEL_IS_LOCAL
+    VLLM_API_SERVER_COUNT LLM_PORT VLLM_NO_USAGE_STATS VLLM_MODEL_IS_LOCAL \
+    VLLM_BATCH_INVARIANT VLLM_ATTENTION_BACKEND
   # Consumed by the launcher scripts after this helper is sourced.
   # shellcheck disable=SC2034
   VLLM_ARGS=(
@@ -145,6 +165,9 @@ PY
     --max-model-len "$MAX_MODEL_LEN"
     --port "$LLM_PORT"
   )
+  if [[ -n "$VLLM_ATTENTION_BACKEND" ]]; then
+    VLLM_ARGS+=(--attention-backend "$VLLM_ATTENTION_BACKEND")
+  fi
   if [[ $VLLM_MODEL_IS_LOCAL -eq 0 ]]; then
     VLLM_ARGS+=(--revision "$MODEL_REVISION" --tokenizer-revision "$MODEL_REVISION")
   fi
