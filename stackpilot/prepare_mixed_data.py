@@ -5,12 +5,12 @@ import copy
 from pathlib import Path
 from typing import Any
 
-from datasets import Dataset, load_dataset
-
 MARKER_TEMPLATE = "<retrieval_environment>{backend}</retrieval_environment>\n"
 
 
 def add_marker(prompt: list[dict[str, Any]], backend: str) -> list[dict[str, Any]]:
+    if backend not in {"bm25", "e5"}:
+        raise ValueError(f"backend must be bm25 or e5; got {backend!r}")
     updated = copy.deepcopy(prompt)
     for message in updated:
         if str(message.get("role", "")) == "user":
@@ -31,6 +31,8 @@ def duplicate_row(row: dict[str, Any], backend: str) -> dict[str, Any]:
 
 
 def prepare(input_path: Path, output_path: Path, seed: int) -> None:
+    from datasets import Dataset, load_dataset
+
     source = load_dataset("parquet", data_files=str(input_path), split="train")
     rows: list[dict[str, Any]] = []
     for row in source:
