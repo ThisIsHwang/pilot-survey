@@ -27,6 +27,22 @@ elif [[ "$MODEL_REF" == /* || "$MODEL_REF" == ./* || "$MODEL_REF" == ../* || -e 
 fi
 
 if [[ "$MODEL_KIND" == hub ]]; then
+  command -v flock >/dev/null 2>&1 || {
+    echo "flock is required to coordinate Hugging Face model downloads." >&2
+    exit 1
+  }
+  MODEL_LOCK_ROOT=${HF_MODEL_LOCK_ROOT:-${HF_HOME:-$ROOT/.cache/huggingface}/.stackpilot-model-locks}
+  mkdir -p "$MODEL_LOCK_ROOT"
+  MODEL_LOCK_KEY=$(
+    "$PYTHON_BIN" -c \
+      'import hashlib, sys; print(hashlib.sha256("\0".join(sys.argv[1:]).encode()).hexdigest())' \
+      "$MODEL_REF" "$REVISION"
+  )
+  exec {MODEL_LOCK_FD}>"$MODEL_LOCK_ROOT/$MODEL_LOCK_KEY.lock"
+  if ! flock -n "$MODEL_LOCK_FD"; then
+    echo "Waiting for another resolver to finish $MODEL_REF@$REVISION ..." >&2
+    flock "$MODEL_LOCK_FD"
+  fi
   echo "Resolving Hugging Face model $MODEL_REF at revision $REVISION ..." >&2
 fi
 "$PYTHON_BIN" "$ROOT/stackpilot/hf_model_cache.py" \

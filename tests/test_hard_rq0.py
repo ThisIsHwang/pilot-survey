@@ -446,6 +446,75 @@ class HardRQ0Tests(unittest.TestCase):
             self.assertFalse(staging.exists())
             self.assertTrue(archive.exists())
 
+    def test_corpus_recovery_trims_verified_unindexed_final_row(self) -> None:
+        indexed_payload = (
+            json.dumps({"id": 0, "contents": "a" * 1000}).encode("utf-8")
+            + b"\n"
+            + json.dumps({"id": 1, "contents": "b" * 1000}).encode("utf-8")
+            + b"\n"
+        )
+        extra_row = json.dumps(
+            {"id": 2, "contents": "unindexed tail" * 100}
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "wiki-18.jsonl.gz"
+            staging = root / ".wiki-18.jsonl.decompressing"
+            with gzip.open(archive, "wb") as handle:
+                handle.write(indexed_payload + extra_row)
+            staging.write_bytes(indexed_payload + extra_row)
+
+            with (
+                patch("stackpilot.hard_assets.EXPECTED_DOCUMENTS", 2),
+                patch(
+                    "stackpilot.hard_assets.CORPUS_ARCHIVE_SIZE",
+                    archive.stat().st_size,
+                ),
+            ):
+                metadata = decompress_corpus(root, keep_sources=True)
+
+            self.assertEqual(metadata["documents"], 2)
+            self.assertEqual(
+                (root / "wiki-18.jsonl").read_bytes(), indexed_payload
+            )
+            self.assertFalse(staging.exists())
+            self.assertTrue(archive.exists())
+
+    def test_corpus_recovery_does_not_trim_an_unrecognized_extra_row(self) -> None:
+        payload = (
+            json.dumps({"id": 0, "contents": "a" * 1000}).encode("utf-8")
+            + b"\n"
+            + json.dumps({"id": 1, "contents": "b" * 1000}).encode("utf-8")
+            + b"\n"
+            + json.dumps({"id": 99, "contents": "unexpected" * 100}).encode(
+                "utf-8"
+            )
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = root / "wiki-18.jsonl.gz"
+            staging = root / ".wiki-18.jsonl.decompressing"
+            with gzip.open(archive, "wb") as handle:
+                handle.write(payload)
+            staging.write_bytes(payload)
+
+            with (
+                patch("stackpilot.hard_assets.EXPECTED_DOCUMENTS", 2),
+                patch(
+                    "stackpilot.hard_assets.CORPUS_ARCHIVE_SIZE",
+                    archive.stat().st_size,
+                ),
+                patch("stackpilot.hard_assets.verify_file"),
+                patch(
+                    "stackpilot.hard_assets.decompress_gzip_counted",
+                    side_effect=RuntimeError("rebuild attempted"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "rebuild attempted"):
+                    decompress_corpus(root, keep_sources=True)
+
+            self.assertEqual(archive.read_bytes()[:2], b"\x1f\x8b")
+
     def test_hard_asset_download_reuses_completed_components(self) -> None:
         corpus = {"path": "wiki-18.jsonl", "size": 1}
         bm25 = {"path": "bm25-pinned-revision/bm25", "size": 2}

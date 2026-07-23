@@ -236,8 +236,8 @@ if [[ "$PREFETCH_FUTURE_WORK" == 1 ]]; then
   if [[ "$RUN_HARD_RQ0" == 1 ]]; then
     start_background_job HARD_MODEL_PREFETCH_PID "$HARD_MODEL_PREFETCH_LOG" \
       env CUDA_VISIBLE_DEVICES= "${LOW_PRIORITY[@]}" \
-      bash "$ROOT/scripts/prefetch_future_models.sh" --hard
-    echo "Hard-RQ0 model downloads are running behind the current stage."
+      bash "$ROOT/scripts/prefetch_future_models.sh" --hard-excluding-stage2
+    echo "Hard-RQ0-only model downloads are running behind the current stage; shared Stage-2 snapshots will be reused."
   fi
   if [[ "$RUN_HARD_RQ0" == 1 && "$SKIP_ASSETS" != 1 ]]; then
     start_background_job HARD_ASSET_PREFETCH_PID "$HARD_ASSET_PREFETCH_LOG" \

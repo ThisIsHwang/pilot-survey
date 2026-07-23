@@ -689,6 +689,83 @@ def count_jsonl_file(path: Path) -> tuple[int, int]:
         return _count_jsonl_stream(source)
 
 
+def _trim_known_unindexed_final_row(path: Path, rows: int) -> int:
+    """Remove the known extra Wiki-18 tail row when it is safe to do so.
+
+    The pinned archive contains one final, unterminated JSON object after the
+    21,015,324 passages represented by both pinned indexes.  Only trim that
+    object when its shape and the last indexed row's zero-based IDs prove that
+    this is the exact upstream boundary, rather than a general count mismatch.
+    """
+    if rows != EXPECTED_DOCUMENTS + 1:
+        return rows
+
+    def document_id(raw: bytes) -> int | None:
+        try:
+            row = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        if not isinstance(row, dict) or not (
+            row.get("contents") or row.get("text") or row.get("content")
+        ):
+            return None
+        value = row.get("id")
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if not isinstance(value, str) or re.fullmatch(r"0|[1-9][0-9]*", value) is None:
+            return None
+        return int(value)
+
+    with path.open("r+b") as handle:
+        first_raw = handle.readline().strip()
+        handle.seek(0, os.SEEK_END)
+        end = handle.tell()
+        if end == 0:
+            return rows
+        handle.seek(end - 1)
+        if handle.read(1) == b"\n":
+            return rows
+
+        position = end
+        tail = b""
+        while position > 0 and tail.count(b"\n") < 2:
+            amount = min(EDGE_BYTES, position)
+            position -= amount
+            handle.seek(position)
+            tail = handle.read(amount) + tail
+
+        final_separator = tail.rfind(b"\n")
+        if final_separator < 0:
+            return rows
+        previous_separator = tail.rfind(b"\n", 0, final_separator)
+        previous_start = previous_separator + 1
+        previous_raw = tail[previous_start:final_separator].strip()
+        final_raw = tail[final_separator + 1 :].strip()
+        if not previous_raw or not final_raw:
+            return rows
+
+        if (
+            document_id(first_raw) != 0
+            or document_id(previous_raw) != EXPECTED_DOCUMENTS - 1
+            or document_id(final_raw) != EXPECTED_DOCUMENTS
+        ):
+            return rows
+
+        final_start = position + final_separator + 1
+        handle.truncate(final_start)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    print(
+        "Removed the verified unindexed final Wiki-18 row "
+        f"(id={EXPECTED_DOCUMENTS:,}); retained {EXPECTED_DOCUMENTS:,} "
+        "passages aligned with the pinned BM25/E5 indexes."
+    )
+    return EXPECTED_DOCUMENTS
+
+
 def decompress_gzip_counted(source: Path, target: Path) -> tuple[int, int]:
     """Decompress a JSONL gzip stream and return (bytes, logical rows)."""
     with gzip.open(source, "rb") as compressed, target.open("wb") as destination:
@@ -709,6 +786,7 @@ def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
     if temporary.is_file():
         try:
             _, rows = count_jsonl_file(temporary)
+            rows = _trim_known_unindexed_final_row(temporary, rows)
             if rows != EXPECTED_DOCUMENTS:
                 raise RuntimeError(
                     f"wiki-18 corpus has {rows:,} documents; "
@@ -754,6 +832,7 @@ def decompress_corpus(root: Path, *, keep_sources: bool) -> dict[str, Any]:
         archive.unlink(missing_ok=True)
         raise
     _, rows = decompress_gzip_counted(archive, temporary)
+    rows = _trim_known_unindexed_final_row(temporary, rows)
     if rows != EXPECTED_DOCUMENTS:
         raise RuntimeError(
             f"wiki-18 corpus has {rows:,} documents; expected {EXPECTED_DOCUMENTS:,}"
