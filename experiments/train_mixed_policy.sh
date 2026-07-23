@@ -21,6 +21,7 @@ MAX_RESPONSE_LENGTH=500
 MAX_START_LENGTH=2048
 MAX_OBS_LENGTH=500
 MAX_TURNS=4
+LEARNING_RATE=${LEARNING_RATE:-1e-6}
 
 case "$EXPERIMENT_ID" in
   EXP-003) MIXED_MODE=blind; VARIANT=blind ;;
@@ -57,6 +58,14 @@ if [[ ! "$SEED" =~ ^[1-9][0-9]*$ ]]; then
   echo "SEED must be a positive integer" >&2
   exit 2
 fi
+if [[ ! "$N_AGENT" =~ ^[1-9][0-9]*$ || $((N_AGENT % 2)) -ne 0 ]]; then
+  echo "N_AGENT must be an even positive integer so every group is BM25/E5 balanced" >&2
+  exit 2
+fi
+for value in TRAIN_BATCH VAL_BATCH MINI_BATCH MICRO_BATCH TOTAL_UPDATES TOPK; do
+  number=${!value}
+  [[ "$number" =~ ^[1-9][0-9]*$ ]] || { echo "$value must be a positive integer" >&2; exit 2; }
+done
 
 RUN_ID=$(
   "$PILOT_PYTHON" -m stackpilot.experiment_registry run-id "$EXPERIMENT_ID" \
@@ -104,31 +113,71 @@ ROLLOUT_GPU_MEMORY=${ROLLOUT_GPU_MEMORY:-0.55}
 LOGGER=${LOGGER:-"['console']"}
 
 TRAIN_SIGNATURE=$(
-  "$SEARCH_R1_PYTHON" - "$TRAIN_DATA" "$VAL_DATA" "$BASE_MODEL" \
-    "$EXPERIMENT_ID" "$RUN_ID" "$MIXED_MODE" "$SEED" "$PROFILE" "$TOTAL_UPDATES" \
-    "$ROOT/hard_rq0/patch_searchr1_mixed.py" "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
-import hashlib, json, sys
+  "$SEARCH_R1_PYTHON" - \
+    "$TRAIN_DATA" "$VAL_DATA" "$BASE_MODEL" "$SEARCH_R1" \
+    "$EXPERIMENT_ID" "$RUN_ID" "$MIXED_MODE" "$SEED" "$PROFILE" \
+    "$TOTAL_UPDATES" "$TRAIN_BATCH" "$VAL_BATCH" "$MINI_BATCH" "$MICRO_BATCH" \
+    "$N_AGENT" "$TOPK" "$N_GPUS" "$TRAIN_GPUS" "$MAX_PROMPT_LENGTH" \
+    "$MAX_RESPONSE_LENGTH" "$MAX_START_LENGTH" "$MAX_OBS_LENGTH" "$MAX_TURNS" \
+    "$LEARNING_RATE" "$ROLLOUT_GPU_MEMORY" "$LOG_PROB_MICRO_BATCH" \
+    "$ROOT/hard_rq0/patch_searchr1_mixed.py" \
+    "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+    "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+    "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
+import hashlib, json, subprocess, sys
 from pathlib import Path
-train, val, model, experiment_id, run_id, mode, seed, profile, updates, patch, wrapper = sys.argv[1:]
+(
+    train, val, model, search_r1, experiment_id, run_id, mode, seed, profile,
+    updates, train_batch, val_batch, mini_batch, micro_batch, n_agent, topk,
+    n_gpus, train_gpus, max_prompt, max_response, max_start, max_obs, max_turns,
+    learning_rate, rollout_memory, log_batch, mixed_patch, env_patch, seed_patch,
+    wrapper,
+) = sys.argv[1:]
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open('rb') as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
             h.update(chunk)
     return h.hexdigest()
+diff = subprocess.run(
+    ['git', '-C', search_r1, 'diff', '--binary', 'HEAD'],
+    check=True,
+    stdout=subprocess.PIPE,
+).stdout
 payload = {
-    'schema': 1,
+    'schema': 2,
     'experiment_id': experiment_id,
     'run_id': run_id,
     'mode': mode,
     'seed': int(seed),
     'profile': profile,
     'total_updates': int(updates),
+    'train_batch': int(train_batch),
+    'val_batch': int(val_batch),
+    'mini_batch': int(mini_batch),
+    'micro_batch': int(micro_batch),
+    'n_agent': int(n_agent),
+    'topk': int(topk),
+    'n_gpus': int(n_gpus),
+    'train_gpus': train_gpus,
+    'max_prompt': int(max_prompt),
+    'max_response': int(max_response),
+    'max_start': int(max_start),
+    'max_obs': int(max_obs),
+    'max_turns': int(max_turns),
+    'learning_rate': learning_rate,
+    'rollout_memory': float(rollout_memory),
+    'log_batch': int(log_batch),
     'train_sha256': digest(train),
     'val_sha256': digest(val),
     'model_path': str(Path(model).resolve()),
-    'mixed_patch_sha256': digest(patch),
-    'wrapper_sha256': digest(wrapper),
+    'search_r1_diff_sha256': hashlib.sha256(diff).hexdigest(),
+    'patches': {
+        'mixed': digest(mixed_patch),
+        'environment': digest(env_patch),
+        'seed': digest(seed_patch),
+        'wrapper': digest(wrapper),
+    },
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
 PY
@@ -169,6 +218,7 @@ export TOKENIZERS_PARALLELISM=false
 export RQ0_SEED=$SEED
 export PYTHONHASHSEED=$SEED
 export SEARCH_R1_MIXED_MODE=$MIXED_MODE
+export SEARCH_R1_N_AGENT=$N_AGENT
 export PYTHONPATH="$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
@@ -200,7 +250,7 @@ echo "Training $RUN_ID mode=$MIXED_MODE seed=$SEED updates=$TOTAL_UPDATES"
   actor_rollout_ref.model.path="$BASE_MODEL" \
   actor_rollout_ref.model.enable_gradient_checkpointing=true \
   actor_rollout_ref.model.use_remove_padding=true \
-  actor_rollout_ref.actor.optim.lr=1e-6 \
+  actor_rollout_ref.actor.optim.lr="$LEARNING_RATE" \
   actor_rollout_ref.actor.optim.lr_warmup_steps_ratio=0.05 \
   actor_rollout_ref.actor.use_kl_loss=true actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.ppo_mini_batch_size="$MINI_BATCH" \
@@ -235,7 +285,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 marker, checkpoint, run_id, experiment_id, mode, seed, profile, updates, signature = sys.argv[1:]
 payload = {
-    'schema': 1,
+    'schema': 2,
     'experiment': run_id,
     'experiment_id': experiment_id,
     'routing_mode': mode,
