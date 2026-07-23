@@ -21,13 +21,24 @@ bash hard_rq0/download_assets.sh
 bash hard_rq0/prepare_data.sh
 bash hard_rq0/launch_retrievers.sh
 
+.venv-pilot/bin/python - \
+  "$ANSWER_REWARD_WEIGHT" "$EVIDENCE_REWARD_WEIGHT" "$SEARCH_COST_WEIGHT" <<'PY'
+import math, sys
+names = ("ANSWER_REWARD_WEIGHT", "EVIDENCE_REWARD_WEIGHT", "SEARCH_COST_WEIGHT")
+for name, value in zip(names, sys.argv[1:]):
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise SystemExit(f"{name} must be finite and non-negative; got {value!r}")
+PY
+reward_suffix="a${ANSWER_REWARD_WEIGHT}-e${EVIDENCE_REWARD_WEIGHT}-c${SEARCH_COST_WEIGHT}"
+
 for backend in $BACKEND_LIST; do
   for seed in $SEEDS; do
-    # Reset to the pinned Search-R1 tree before changing only the reward manager.
+    # Bootstrap preserves verified local patches; the evidence patch is idempotent.
     bash scripts/bootstrap_searchr1.sh
     .venv-searchr1/bin/python hard_rq0/patch_searchr1_evidence_reward.py \
       --search-r1-root upstream/Search-R1
-    variant="${backend}-evidence"
+    variant="${backend}-evidence-${reward_suffix}"
     run_id=$(
       .venv-pilot/bin/python -m stackpilot.experiment_registry run-id EXP-005 \
         --seed "$seed" --profile "$PROFILE" --variant "$variant"
