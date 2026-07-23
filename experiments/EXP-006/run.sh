@@ -24,6 +24,7 @@ run_eval() {
   local variant=$3
   local model_ref=$4
   local model_revision=${5:-main}
+  local inject_backend_id=${6:-0}
   if [[ ! -e "$model_ref" && "$model_ref" == /* ]]; then
     if [[ "$REQUIRE_ALL" == 1 ]]; then
       echo "Missing source policy for EXP-006: $model_ref" >&2
@@ -40,7 +41,8 @@ run_eval() {
   EXPERIMENT_ID=EXP-006 TAG="$tag" SEED="$seed" PROFILE="$PROFILE" \
     VARIANT="$variant" RUN_ID="$run_id" MODEL_REF="$model_ref" \
     MODEL_REVISION="$model_revision" LIMIT="$LIMIT" TOPKS="$TOPKS" \
-    BACKENDS="hybrid" bash experiments/eval_numbered_policy.sh
+    BACKENDS="hybrid" INJECT_BACKEND_ID="$inject_backend_id" \
+    bash experiments/eval_numbered_policy.sh
 }
 
 run_eval base-qwen 0 base-qwen "$BASE_MODEL_REF" "$BASE_MODEL_REVISION"
@@ -63,8 +65,9 @@ for seed in $ORACLE_SEEDS; do
     .venv-pilot/bin/python -m stackpilot.experiment_registry run-id EXP-004 \
       --seed "$seed" --profile "$PROFILE" --variant backend-id
   )
+  # "hybrid" is intentionally out of the oracle policy's BM25/E5 training labels.
   run_eval mixed-backend-id "$seed" exp004-backend-id \
-    "$ROOT/work/experiments/EXP-004/merged/$oracle_run"
+    "$ROOT/work/experiments/EXP-004/merged/$oracle_run" main 1
 done
 
 echo "EXP-006 complete: work/experiments/EXP-006"
