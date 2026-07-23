@@ -34,7 +34,7 @@ RUN_ID=${RUN_ID:-$(
 OUTPUT_DIR=$ROOT/work/experiments/$EXPERIMENT_ID/results/$RUN_ID
 mkdir -p "$OUTPUT_DIR"
 
-bash "$ROOT/hard_rq0/launch_retrievers.sh"
+bash "$ROOT/experiments/ensure_retrievers.sh"
 if [[ " $BACKENDS " == *" hybrid "* ]]; then
   bash "$ROOT/experiments/launch_hybrid_rrf.sh"
 fi
