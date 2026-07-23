@@ -20,6 +20,33 @@ from stackpilot.numbered_experiment_report import (
 from stackpilot.prepare_mixed_data import add_marker, duplicate_row
 
 
+def write_main_ppo(root: Path, *, reward_block: bool) -> Path:
+    reward = ""
+    if reward_block:
+        reward = '''
+class RewardManager():
+    def score(self, data_item, sequences_str, ground_truth, reward_tensor, i, valid_response_length):
+        compute_score_fn = lambda **kwargs: 1.0
+        if True:
+            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
+
+            reward_tensor[i, valid_response_length - 1] = score
+'''
+    source = f'''import re
+import numpy as np
+{reward}
+import ray
+
+def main(config):
+    if not ray.is_initialized():
+        ray.init(runtime_env={{'env_vars': {{'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}}}})
+'''
+    target = root / "verl" / "trainer" / "main_ppo.py"
+    target.parent.mkdir(parents=True)
+    target.write_text(source, encoding="utf-8")
+    return target
+
+
 class NumberedExperimentTests(unittest.TestCase):
     def test_backend_marker_is_explicit_and_does_not_mutate_source(self) -> None:
         prompt = [{"role": "user", "content": "Question: test"}]
@@ -132,42 +159,35 @@ class Manager:
 '''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            main_ppo = write_main_ppo(root, reward_block=False)
             target = root / "search_r1" / "llm_agent" / "generation.py"
             target.parent.mkdir(parents=True)
             target.write_text(source, encoding="utf-8")
             patch_mixed_routing(root)
             first = target.read_text(encoding="utf-8")
+            first_main = main_ppo.read_text(encoding="utf-8")
             patch_mixed_routing(root)
             second = target.read_text(encoding="utf-8")
             self.assertEqual(first, second)
             self.assertIn("STACKPILOT_MIXED_ROUTING_V1", first)
             self.assertIn('payload["backend_ids"] = backend_ids', first)
+            self.assertIn("STACKPILOT_EXPERIMENT_ENV_V1", first_main)
             compile(first, str(target), "exec")
+            compile(first_main, str(main_ppo), "exec")
 
     def test_evidence_reward_patch_is_idempotent_and_compiles(self) -> None:
-        source = '''import re
-import numpy as np
-
-class RewardManager():
-    def score(self, data_item, sequences_str, ground_truth, reward_tensor, i, valid_response_length):
-        compute_score_fn = lambda **kwargs: 1.0
-        if True:
-            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
-
-            reward_tensor[i, valid_response_length - 1] = score
-'''
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            target = root / "verl" / "trainer" / "main_ppo.py"
-            target.parent.mkdir(parents=True)
-            target.write_text(source, encoding="utf-8")
+            target = write_main_ppo(root, reward_block=True)
             patch_evidence_reward(root)
             first = target.read_text(encoding="utf-8")
             patch_evidence_reward(root)
             second = target.read_text(encoding="utf-8")
             self.assertEqual(first, second)
             self.assertIn("STACKPILOT_EVIDENCE_REWARD_V1", first)
+            self.assertIn("STACKPILOT_EXPERIMENT_ENV_V1", first)
             self.assertIn("EVIDENCE_REWARD_WEIGHT", first)
+            self.assertIn(r"Doc\s+\d+\(Title:", first)
             compile(first, str(target), "exec")
 
     @staticmethod
