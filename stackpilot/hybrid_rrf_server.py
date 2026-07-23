@@ -3,6 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -15,6 +19,38 @@ class QueryRequest(BaseModel):
     queries: list[str]
     topk: int | None = None
     return_scores: bool = True
+
+
+def run_upstream_calls(calls: dict[str, Callable[[], Any]]) -> dict[str, Any]:
+    """Run independent upstream calls together and fail without partial output."""
+    if not calls:
+        return {}
+    if len(calls) == 1:
+        name, call = next(iter(calls.items()))
+        try:
+            return {name: call()}
+        except Exception as exc:
+            raise RuntimeError(f"{name} upstream failed: {exc}") from exc
+
+    # Each requests call owns its connection state; no Session is shared across
+    # these workers. Waiting for every bounded call avoids leaking worker threads
+    # when one upstream fails before the other.
+    failures: list[tuple[str, Exception]] = []
+    results: dict[str, Any] = {}
+    with ThreadPoolExecutor(
+        max_workers=len(calls),
+        thread_name_prefix="hybrid-upstream",
+    ) as executor:
+        futures = {name: executor.submit(call) for name, call in calls.items()}
+        for name in sorted(futures):
+            try:
+                results[name] = futures[name].result()
+            except Exception as exc:
+                failures.append((name, exc))
+    if failures:
+        detail = "; ".join(f"{name}: {exc}" for name, exc in failures)
+        raise RuntimeError(f"upstream request failed ({detail})") from failures[0][1]
+    return results
 
 
 def post_batch(url: str, queries: list[str], topk: int, timeout: float) -> list[list[dict[str, Any]]]:
@@ -77,22 +113,35 @@ def create_app(
     timeout: float,
 ) -> FastAPI:
     app = FastAPI()
+    upstream_urls = {"bm25": bm25_url, "e5": e5_url}
+    server_file_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+    def upstream_health(name: str) -> Any:
+        url = upstream_urls[name].rsplit("/", 1)[0] + "/health"
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        return response.json()
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        upstreams = {}
-        for name, url in (("bm25", bm25_url), ("e5", e5_url)):
-            try:
-                response = requests.get(url.rsplit("/", 1)[0] + "/health", timeout=10)
-                response.raise_for_status()
-                upstreams[name] = response.json()
-            except Exception as exc:  # pragma: no cover - requires live services
-                raise HTTPException(status_code=503, detail=f"{name} unavailable: {exc}") from exc
+        try:
+            upstreams = run_upstream_calls(
+                {
+                    name: partial(upstream_health, name)
+                    for name in upstream_urls
+                }
+            )
+        except Exception as exc:  # pragma: no cover - requires live services
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {
             "status": "ok",
             "backend": "hybrid-rrf",
             "rrf_constant": rrf_constant,
             "upstream_topk": upstream_topk,
+            "default_topk": default_topk,
+            "request_timeout_seconds": timeout,
+            "server_file_sha256": server_file_sha256,
+            "upstream_urls": upstream_urls,
             "upstreams": upstreams,
         }
 
@@ -103,10 +152,22 @@ def create_app(
         final_topk = int(request.topk or default_topk)
         candidate_topk = max(upstream_topk, final_topk)
         try:
-            bm25_results = post_batch(bm25_url, request.queries, candidate_topk, timeout)
-            e5_results = post_batch(e5_url, request.queries, candidate_topk, timeout)
+            results = run_upstream_calls(
+                {
+                    name: partial(
+                        post_batch,
+                        url,
+                        request.queries,
+                        candidate_topk,
+                        timeout,
+                    )
+                    for name, url in upstream_urls.items()
+                }
+            )
         except Exception as exc:  # pragma: no cover - requires live services
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        bm25_results = results["bm25"]
+        e5_results = results["e5"]
         return {
             "result": [
                 fuse(bm25, e5, topk=final_topk, rrf_constant=rrf_constant)

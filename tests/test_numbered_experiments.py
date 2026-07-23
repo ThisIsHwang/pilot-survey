@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -10,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from hard_rq0.patch_searchr1_evidence_reward import patch as patch_evidence_reward
 from hard_rq0.patch_searchr1_mixed import patch as patch_mixed_routing
+from stackpilot.hybrid_rrf_server import create_app as create_hybrid_app
 from stackpilot.hybrid_rrf_server import fuse
 from stackpilot.mixed_retriever_server import create_app
 from stackpilot.numbered_experiment_report import (
@@ -63,7 +65,10 @@ class NumberedExperimentTests(unittest.TestCase):
             add_marker(prompt, "hybrid")
 
     def test_mixed_router_requires_ids_and_restores_batch_order(self) -> None:
+        rendezvous = threading.Barrier(2)
+
         def fake_post(url: str, queries: list[str], topk: int, timeout: float):
+            rendezvous.wait(timeout=5.0)
             backend = "bm25" if "8101" in url else "e5"
             return [
                 [
@@ -103,6 +108,56 @@ class NumberedExperimentTests(unittest.TestCase):
         identifiers = [result[0]["document"]["id"] for result in payload["result"]]
         self.assertEqual(identifiers, ["e5:q0", "bm25:q1", "e5:q2"])
 
+    def test_mixed_router_does_not_call_an_unselected_backend(self) -> None:
+        called_urls: list[str] = []
+
+        def fake_post(url: str, queries: list[str], topk: int, timeout: float):
+            called_urls.append(url)
+            return [[{"document": {"id": query}}] for query in queries]
+
+        app = create_app(
+            bm25_url="http://127.0.0.1:8101/retrieve",
+            e5_url="http://127.0.0.1:8102/retrieve",
+            default_topk=3,
+            timeout=1.0,
+            assignment_log=None,
+        )
+        with patch("stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post):
+            response = TestClient(app).post(
+                "/retrieve",
+                json={
+                    "queries": ["q0", "q1"],
+                    "backend_ids": ["e5", "e5"],
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(called_urls, ["http://127.0.0.1:8102/retrieve"])
+
+    def test_mixed_router_names_failed_upstream_without_partial_results(self) -> None:
+        def fake_post(url: str, queries: list[str], topk: int, timeout: float):
+            if "8101" in url:
+                raise TimeoutError("deadline")
+            return [[{"document": {"id": query}}] for query in queries]
+
+        app = create_app(
+            bm25_url="http://127.0.0.1:8101/retrieve",
+            e5_url="http://127.0.0.1:8102/retrieve",
+            default_topk=3,
+            timeout=1.0,
+            assignment_log=None,
+        )
+        with patch("stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post):
+            response = TestClient(app).post(
+                "/retrieve",
+                json={
+                    "queries": ["q0", "q1"],
+                    "backend_ids": ["bm25", "e5"],
+                },
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("bm25", response.json()["detail"])
+        self.assertNotIn("result", response.json())
+
     def test_rrf_merges_duplicate_documents(self) -> None:
         bm25 = [
             {"document": {"id": "a", "contents": "A"}, "score": 10.0},
@@ -116,6 +171,100 @@ class NumberedExperimentTests(unittest.TestCase):
         self.assertEqual(result[0]["document"]["id"], "b")
         self.assertEqual(result[0]["sources"], ["bm25", "e5"])
         self.assertEqual(len(result), 2)
+
+    def test_hybrid_router_calls_upstreams_concurrently_and_reports_config(self) -> None:
+        rendezvous = threading.Barrier(2)
+        seen_topk: list[int] = []
+        seen_lock = threading.Lock()
+
+        def fake_post(url: str, queries: list[str], topk: int, timeout: float):
+            with seen_lock:
+                seen_topk.append(topk)
+            rendezvous.wait(timeout=5.0)
+            backend = "bm25" if "8101" in url else "e5"
+            return [
+                [
+                    {
+                        "document": {
+                            "id": "shared" if backend == "e5" else f"{query}-bm25",
+                            "contents": query,
+                        }
+                    },
+                    {"document": {"id": "shared", "contents": query}},
+                ]
+                for query in queries
+            ]
+
+        class HealthResponse:
+            def __init__(self, url: str):
+                self.url = url
+
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, str]:
+                return {
+                    "status": "ok",
+                    "backend": "bm25" if "8101" in self.url else "e5",
+                }
+
+        app = create_hybrid_app(
+            bm25_url="http://127.0.0.1:8101/retrieve",
+            e5_url="http://127.0.0.1:8102/retrieve",
+            upstream_topk=100,
+            default_topk=3,
+            rrf_constant=60.0,
+            timeout=7.5,
+        )
+        with (
+            patch("stackpilot.hybrid_rrf_server.post_batch", side_effect=fake_post),
+            patch(
+                "stackpilot.hybrid_rrf_server.requests.get",
+                side_effect=lambda url, timeout: HealthResponse(url),
+            ),
+        ):
+            client = TestClient(app)
+            response = client.post(
+                "/retrieve",
+                json={"queries": ["q0", "q1"], "topk": 101},
+            )
+            health = client.get("/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(seen_topk), [101, 101])
+        self.assertEqual(health.status_code, 200)
+        identity = health.json()
+        self.assertEqual(identity["upstream_topk"], 100)
+        self.assertEqual(identity["rrf_constant"], 60.0)
+        self.assertEqual(identity["default_topk"], 3)
+        self.assertEqual(identity["request_timeout_seconds"], 7.5)
+        self.assertEqual(
+            identity["upstream_urls"]["e5"],
+            "http://127.0.0.1:8102/retrieve",
+        )
+
+    def test_hybrid_router_names_failed_upstream_without_partial_fusion(self) -> None:
+        def fake_post(url: str, queries: list[str], topk: int, timeout: float):
+            if "8102" in url:
+                raise TimeoutError("deadline")
+            return [[{"document": {"id": "bm25-only"}}] for _ in queries]
+
+        app = create_hybrid_app(
+            bm25_url="http://127.0.0.1:8101/retrieve",
+            e5_url="http://127.0.0.1:8102/retrieve",
+            upstream_topk=100,
+            default_topk=3,
+            rrf_constant=60.0,
+            timeout=1.0,
+        )
+        with patch("stackpilot.hybrid_rrf_server.post_batch", side_effect=fake_post):
+            response = TestClient(app).post(
+                "/retrieve",
+                json={"queries": ["q0"]},
+            )
+        self.assertEqual(response.status_code, 502)
+        self.assertIn("e5", response.json()["detail"])
+        self.assertNotIn("result", response.json())
 
     def test_mixed_patch_is_idempotent_and_compiles(self) -> None:
         source = '''import os
@@ -243,7 +392,6 @@ class Manager:
         self.assertIn("INJECT_BACKEND_ID=1", exp004)
         self.assertIn("patch_searchr1_evidence_reward.py", exp005)
         self.assertIn('BACKENDS="hybrid"', exp006)
-
 
 if __name__ == "__main__":
     unittest.main()

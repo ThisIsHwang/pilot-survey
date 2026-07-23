@@ -7,10 +7,12 @@ source "$ROOT/scripts/lib/runtime.sh"
 source "$ROOT/scripts/lib/vllm_launch.sh"
 ensure_local_no_proxy
 configure_vllm_launch "$ROOT"
-mkdir -p "$ROOT/logs" "$ROOT/work/pids"
+RUNTIME_WORK_ROOT=${STACKPILOT_RUNTIME_ROOT:-$ROOT/work}
+RUNTIME_LOG_ROOT=${STACKPILOT_LOG_ROOT:-$ROOT/logs}
+mkdir -p "$RUNTIME_LOG_ROOT" "$RUNTIME_WORK_ROOT/pids"
 
-PID_FILE=$ROOT/work/pids/vllm.pid
-LOG_FILE=$ROOT/logs/vllm.log
+PID_FILE=$RUNTIME_WORK_ROOT/pids/vllm.pid
+LOG_FILE=$RUNTIME_LOG_ROOT/vllm.log
 stop_managed_pid "$PID_FILE" "$ROOT/.venv-vllm/bin/vllm" "$ROOT" 1
 require_free_port "$VLLM_PYTHON" "$LLM_PORT"
 

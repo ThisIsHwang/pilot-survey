@@ -7,8 +7,16 @@ cd "$ROOT"
 EXPERIMENT_ID=${EXPERIMENT_ID:?Set EXPERIMENT_ID=EXP-003 or EXP-004}
 SEED=${SEED:?Set SEED, e.g. 13}
 PROFILE=${PROFILE:-pilot}
-BASE_MODEL=${BASE_MODEL:-Qwen/Qwen2.5-3B-Instruct}
-BASE_MODEL_REVISION=${BASE_MODEL_REVISION:-aa8e72537993ba99e69dfaafa59ed015b17504d1}
+DEFAULT_BASE_MODEL=Qwen/Qwen2.5-3B-Instruct
+DEFAULT_BASE_MODEL_REVISION=aa8e72537993ba99e69dfaafa59ed015b17504d1
+BASE_MODEL=${BASE_MODEL:-$DEFAULT_BASE_MODEL}
+if [[ -z ${BASE_MODEL_REVISION:-} ]]; then
+  if [[ "$BASE_MODEL" == "$DEFAULT_BASE_MODEL" ]]; then
+    BASE_MODEL_REVISION=$DEFAULT_BASE_MODEL_REVISION
+  else
+    BASE_MODEL_REVISION=main
+  fi
+fi
 TRAIN_GPUS=${TRAIN_GPUS:-0,1,2,3,4,5,6}
 N_GPUS=${N_GPUS:-7}
 E5_GPU=${E5_GPU:-7}
@@ -46,10 +54,14 @@ esac
 
 PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
 SEARCH_R1_PYTHON=$ROOT/.venv-searchr1/bin/python
-SEARCH_R1=$ROOT/upstream/Search-R1
+SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
 for executable in "$PILOT_PYTHON" "$SEARCH_R1_PYTHON"; do
   [[ -x "$executable" ]] || { echo "Missing environment; run bootstrap scripts first" >&2; exit 1; }
 done
+[[ -e "$SEARCH_R1/.git" ]] || {
+  echo "Missing isolated Search-R1 checkout: $SEARCH_R1" >&2
+  exit 1
+}
 if [[ "$N_GPUS" != 7 || "$TRAIN_GPUS" != "0,1,2,3,4,5,6" || "$E5_GPU" != 7 ]]; then
   echo "Numbered mixed experiments reserve GPUs 0-6 for GRPO and GPU 7 for E5" >&2
   exit 2
@@ -100,10 +112,11 @@ else
   VAL_DATA=$SOURCE_VAL
 fi
 
-bash "$ROOT/scripts/bootstrap_searchr1.sh"
+if [[ ${NUMBERED_SETUP_READY:-0} != 1 ]]; then
+  bash "$ROOT/scripts/bootstrap_searchr1.sh"
+fi
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_mixed.py" --search-r1-root "$SEARCH_R1"
-bash "$ROOT/experiments/launch_mixed_router.sh"
 
 BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
   bash "$ROOT/scripts/resolve_hf_model.sh" "$BASE_MODEL" "$BASE_MODEL_REVISION" "$SEARCH_R1_PYTHON")
@@ -123,6 +136,7 @@ TRAIN_SIGNATURE=$(
     "$ROOT/hard_rq0/patch_searchr1_mixed.py" \
     "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
     "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+    "$ROOT/stackpilot/mixed_retriever_server.py" \
     "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
 import hashlib, json, subprocess, sys
 from pathlib import Path
@@ -131,7 +145,7 @@ from pathlib import Path
     updates, train_batch, val_batch, mini_batch, micro_batch, n_agent, topk,
     n_gpus, train_gpus, max_prompt, max_response, max_start, max_obs, max_turns,
     learning_rate, rollout_memory, log_batch, mixed_patch, env_patch, seed_patch,
-    wrapper,
+    mixed_router, wrapper,
 ) = sys.argv[1:]
 def digest(path):
     h = hashlib.sha256()
@@ -139,6 +153,25 @@ def digest(path):
         for chunk in iter(lambda: handle.read(1024 * 1024), b''):
             h.update(chunk)
     return h.hexdigest()
+def model_identity(path):
+    root = Path(path).resolve()
+    files = {}
+    for pattern in (
+        "config.json",
+        "tokenizer*",
+        "*.index.json",
+        "*.safetensors",
+        "*.bin",
+    ):
+        for item in sorted(root.glob(pattern)):
+            if item.is_file():
+                files[item.name] = {
+                    "size": item.stat().st_size,
+                    "mtime_ns": item.stat().st_mtime_ns,
+                }
+    if not files:
+        raise SystemExit(f"No model artifacts found under {root}")
+    return {"resolved_path": str(root), "files": files}
 diff = subprocess.run(
     ['git', '-C', search_r1, 'diff', '--binary', 'HEAD'],
     check=True,
@@ -170,18 +203,112 @@ payload = {
     'log_batch': int(log_batch),
     'train_sha256': digest(train),
     'val_sha256': digest(val),
-    'model_path': str(Path(model).resolve()),
+    'model': model_identity(model),
     'search_r1_diff_sha256': hashlib.sha256(diff).hexdigest(),
     'patches': {
         'mixed': digest(mixed_patch),
         'environment': digest(env_patch),
         'seed': digest(seed_patch),
+        'mixed_router': digest(mixed_router),
         'wrapper': digest(wrapper),
     },
 }
 print(hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
 PY
 )
+
+FINAL_CHECKPOINT=$CHECKPOINT_DIR/actor/global_step_$TOTAL_UPDATES
+
+validate_checkpoint_artifact() {
+  "$SEARCH_R1_PYTHON" - "$1" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+checkpoint = Path(sys.argv[1]).resolve()
+config = checkpoint / "config.json"
+try:
+    json.loads(config.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"Invalid checkpoint config {config}: {exc}") from exc
+index_files = sorted(checkpoint.glob("*.safetensors.index.json")) or sorted(
+    checkpoint.glob("*.bin.index.json")
+)
+if len(index_files) > 1:
+    raise SystemExit(f"Checkpoint has multiple weight indexes: {checkpoint}")
+if index_files:
+    try:
+        index = json.loads(index_files[0].read_text(encoding="utf-8"))
+        weights = [
+            checkpoint / name
+            for name in sorted(set(index["weight_map"].values()))
+        ]
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Invalid checkpoint weight index: {index_files[0]}") from exc
+else:
+    weights = sorted(checkpoint.glob("*.safetensors")) or sorted(
+        checkpoint.glob("*.bin")
+    )
+if not weights or any(
+    not path.is_file() or path.stat().st_size < 1024 * 1024 for path in weights
+):
+    raise SystemExit(f"Checkpoint weights are missing or incomplete: {checkpoint}")
+if not (checkpoint / "tokenizer.json").is_file() and not (
+    checkpoint / "tokenizer.model"
+).is_file():
+    raise SystemExit(f"Checkpoint tokenizer is missing: {checkpoint}")
+PY
+}
+
+validate_completed_run() {
+  "$SEARCH_R1_PYTHON" - \
+    "$COMPLETE_MARKER" "$FINAL_CHECKPOINT" "$RUN_ID" "$EXPERIMENT_ID" \
+    "$MIXED_MODE" "$SEED" "$PROFILE" "$TOTAL_UPDATES" "$TRAIN_SIGNATURE" \
+    <<'PY' || return 1
+import json
+import sys
+from pathlib import Path
+
+(
+    marker_path,
+    final_checkpoint,
+    run_id,
+    experiment_id,
+    routing_mode,
+    seed,
+    profile,
+    total_updates,
+    training_signature,
+) = sys.argv[1:]
+marker = Path(marker_path)
+checkpoint = Path(final_checkpoint).resolve()
+try:
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as exc:
+    raise SystemExit(f"Invalid completion marker {marker}: {exc}") from exc
+expected = {
+    "schema": 2,
+    "experiment": run_id,
+    "experiment_id": experiment_id,
+    "routing_mode": routing_mode,
+    "seed": int(seed),
+    "profile": profile,
+    "total_updates": int(total_updates),
+    "training_signature": training_signature,
+}
+for key, value in expected.items():
+    if payload.get(key) != value:
+        raise SystemExit(
+            f"Completion marker {key}={payload.get(key)!r}, expected {value!r}"
+        )
+recorded = Path(payload.get("checkpoint", "")).resolve()
+if recorded != checkpoint:
+    raise SystemExit(
+        f"Completion marker points to {recorded}, expected {checkpoint}"
+    )
+PY
+  validate_checkpoint_artifact "$FINAL_CHECKPOINT" || return 1
+}
 
 if [[ -f "$COMPLETE_MARKER" && ${FORCE_TRAIN:-0} != 1 ]]; then
   marker_signature=$(
@@ -190,11 +317,18 @@ if [[ -f "$COMPLETE_MARKER" && ${FORCE_TRAIN:-0} != 1 ]]; then
       "$COMPLETE_MARKER" 2>/dev/null || true
   )
   if [[ "$marker_signature" == "$TRAIN_SIGNATURE" ]]; then
-    echo "Reusing completed run: $RUN_ID"
-    exit 0
+    if validate_completed_run; then
+      "$ROOT/.venv-searchr1/bin/ray" stop --force >/dev/null 2>&1 || true
+      echo "Reusing validated completed run: $RUN_ID"
+      exit 0
+    fi
+    corrupt_backup="${CHECKPOINT_DIR}.corrupt.$(date +%Y%m%d-%H%M%S).$$"
+    mv -- "$CHECKPOINT_DIR" "$corrupt_backup"
+    echo "Archived corrupt completed run before retraining: $corrupt_backup" >&2
+  else
+    echo "Completion marker exists but does not match this configuration: $COMPLETE_MARKER" >&2
+    exit 1
   fi
-  echo "Completion marker exists but does not match this configuration: $COMPLETE_MARKER" >&2
-  exit 1
 fi
 if [[ -e "$CHECKPOINT_DIR" ]]; then
   if [[ ${FORCE_TRAIN:-0} != 1 ]]; then
@@ -205,12 +339,26 @@ if [[ -e "$CHECKPOINT_DIR" ]]; then
 fi
 mkdir -p "$CHECKPOINT_DIR"
 
+bash "$ROOT/experiments/launch_mixed_router.sh"
 source "$ROOT/scripts/lib/runtime.sh"
 ensure_local_no_proxy
 health=$(curl --noproxy '*' -fsS "http://127.0.0.1:${MIXED_PORT}/health")
-"$PILOT_PYTHON" -c \
-  'import json,sys; p=json.loads(sys.argv[1]); assert p.get("status")=="ok" and p.get("backend")=="mixed", p' \
-  "$health"
+"$PILOT_PYTHON" - \
+  "$health" "$ROOT/stackpilot/mixed_retriever_server.py" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+payload = json.loads(sys.argv[1])
+expected_digest = hashlib.sha256(Path(sys.argv[2]).read_bytes()).hexdigest()
+if (
+    payload.get("status") != "ok"
+    or payload.get("backend") != "mixed"
+    or payload.get("server_file_sha256") != expected_digest
+):
+    raise SystemExit(f"Unexpected or stale mixed-router health: {payload}")
+PY
 
 export CUDA_VISIBLE_DEVICES=$TRAIN_GPUS
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
@@ -274,10 +422,7 @@ echo "Training $RUN_ID mode=$MIXED_MODE seed=$SEED updates=$TOTAL_UPDATES"
   max_turns="$MAX_TURNS" retriever.url="http://127.0.0.1:${MIXED_PORT}/retrieve" \
   retriever.topk="$TOPK" 2>&1 | tee "$LOG_FILE"
 
-FINAL_CHECKPOINT=$CHECKPOINT_DIR/actor/global_step_$TOTAL_UPDATES
-[[ -d "$FINAL_CHECKPOINT" && -s "$FINAL_CHECKPOINT/config.json" ]] || {
-  echo "Exact final checkpoint is missing: $FINAL_CHECKPOINT" >&2; exit 1;
-}
+validate_checkpoint_artifact "$FINAL_CHECKPOINT"
 "$SEARCH_R1_PYTHON" - "$COMPLETE_MARKER" "$FINAL_CHECKPOINT" "$RUN_ID" \
   "$EXPERIMENT_ID" "$MIXED_MODE" "$SEED" "$PROFILE" "$TOTAL_UPDATES" "$TRAIN_SIGNATURE" <<'PY'
 import json, os, sys

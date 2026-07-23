@@ -5,14 +5,14 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 
 SEARCH_R1_PYTHON=$ROOT/.venv-searchr1/bin/python
-SEARCH_R1=$ROOT/upstream/Search-R1
+SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
 
 [[ -x "$SEARCH_R1_PYTHON" ]] || {
   echo "Missing .venv-searchr1; run bash scripts/bootstrap_searchr1.sh" >&2
   exit 1
 }
-[[ -d "$SEARCH_R1/.git" ]] || {
+[[ -e "$SEARCH_R1/.git" ]] || {
   echo "Missing pinned Search-R1 checkout: $SEARCH_R1" >&2
   exit 1
 }

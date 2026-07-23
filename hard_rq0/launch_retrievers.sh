@@ -10,16 +10,19 @@ export HF_HOME=${HF_HOME:-$ROOT/.cache/huggingface}
 
 PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
 [[ -x "$PILOT_PYTHON" ]] || { echo "Run scripts/bootstrap.sh first" >&2; exit 1; }
-[[ -d "$ROOT/upstream/Search-R1/.git" ]] || {
+SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
+[[ -e "$SEARCH_R1/.git" ]] || {
   echo "Missing pinned Search-R1 checkout; run scripts/bootstrap.sh first." >&2
   exit 1
 }
 ensure_java "$ROOT"
 
 ASSET_ROOT=${HARD_ASSET_ROOT:-$ROOT/work/hard_rq0/assets/wiki18}
-WORK_ROOT=$ROOT/work/hard_rq0
+RUNTIME_WORK_ROOT=${STACKPILOT_RUNTIME_ROOT:-$ROOT/work}
+RUNTIME_LOG_ROOT=${STACKPILOT_LOG_ROOT:-$ROOT/logs}
+WORK_ROOT=$RUNTIME_WORK_ROOT/hard_rq0
 PID_ROOT=$WORK_ROOT/pids
-LOG_ROOT=$ROOT/logs/hard_rq0
+LOG_ROOT=$RUNTIME_LOG_ROOT/hard_rq0
 BM25_PORT=${BM25_PORT:-8101}
 E5_PORT=${E5_PORT:-8102}
 E5_GPU=${E5_GPU:-7}
@@ -164,7 +167,7 @@ trap 'exit 143' TERM
 BM25_LOG=$LOG_ROOT/bm25.log
 BM25_PID=$(CUDA_VISIBLE_DEVICES='' start_managed_process \
   "$PILOT_PYTHON" "$BM25_LOG" "$PILOT_PYTHON" -m stackpilot.searchr1_server \
-  --search-r1-root "$ROOT/upstream/Search-R1" \
+  --search-r1-root "$SEARCH_R1" \
   --index-path "$BM25_INDEX" \
   --corpus-path "$CORPUS_PATH" \
   --retriever-name bm25 --topk 10 --port "$BM25_PORT" \
@@ -178,7 +181,7 @@ E5_PID=$(HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   RETRIEVER_DISABLE_CUDA_EMPTY_CACHE=1 CUDA_VISIBLE_DEVICES="$E5_GPU" \
   start_managed_process \
   "$PILOT_PYTHON" "$E5_LOG" "$PILOT_PYTHON" -m stackpilot.searchr1_server \
-  --search-r1-root "$ROOT/upstream/Search-R1" \
+  --search-r1-root "$SEARCH_R1" \
   --index-path "$E5_INDEX" \
   --corpus-path "$CORPUS_PATH" \
   --retriever-name e5 --retriever-model "$E5_MODEL" \

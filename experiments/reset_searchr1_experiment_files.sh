@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
-[[ -d "$SEARCH_R1/.git" ]] || { echo "Missing Search-R1 checkout: $SEARCH_R1" >&2; exit 1; }
+[[ -e "$SEARCH_R1/.git" ]] || { echo "Missing Search-R1 checkout: $SEARCH_R1" >&2; exit 1; }
 if [[ "$(git -C "$SEARCH_R1" rev-parse HEAD)" != "$SEARCH_R1_COMMIT" ]]; then
   echo "Search-R1 HEAD is not the pinned commit $SEARCH_R1_COMMIT" >&2
   exit 1

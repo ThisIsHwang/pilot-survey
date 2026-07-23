@@ -15,6 +15,7 @@ NEW_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
             'ANSWER_REWARD_WEIGHT',
             'EVIDENCE_REWARD_WEIGHT',
             'SEARCH_COST_WEIGHT',
+            'PYTHONPATH',
         ):
             if env_name in os.environ:
                 ray_env[env_name] = os.environ[env_name]

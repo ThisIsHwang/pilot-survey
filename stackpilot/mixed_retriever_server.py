@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import threading
 from collections import Counter, defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +22,38 @@ class QueryRequest(BaseModel):
     topk: int | None = None
     return_scores: bool = True
     backend_ids: list[str] | None = None
+
+
+def run_upstream_calls(calls: dict[str, Callable[[], Any]]) -> dict[str, Any]:
+    """Run only the selected upstream groups, concurrently when both are used."""
+    if not calls:
+        return {}
+    if len(calls) == 1:
+        name, call = next(iter(calls.items()))
+        try:
+            return {name: call()}
+        except Exception as exc:
+            raise RuntimeError(f"{name} upstream failed: {exc}") from exc
+
+    # requests.post creates independent connection state for each call, so the
+    # two route groups do not race on a shared Session. Let both bounded calls
+    # finish before returning an error to avoid orphaned worker threads.
+    failures: list[tuple[str, Exception]] = []
+    results: dict[str, Any] = {}
+    with ThreadPoolExecutor(
+        max_workers=len(calls),
+        thread_name_prefix="mixed-upstream",
+    ) as executor:
+        futures = {name: executor.submit(call) for name, call in calls.items()}
+        for name in sorted(futures):
+            try:
+                results[name] = futures[name].result()
+            except Exception as exc:
+                failures.append((name, exc))
+    if failures:
+        detail = "; ".join(f"{name}: {exc}" for name, exc in failures)
+        raise RuntimeError(f"upstream request failed ({detail})") from failures[0][1]
+    return results
 
 
 def post_batch(url: str, queries: list[str], topk: int, timeout: float) -> list[list[dict[str, Any]]]:
@@ -47,8 +83,19 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI()
     upstreams = {"bm25": bm25_url, "e5": e5_url}
+    server_file_sha256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     counters: Counter[str] = Counter()
     lock = threading.Lock()
+
+    def counter_snapshot() -> dict[str, int]:
+        with lock:
+            return dict(counters)
+
+    def upstream_health(name: str) -> Any:
+        health_url = upstreams[name].rsplit("/", 1)[0] + "/health"
+        response = requests.get(health_url, timeout=10)
+        response.raise_for_status()
+        return response.json()
 
     def record(routes: list[str], queries: list[str]) -> None:
         with lock:
@@ -62,26 +109,29 @@ def create_app(
 
     @app.get("/health")
     def health() -> dict[str, Any]:
-        upstream_health: dict[str, Any] = {}
-        for name, url in upstreams.items():
-            health_url = url.rsplit("/", 1)[0] + "/health"
-            try:
-                response = requests.get(health_url, timeout=10)
-                response.raise_for_status()
-                upstream_health[name] = response.json()
-            except Exception as exc:  # pragma: no cover - requires live services
-                raise HTTPException(status_code=503, detail=f"{name} upstream unavailable: {exc}") from exc
+        try:
+            health_payloads = run_upstream_calls(
+                {name: partial(upstream_health, name) for name in upstreams}
+            )
+        except Exception as exc:  # pragma: no cover - requires live services
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {
             "status": "ok",
             "backend": "mixed",
             "routing": "episode-stable-explicit",
-            "upstreams": upstream_health,
-            "counts": dict(counters),
+            "default_topk": default_topk,
+            "request_timeout_seconds": timeout,
+            "server_file_sha256": server_file_sha256,
+            "assignment_log": str(assignment_log) if assignment_log else None,
+            "upstream_urls": upstreams,
+            "upstreams": health_payloads,
+            "counts": counter_snapshot(),
         }
 
     @app.get("/stats")
     def stats() -> dict[str, Any]:
-        return {"counts": dict(counters), "total": sum(counters.values())}
+        counts = counter_snapshot()
+        return {"counts": counts, "total": sum(counts.values())}
 
     @app.post("/retrieve")
     def retrieve(request: QueryRequest) -> dict[str, Any]:
@@ -109,9 +159,19 @@ def create_app(
 
         ordered: list[list[dict[str, Any]] | None] = [None] * len(request.queries)
         try:
+            calls: dict[str, Callable[[], Any]] = {}
             for route, indices in grouped_indices.items():
                 route_queries = [request.queries[index] for index in indices]
-                route_results = post_batch(upstreams[route], route_queries, topk, timeout)
+                calls[route] = partial(
+                    post_batch,
+                    upstreams[route],
+                    route_queries,
+                    topk,
+                    timeout,
+                )
+            route_batches = run_upstream_calls(calls)
+            for route, indices in grouped_indices.items():
+                route_results = route_batches[route]
                 for index, result in zip(indices, route_results):
                     ordered[index] = result
         except Exception as exc:  # pragma: no cover - requires live services

@@ -68,7 +68,7 @@ def patch(search_r1_root: Path) -> None:
                 )
                 backend_ids = []
                 pattern = re.compile(
-                    r"<retrieval_environment>\s*(bm25|e5)\s*</retrieval_environment>",
+                    r"<retrieval_environment>\\s*(bm25|e5)\\s*</retrieval_environment>",
                     re.IGNORECASE,
                 )
                 for index, prompt in enumerate(prompts):

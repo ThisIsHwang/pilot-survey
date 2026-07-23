@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import os
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -23,12 +28,7 @@ EVIDENCE_TO_ANSWER_POLICY = {
 }
 
 
-def load_jsonl_tree(root: Path) -> pd.DataFrame:
-    rows = []
-    for path in sorted(root.rglob("*.jsonl")):
-        if "archive" in path.parts:
-            continue
-        rows.extend(read_jsonl_tolerant(path))
+def _result_frame(rows: list[dict[str, Any]], root: Path) -> pd.DataFrame:
     if not rows:
         raise RuntimeError(f"No JSONL results under {root}")
     frame = pd.DataFrame(rows)
@@ -47,6 +47,112 @@ def load_jsonl_tree(root: Path) -> pd.DataFrame:
     frame["topk"] = pd.to_numeric(frame["topk"], errors="raise").astype(int)
     frame["seed"] = pd.to_numeric(frame["seed"], errors="raise").astype(int)
     return frame
+
+
+def load_jsonl_tree(root: Path) -> pd.DataFrame:
+    rows = []
+    for path in sorted(root.rglob("*.jsonl")):
+        if "archive" in path.parts:
+            continue
+        rows.extend(read_jsonl_tolerant(path))
+    return _result_frame(rows, root)
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def load_completed_numbered_results(
+    root: Path, *, profile: str, experiment_id: str
+) -> pd.DataFrame:
+    """Load only profile-matched runs with a verified completion manifest."""
+    rows: list[dict[str, Any]] = []
+    matched_manifests = 0
+    seen_runs: set[str] = set()
+    for manifest_path in sorted(root.rglob("evaluation_manifest.json")):
+        if "archive" in manifest_path.parts:
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Invalid evaluation manifest {manifest_path}: {exc}") from exc
+        if manifest.get("profile") != profile:
+            continue
+        matched_manifests += 1
+        if (
+            manifest.get("schema") != 2
+            or manifest.get("status") != "complete"
+            or manifest.get("experiment_id") != experiment_id
+        ):
+            raise RuntimeError(
+                f"Manifest {manifest_path} is not a completed schema-2 "
+                f"{experiment_id} evaluation"
+            )
+        run_id = str(manifest.get("run_id", ""))
+        run_signature = str(manifest.get("run_signature", ""))
+        if not run_id or not run_signature or run_id in seen_runs:
+            raise RuntimeError(f"Invalid or duplicate run identity in {manifest_path}")
+        seen_runs.add(run_id)
+        episodes_path = manifest_path.parent / "episodes.jsonl"
+        if not episodes_path.is_file():
+            raise RuntimeError(
+                f"Completed evaluation has no episodes file: {episodes_path}"
+            )
+        expected_digest = str(manifest.get("episodes_sha256", ""))
+        actual_digest = sha256_file(episodes_path)
+        if not expected_digest or actual_digest != expected_digest:
+            raise RuntimeError(
+                f"Completed evaluation digest mismatch: {episodes_path}"
+            )
+        episode_rows = read_jsonl_tolerant(episodes_path)
+        expected_episodes = int(manifest.get("episodes", -1))
+        questions = int(manifest.get("questions", -1))
+        backends = [str(value) for value in manifest.get("backends", [])]
+        topks = [int(value) for value in manifest.get("topks", [])]
+        if (
+            expected_episodes < 1
+            or questions < 1
+            or not backends
+            or not topks
+            or expected_episodes != questions * len(backends) * len(topks)
+            or len(episode_rows) != expected_episodes
+        ):
+            raise RuntimeError(
+                f"Completed evaluation has inconsistent cardinality: {manifest_path}"
+            )
+        keys: set[tuple[str, str, int]] = set()
+        for row in episode_rows:
+            try:
+                key = (
+                    str(row["question_id"]),
+                    str(row["backend"]),
+                    int(row["topk"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise RuntimeError(f"Malformed episode in {episodes_path}") from exc
+            if key in keys:
+                raise RuntimeError(f"Duplicate episode key {key} in {episodes_path}")
+            keys.add(key)
+            expected = {
+                "experiment_id": experiment_id,
+                "run_id": run_id,
+                "run_signature": run_signature,
+                "profile": profile,
+            }
+            if any(row.get(name) != value for name, value in expected.items()):
+                raise RuntimeError(
+                    f"Episode provenance does not match {manifest_path}: {key}"
+                )
+        rows.extend(episode_rows)
+    if not matched_manifests:
+        raise RuntimeError(
+            f"No completed {experiment_id} results for profile={profile} under {root}"
+        )
+    return _result_frame(rows, root)
 
 
 def add_subsets(frame: pd.DataFrame, matched: pd.DataFrame) -> pd.DataFrame:
@@ -166,6 +272,7 @@ def aggregate(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--profile", required=True)
     parser.add_argument("--hard-results", required=True)
     parser.add_argument("--exp003-results", required=True)
     parser.add_argument("--exp004-results", required=True)
@@ -174,11 +281,28 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     args = parser.parse_args()
 
+    output_dir = ensure_dir(args.output_dir)
+    complete_marker = Path(output_dir) / ".complete.json"
+    complete_marker.unlink(missing_ok=True)
     hard = load_jsonl_tree(Path(args.hard_results))
     matched = matched_hard_question_ids(hard)
     hard = add_subsets(hard, matched)
-    exp003 = add_subsets(load_jsonl_tree(Path(args.exp003_results)), matched)
-    exp004 = add_subsets(load_jsonl_tree(Path(args.exp004_results)), matched)
+    exp003 = add_subsets(
+        load_completed_numbered_results(
+            Path(args.exp003_results),
+            profile=args.profile,
+            experiment_id="EXP-003",
+        ),
+        matched,
+    )
+    exp004 = add_subsets(
+        load_completed_numbered_results(
+            Path(args.exp004_results),
+            profile=args.profile,
+            experiment_id="EXP-004",
+        ),
+        matched,
+    )
 
     regrets = pd.concat(
         [mixed_regret(hard, exp003, metric) for metric in REPORT_METRICS],
@@ -191,7 +315,6 @@ def main() -> None:
     regret_summary = aggregate(regrets, "mixed_regret")
     metadata_summary = aggregate(values, "metadata_value")
 
-    output_dir = ensure_dir(args.output_dir)
     regrets.to_csv(Path(output_dir) / "mixed_regret_cells.csv", index=False)
     values.to_csv(Path(output_dir) / "metadata_value_cells.csv", index=False)
     regret_summary.to_csv(Path(output_dir) / "mixed_regret_summary.csv", index=False)
@@ -215,7 +338,14 @@ def main() -> None:
     ]
 
     if args.exp005_results:
-        exp005 = add_subsets(load_jsonl_tree(Path(args.exp005_results)), matched)
+        exp005 = add_subsets(
+            load_completed_numbered_results(
+                Path(args.exp005_results),
+                profile=args.profile,
+                experiment_id="EXP-005",
+            ),
+            matched,
+        )
         evidence_values = pd.concat(
             [evidence_reward_value(hard, exp005, metric) for metric in REPORT_METRICS],
             ignore_index=True,
@@ -243,7 +373,11 @@ def main() -> None:
         )
 
     if args.exp006_results:
-        hybrid = load_jsonl_tree(Path(args.exp006_results))
+        hybrid = load_completed_numbered_results(
+            Path(args.exp006_results),
+            profile=args.profile,
+            experiment_id="EXP-006",
+        )
         hybrid_summary = (
             hybrid.groupby(["policy_tag", "seed", "dataset", "topk"], as_index=False)[
                 REPORT_METRICS
@@ -265,7 +399,28 @@ def main() -> None:
         ]
     )
     report = Path(output_dir) / "NUMBERED_EXPERIMENT_REPORT.md"
-    report.write_text("\n".join(lines), encoding="utf-8")
+    report_temporary = report.with_name(f".{report.name}.{os.getpid()}.tmp")
+    report_temporary.write_text("\n".join(lines), encoding="utf-8")
+    os.replace(report_temporary, report)
+    outputs = {
+        path.name: sha256_file(path)
+        for path in sorted(Path(output_dir).iterdir())
+        if path.is_file() and path != complete_marker
+    }
+    marker_payload = {
+        "schema": 1,
+        "completed_at": datetime.now(UTC).isoformat(),
+        "profile": args.profile,
+        "outputs": outputs,
+    }
+    marker_temporary = complete_marker.with_name(
+        f".{complete_marker.name}.{os.getpid()}.tmp"
+    )
+    marker_temporary.write_text(
+        json.dumps(marker_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(marker_temporary, complete_marker)
     print(report.read_text(encoding="utf-8"))
 
 

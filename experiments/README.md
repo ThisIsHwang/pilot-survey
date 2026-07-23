@@ -50,3 +50,59 @@ mixed + backend ID ~= specialist oracle
 ```
 
 If mixed-blind already matches both specialists, a separate online stack-identification module is not justified.
+
+## Run EXP-003 through EXP-006 on a second node
+
+Use a separate clone for node 2. Do not run this queue from the same mutable
+checkout that is currently executing `scripts/run_full_pipeline.sh`. The two
+runners share a lifetime checkout lock and will fail before changing an
+environment if they are pointed at the same checkout.
+
+From the isolated node-2 clone, point the queue at node 1's Hard-RQ0 work
+directory:
+
+```bash
+EXP002_ARTIFACT_ROOT=/group-volume/teo.hwang/pilot-survey/work/hard_rq0 \
+  bash experiments/run_node2_queue.sh
+```
+
+That one command runs EXP-003, EXP-004, EXP-005, EXP-006, and the combined
+report in order. It never launches EXP-002 or `run_full_pipeline.sh`.
+`EXP002_ARTIFACT_ROOT` is consumed read-only: assets and prepared data are
+reused through links, and a low-priority CPU watcher waits for node 1's
+validated EXP-002 completion while EXP-003 through EXP-005 use GPUs 0-6 for
+training/evaluation and GPU 7 for E5. EXP-006 starts only after the external
+completion manifest and all six specialist models pass validation.
+
+The queue creates node/run-scoped service PID and log roots, reuses valid uv
+and Hugging Face caches, skips completed numbered training checkpoints through
+their signatures, performs common setup once, and runs GPU stages
+sequentially. By default, the independent evaluation-only vLLM environment is
+installed at low CPU/I/O priority behind the first EXP-003 training seed (or
+EXP-004 when EXP-003 is disabled); its deferred GPU probe runs only after that
+training releases the GPUs. Set `OVERLAP_VLLM_SETUP=0` for synchronous setup.
+On success or failure the queue stops managed routers, retrievers, vLLM, Ray,
+and background process groups while preserving the original exit status. A
+normal completed run explicitly exits with status 0.
+
+Useful overrides:
+
+```bash
+# Smoke profile, or disable selected experiments explicitly.
+PROFILE=smoke RUN_EXP005=0 RUN_EXP006=0 RUN_REPORT=0 \
+  bash experiments/run_node2_queue.sh
+
+# Node 1 used a result-set name different from PROFILE.
+EXP002_ARTIFACT_ROOT=/path/to/node1/work/hard_rq0 \
+EXP002_RESULT_SET=pilot \
+  bash experiments/run_node2_queue.sh
+```
+
+All `RUN_EXP003`, `RUN_EXP004`, `RUN_EXP005`, `RUN_EXP006`, and `RUN_REPORT`
+flags default to `1`. `EXP002_WAIT_TIMEOUT` defaults to 48 hours. Set
+`HF_HOME` or `UV_CACHE_DIR` explicitly to choose another shared
+content-addressed cache; virtual environments and `upstream/Search-R1` must
+remain private to each checkout. `FORCE_TRAIN=1` automatically disables vLLM
+setup overlap so the first seed is not forcibly trained twice. When EXP-006
+uses a `BASE_MODEL_REF` different from the training `BASE_MODEL`, set its
+revision with `BASE_MODEL_REF_REVISION`.
