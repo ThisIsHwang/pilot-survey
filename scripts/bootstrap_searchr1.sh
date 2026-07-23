@@ -21,7 +21,7 @@ fi
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
-SEARCH_R1=$ROOT/upstream/Search-R1
+SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
 RUNTIME_PATCH=$ROOT/searchr1_stage2/searchr1-runtime.patch
 
 if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
@@ -68,7 +68,7 @@ if not header.is_file():
     raise SystemExit(f"Python development headers are missing: {header}")
 PY
 
-if [[ ! -d "$SEARCH_R1/.git" ]]; then
+if [[ ! -e "$SEARCH_R1/.git" ]]; then
   git clone https://github.com/PeterGriffinJin/Search-R1.git "$SEARCH_R1"
 fi
 if ! git -C "$SEARCH_R1" cat-file -e "$SEARCH_R1_COMMIT^{commit}" 2>/dev/null; then

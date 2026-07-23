@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-SEARCH_R1=$ROOT/upstream/Search-R1
+SEARCH_R1=${SEARCH_R1_ROOT:-$ROOT/upstream/Search-R1}
 SEARCH_R1_PYTHON=$ROOT/.venv-searchr1/bin/python
 PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
@@ -131,7 +131,7 @@ LOG_FILE=${LOG_FILE:-$ROOT/logs/hard_rq0/${EXP}.log}
   echo "Missing .venv-pilot; run bash scripts/bootstrap.sh" >&2
   exit 1
 }
-[[ -d "$SEARCH_R1/.git" ]] || {
+[[ -e "$SEARCH_R1/.git" ]] || {
   echo "Missing pinned Search-R1 checkout; run bash scripts/bootstrap_searchr1.sh" >&2
   exit 1
 }

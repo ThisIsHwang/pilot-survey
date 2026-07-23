@@ -5,7 +5,12 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 source "$ROOT/scripts/lib/runtime.sh"
 status=0
 
-for work_dir in "$ROOT/work" "$ROOT/work_smoke"; do
+if [[ -n ${STACKPILOT_RUNTIME_ROOT:-} ]]; then
+  work_dirs=("$STACKPILOT_RUNTIME_ROOT")
+else
+  work_dirs=("$ROOT/work" "$ROOT/work_smoke")
+fi
+for work_dir in "${work_dirs[@]}"; do
   stop_managed_pid "$work_dir/pids/vllm.pid" "$ROOT/.venv-vllm/bin/vllm" "$ROOT" 1 || status=1
   stop_managed_pid "$work_dir/pids/colbert.pid" "$ROOT/.venv-pilot/bin/python" "$ROOT" 1 || status=1
   stop_managed_pid "$work_dir/pids/e5.pid" "$ROOT/.venv-pilot/bin/python" "$ROOT" 1 || status=1

@@ -5,6 +5,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 source "$ROOT/scripts/lib/bootstrap_env.sh"
 validate_bootstrap_flag
+VLLM_DEFER_GPU_PROBE=${VLLM_DEFER_GPU_PROBE:-0}
+if [[ "$VLLM_DEFER_GPU_PROBE" != 0 && "$VLLM_DEFER_GPU_PROBE" != 1 ]]; then
+  echo "VLLM_DEFER_GPU_PROBE must be 0 or 1; got '$VLLM_DEFER_GPU_PROBE'." >&2
+  exit 2
+fi
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 # vLLM 0.19.0 is intentionally pinned: its PyPI wheel is natively built for
@@ -168,6 +173,12 @@ if [[ $cache_hit -ne 1 ]]; then
 fi
 
 # A driver/GPU problem is reported without deleting the verified environment.
-vllm_hardware_is_valid
+# Node-2 may build this independent evaluation environment behind an active
+# Search-R1 training job, then run the hardware probe after that GPU job exits.
+if [[ "$VLLM_DEFER_GPU_PROBE" == 1 ]]; then
+  echo "vLLM hardware probe deferred; package/native validation completed."
+else
+  vllm_hardware_is_valid
+fi
 
 echo "vLLM environment ready: source $ROOT/.venv-vllm/bin/activate"

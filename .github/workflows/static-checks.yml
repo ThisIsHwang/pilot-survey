@@ -2,8 +2,11 @@ name: static-checks
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'agent/**'
 
 jobs:
   python-syntax:
@@ -16,7 +19,7 @@ jobs:
           git fetch -q --depth=1 origin "$GITHUB_REF"
           git checkout -q FETCH_HEAD
       - name: Compile Python sources
-        run: python3 -m compileall -q stackpilot tests
+        run: python3 -m compileall -q stackpilot tests hard_rq0
 
   bash-syntax:
     runs-on: ubuntu-latest
@@ -29,7 +32,7 @@ jobs:
           git checkout -q FETCH_HEAD
       - name: Check shell scripts
         run: |
-          find scripts searchr1_stage2 hard_rq0 -type f -name '*.sh' -print0 \
+          find scripts searchr1_stage2 hard_rq0 experiments -type f -name '*.sh' -print0 \
             | xargs -0 -n1 bash -n
 
   unit-tests:
@@ -45,6 +48,6 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install lightweight test dependencies
-        run: python -m pip install --quiet numpy openai pandas pyyaml requests tqdm
+        run: python -m pip install --quiet fastapi httpx numpy openai pandas pydantic pyyaml requests tqdm uvicorn
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
