@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import List, Optional
 
@@ -14,12 +16,17 @@ from stackpilot.cuda_compat import (
     configure_cuda_attention,
     load_e5_with_eager_attention,
 )
+from stackpilot.retrieval_concurrency import batch_search
 
 
 class QueryRequest(BaseModel):
     queries: List[str]
     topk: Optional[int] = None
     return_scores: bool = False
+
+
+def source_digest(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def main() -> None:
@@ -38,6 +45,16 @@ def main() -> None:
 
     if args.expected_documents is not None and args.expected_documents <= 0:
         parser.error("--expected-documents must be positive")
+    disable_empty_cache_value = os.environ.get(
+        "RETRIEVER_DISABLE_CUDA_EMPTY_CACHE", "0"
+    )
+    if disable_empty_cache_value not in {"0", "1"}:
+        parser.error("RETRIEVER_DISABLE_CUDA_EMPTY_CACHE must be 0 or 1")
+    disable_empty_cache = (
+        disable_empty_cache_value == "1"
+        and args.retriever_name.lower() == "e5"
+        and args.faiss_gpu
+    )
 
     sys.path.insert(0, str(Path(args.search_r1_root).resolve()))
     from search_r1.search import retrieval_server
@@ -60,6 +77,11 @@ def main() -> None:
         retrieval_batch_size=256,
     )
     retriever = retrieval_server.get_retriever(config)
+    if disable_empty_cache:
+        # The hard-RQ0 E5 server owns GPU 7 exclusively. Retaining its allocator
+        # cache avoids two synchronizing empty_cache calls per query batch.
+        retrieval_server.torch.cuda.empty_cache = lambda: None
+        print("E5 CUDA allocator cache retained between retrieval batches")
     index_documents: int | None = None
     corpus_documents: int | None = None
     if args.expected_documents is not None:
@@ -116,6 +138,18 @@ def main() -> None:
         else 0
     )
     index_class = type(getattr(retriever, "index", None)).__name__
+    search_lock = (
+        threading.Lock()
+        if args.retriever_name.lower() == "e5" and args.faiss_gpu
+        else None
+    )
+    server_files = {
+        path.name: source_digest(path)
+        for path in (
+            Path(__file__).resolve(),
+            Path(__file__).with_name("retrieval_concurrency.py").resolve(),
+        )
+    }
     app = FastAPI()
 
     @app.get("/health")
@@ -133,12 +167,17 @@ def main() -> None:
             "corpus_documents": corpus_documents,
             "retriever_model": retriever_model,
             "retriever_model_revision": retriever_model_revision,
+            "gpu_search_serialized": search_lock is not None,
+            "cuda_empty_cache_disabled": disable_empty_cache,
+            "server_files": server_files,
         }
 
     @app.post("/retrieve")
     def retrieve(request: QueryRequest):
         topk = request.topk or args.topk
-        results, scores = retriever.batch_search(request.queries, topk, True)
+        results, scores = batch_search(
+            retriever, request.queries, topk, search_lock
+        )
         payload = []
         for docs, doc_scores in zip(results, scores):
             combined = []

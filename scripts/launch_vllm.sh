@@ -9,5 +9,5 @@ ensure_local_no_proxy
 configure_vllm_launch "$ROOT"
 require_free_port "$VLLM_PYTHON" "$LLM_PORT"
 
-echo "Serving $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP)."
+echo "Serving $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP, DP=$DP)."
 exec env CUDA_VISIBLE_DEVICES="$LLM_GPUS" "$VLLM_BIN" "${VLLM_ARGS[@]}"

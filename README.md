@@ -18,9 +18,10 @@ packages.
   (`Python.h`; commonly provided by `python3.12-dev`)
 - an NVIDIA driver capable of running CUDA 12.9 binaries
 - the CUDA 12.9 toolkit, including `nvcc`, on `PATH`
-- `g++`, `git`, and `curl`
-- at least 8 GiB free in `/dev/shm` and at least 128 GiB available host RAM
-- for the default all-experiment run, plan at least 350 GiB free disk. The
+- `g++`, `git`, `curl`, and `flock`
+- at least 22 affinity-visible physical CPU cores
+- at least 8 GiB free in `/dev/shm` and at least 192 GiB available host RAM
+- for the default all-experiment run, plan at least 360 GiB free disk. The
   hard-RQ0 preflight computes a profile-aware requirement and stops before a
   large download when the node is too small. Its official assets alone occupy
   roughly 100 GB after assembly.
@@ -32,9 +33,12 @@ warm-up compile CUDA extensions.
 
 ## Recommended one-command run
 
-The full runner executes Stage 0, Stage 2, and hard-RQ0 in sequence. It downloads
-the pinned models, datasets, and full-wiki retrieval assets as their step starts,
-then reuses verified caches on every rerun.
+The full runner executes Stage 0, Stage 2, and hard-RQ0 in sequence. After the
+pilot environment is ready, it starts the Search-R1 installation, future model
+snapshots, and full-wiki hard-RQ0 assets as low-priority CPU/I/O background
+jobs with no visible GPUs. Stage 0 can therefore keep the GPUs busy while later
+dependencies arrive. Each consumer waits only at its dependency boundary and
+revalidates the result; every rerun reuses verified caches.
 
 ```bash
 cd /group-volume/teo.hwang/pilot-survey
@@ -60,6 +64,17 @@ and can be shared by setting `UV_CACHE_DIR`. Use `FORCE_BOOTSTRAP=1` only for an
 intentional clean environment rebuild. `UV_OFFLINE=1` disables the online
 fallback for Python package installation and fails if a required package is not
 already cached; it does not make model or dataset downloads offline.
+
+Background preparation logs are under `logs/prefetch/`. Set
+`PREFETCH_FUTURE_WORK=0` to restore strictly sequential preparation. An
+interrupted or failed prefetch is safe: model consumers retry the missing
+snapshot, the hard-asset downloader resumes verified components under an
+exclusive process lock, and no background installer mutates an environment
+used by the current GPU stage. Before the large asset job starts, the runner
+reserves both its remaining download headroom and the selected hard profile's
+checkpoint headroom, Stage-0/2 work space, and model-cache headroom on their
+actual filesystems. A lifetime lock also prevents two full runners from
+stopping each other's services or mutating the same environments.
 
 The four entry points are deliberately explicit:
 
@@ -202,12 +217,24 @@ and has enough free memory. These phases run sequentially.
 
 Hard-RQ0 keeps its full-wiki services alive across sequential runs. During
 training, Search-R1 uses GPUs 0-6 and the E5 encoder plus GPU-FAISS index uses
-GPU 7; BM25 remains on CPU. During evaluation, vLLM uses GPUs 0-1 with
-tensor parallel size 2 while E5 remains on GPU 7. Launch and training preflights
-reject overlapping assignments, a CPU-only FAISS build, or a non-H100/MIG node.
+GPU 7; BM25 remains on CPU. During evaluation, seven independent Qwen replicas
+run with tensor parallel size 1 and data parallel size 7 on GPUs 0-6, while E5
+remains on GPU 7. The evaluator keeps up to 112 independent episodes in flight;
+each episode's turns remain sequential and its request seed is unchanged.
+GPU-FAISS searches are serialized around the service's one GPU resource while
+LLM generation remains concurrent. Because GPU 7 is exclusive in hard-RQ0, the
+retriever also retains its CUDA allocator cache instead of synchronizing
+`empty_cache()` after every query batch. Launch and training preflights reject
+overlapping assignments, a CPU-only FAISS build, or a non-H100/MIG node.
 
 The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
-`TP`. `LLM_GPUS` must contain exactly `TP` unique GPU IDs.
+`TP`. For data-parallel serving, `DP` and `HARD_EVAL_WORKERS` are also
+available. `LLM_GPUS` must contain exactly `TP * DP` unique GPU IDs. Hard-RQ0
+defaults to `TP=1`, `DP=7`, `HARD_EVAL_WORKERS=112`, and
+`VLLM_BATCH_INVARIANT=1`; the last setting preserves seeded outputs across
+different request batching and completion order on H100. Advanced serving
+overrides such as `VLLM_API_SERVER_COUNT`, `GPU_MEMORY_UTILIZATION`, and
+`MAX_MODEL_LEN` are recorded in the evaluation signature.
 
 ## Cache and restart behavior
 
@@ -242,7 +269,8 @@ The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
   component. Its 64.6 GB E5 index is assembled incrementally; each downloaded
   split is removed after its durable assembly checkpoint, and the compressed
   corpus is removed after successful promotion, unless
-  `KEEP_HARD_SOURCE_ARCHIVES=1` is set.
+  `KEEP_HARD_SOURCE_ARCHIVES=1` is set. An exclusive Linux file lock prevents a
+  background prefetch and a foreground retry from sharing assembly files.
 - Hard-RQ0 assets and prepared data have strict manifests. Policy rows resume by
   a shared evaluation signature and a model-specific run signature; stale rows
   are archived outside the report glob. Completed GRPO runs require the exact
@@ -261,6 +289,10 @@ logs/hotpot-bm25-smoke-grpo.log
 logs/hotpot-e5-smoke-grpo.log
 logs/hotpot-bm25-pilot-grpo.log
 logs/hotpot-e5-pilot-grpo.log
+logs/prefetch/searchr1-bootstrap.log
+logs/prefetch/stage2-models.log
+logs/prefetch/hard-models.log
+logs/prefetch/hard-assets.log
 ```
 
 Stop only the processes recorded by this checkout:

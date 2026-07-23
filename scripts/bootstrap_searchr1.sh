@@ -4,8 +4,20 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 mkdir -p upstream work logs
+command -v flock >/dev/null 2>&1 || {
+  echo "flock is required to serialize the Search-R1 environment bootstrap." >&2
+  exit 1
+}
+exec {SEARCHR1_BOOTSTRAP_LOCK_FD}>"$ROOT/work/.bootstrap-searchr1.lock"
+echo "Acquiring Search-R1 bootstrap lock."
+flock "$SEARCHR1_BOOTSTRAP_LOCK_FD"
 source "$ROOT/scripts/lib/bootstrap_env.sh"
 validate_bootstrap_flag
+SEARCHR1_DEFER_GPU_PROBE=${SEARCHR1_DEFER_GPU_PROBE:-0}
+if [[ "$SEARCHR1_DEFER_GPU_PROBE" != 0 && "$SEARCHR1_DEFER_GPU_PROBE" != 1 ]]; then
+  echo "SEARCHR1_DEFER_GPU_PROBE must be 0 or 1; got '$SEARCHR1_DEFER_GPU_PROBE'." >&2
+  exit 2
+fi
 
 PYTHON_REQUEST=${PYTHON_BIN:-python3.12}
 SEARCH_R1_COMMIT=${SEARCH_R1_COMMIT:-598e61bd1d36895726d28a8d06b3a15bed19f5d3}
@@ -266,7 +278,10 @@ fi
 searchr1_combined_imports_are_valid
 
 "$UV_BIN" pip check --python "$SEARCH_R1_PYTHON"
-"$SEARCH_R1_PYTHON" - <<'PY'
+if [[ "$SEARCHR1_DEFER_GPU_PROBE" == 1 ]]; then
+  echo "Deferring the H100 flash-attn warm-up to the Stage-2 preflight."
+else
+  "$SEARCH_R1_PYTHON" - <<'PY'
 import importlib.metadata
 
 import flash_attn
@@ -314,6 +329,7 @@ print(
     f"Ray {ray.__version__}; host is expected to remain CUDA 12.9."
 )
 PY
+fi
 
 cat <<MSG
 Search-R1 bootstrap complete.

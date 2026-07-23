@@ -34,7 +34,7 @@ else
   MODEL_SOURCE="Hugging Face; cache=${HF_HOME:-$HOME/.cache/huggingface}"
 fi
 READY_TIMEOUT=${VLLM_READY_TIMEOUT:-$READY_TIMEOUT_DEFAULT}
-echo "Loading $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP)."
+echo "Loading $MODEL_PATH as $SERVED_MODEL_NAME on GPUs $LLM_GPUS (TP=$TP, DP=$DP)."
 echo "Model source: $MODEL_SOURCE; readiness timeout: ${READY_TIMEOUT}s."
 wait_for_http "$VLLM_PID" "http://127.0.0.1:${LLM_PORT}/v1/models" \
   "$READY_TIMEOUT" "$LOG_FILE"
