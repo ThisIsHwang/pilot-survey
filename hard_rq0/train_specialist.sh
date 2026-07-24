@@ -48,11 +48,24 @@ readonly MAX_TURNS=4
 TOTAL_EPOCHS=${TOTAL_EPOCHS:-100}
 VAL_BEFORE_TRAIN=${VAL_BEFORE_TRAIN:-true}
 LOGGER=${LOGGER:-"['console']"}
+SEARCH_R1_REWARD_MODE=${SEARCH_R1_REWARD_MODE:-answer}
+ANSWER_REWARD_WEIGHT=${ANSWER_REWARD_WEIGHT:-1.0}
+EVIDENCE_REWARD_WEIGHT=${EVIDENCE_REWARD_WEIGHT:-0.5}
+SEARCH_COST_WEIGHT=${SEARCH_COST_WEIGHT:-0.02}
+case "$SEARCH_R1_REWARD_MODE" in
+  answer|evidence) ;;
+  *)
+    echo "SEARCH_R1_REWARD_MODE must be answer or evidence; got '$SEARCH_R1_REWARD_MODE'." >&2
+    exit 2
+    ;;
+esac
+export SEARCH_R1_REWARD_MODE ANSWER_REWARD_WEIGHT EVIDENCE_REWARD_WEIGHT SEARCH_COST_WEIGHT
 ASSET_ROOT=${HARD_ASSET_ROOT:-$ROOT/work/hard_rq0/assets/wiki18}
 ASSET_MANIFEST=$ASSET_ROOT/.hard-rq0-assets-manifest.json
+DATA_MANIFEST=$ROOT/work/hard_rq0/data/.hard-rq0-data-manifest.json
 CORPUS_PATH=$ASSET_ROOT/wiki-18.jsonl
 TRAIN_DATA=$ROOT/work/hard_rq0/searchr1/train.parquet
-VAL_DATA=$ROOT/work/hard_rq0/searchr1/test.parquet
+VAL_DATA=$ROOT/work/hard_rq0/searchr1/dev.parquet
 
 case "$BACKEND" in
   bm25)
@@ -135,6 +148,17 @@ LOG_FILE=${LOG_FILE:-$ROOT/logs/hard_rq0/${EXP}.log}
   echo "Missing .venv-pilot; run bash scripts/bootstrap.sh" >&2
   exit 1
 }
+"$SEARCH_R1_PYTHON" - \
+  "$ANSWER_REWARD_WEIGHT" "$EVIDENCE_REWARD_WEIGHT" "$SEARCH_COST_WEIGHT" <<'PY'
+import math
+import sys
+
+names = ("ANSWER_REWARD_WEIGHT", "EVIDENCE_REWARD_WEIGHT", "SEARCH_COST_WEIGHT")
+for name, raw_value in zip(names, sys.argv[1:]):
+    value = float(raw_value)
+    if not math.isfinite(value) or value < 0:
+        raise SystemExit(f"{name} must be finite and non-negative; got {raw_value!r}")
+PY
 [[ -e "$SEARCH_R1/.git" ]] || {
   echo "Missing pinned Search-R1 checkout; run bash scripts/bootstrap_searchr1.sh" >&2
   exit 1
@@ -162,6 +186,11 @@ done
 }
 "$PILOT_PYTHON" -m stackpilot.prepare_hard_rq0 \
   --config "$ROOT/configs/hard_rq0.yaml" --check
+"$PILOT_PYTHON" -m stackpilot.prepare_hard_rq0 \
+  --config "$ROOT/configs/hard_rq0.yaml" \
+  --validate-training-inputs \
+  --train-file "$TRAIN_DATA" \
+  --val-file "$VAL_DATA"
 if [[ "$BACKEND" == bm25 ]]; then
   [[ -d "$INDEX_PATH" ]] || {
     echo "Missing hard-RQ0 BM25 index: $INDEX_PATH" >&2
@@ -262,6 +291,14 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
   --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
+  --search-r1-root "$SEARCH_R1"
+if [[ "$SEARCH_R1_REWARD_MODE" == evidence ]]; then
+  "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_evidence_reward.py" \
+    --search-r1-root "$SEARCH_R1"
+fi
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --search-r1-root "$SEARCH_R1"
 "$ROOT/.venv-searchr1/bin/ray" stop --force >/dev/null 2>&1 || true
@@ -322,14 +359,19 @@ TRAIN_SIGNATURE=$("$SEARCH_R1_PYTHON" - \
   "$SAVE_FREQ" "$TEST_FREQ" "$VAL_BEFORE_TRAIN" "$ROLLOUT_GPU_MEMORY" "$ATTENTION_BACKEND" \
   "$ACTOR_PARAM_OFFLOAD" "$ACTOR_GRAD_OFFLOAD" "$ACTOR_OPTIMIZER_OFFLOAD" "$REF_PARAM_OFFLOAD" \
   "$TRAIN_GPUS" "$N_GPUS" "$E5_GPU" "$PORT" "$SEARCH_R1_COMMIT" "$SEARCH_R1_DIRTY_SHA" \
+  "$SEARCH_R1_REWARD_MODE" "$ANSWER_REWARD_WEIGHT" "$EVIDENCE_REWARD_WEIGHT" "$SEARCH_COST_WEIGHT" \
   "$RETRIEVER_MODEL" "$E5_MODEL_REVISION" "$RETRIEVER_MODEL_REVISION" \
   "$ROOT/searchr1_stage2/searchr1-runtime.patch" \
   "$ROOT/hard_rq0/patch_searchr1_seed.py" \
   "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
   "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
+  "$ROOT/hard_rq0/patch_searchr1_evidence_reward.py" \
   "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+  "$ROOT/stackpilot/action_protocol.py" \
   "$ROOT/hard_rq0/sitecustomize.py" \
-  "$ROOT/hard_rq0/train_specialist.sh" "$ASSET_MANIFEST" \
+  "$ROOT/hard_rq0/train_specialist.sh" "$ASSET_MANIFEST" "$DATA_MANIFEST" \
   "$CORPUS_PATH" "$INDEX_PATH" <<'PY'
 import hashlib
 import json
@@ -374,6 +416,10 @@ from pathlib import Path
     port,
     search_r1_commit,
     search_r1_dirty_sha,
+    reward_mode,
+    answer_reward_weight,
+    evidence_reward_weight,
+    search_cost_weight,
     retriever_model,
     e5_model_revision,
     retriever_model_revision,
@@ -381,10 +427,15 @@ from pathlib import Path
     seed_patch,
     worker_cuda_patch,
     validation_patch,
+    action_protocol_patch,
+    reward_protocol_patch,
+    evidence_reward_patch,
     experiment_env_patch,
+    action_protocol,
     sitecustomize,
     training_wrapper,
     asset_manifest,
+    data_manifest,
     corpus_path,
     index_path,
 ) = sys.argv[1:]
@@ -427,7 +478,7 @@ def asset_identity(path_text: str) -> dict:
 
 
 payload = {
-    "schema": 1,
+    "schema": 2,
     "base_model": model_identity(base_model),
     "base_model_revision": base_model_revision,
     "backend": backend,
@@ -442,6 +493,7 @@ payload = {
     "profile": profile,
     "train_sha256": digest(train_file),
     "val_sha256": digest(val_file),
+    "data_manifest_sha256": digest(data_manifest),
     "assets": {
         "manifest_sha256": digest(asset_manifest),
         "corpus": asset_identity(corpus_path),
@@ -476,6 +528,10 @@ payload = {
         "e5_gpu": int(e5_gpu),
         "retriever_port": int(port),
         "max_turns": int(max_turns),
+        "reward_mode": reward_mode,
+        "answer_reward_weight": float(answer_reward_weight),
+        "evidence_reward_weight": float(evidence_reward_weight),
+        "search_cost_weight": float(search_cost_weight),
     },
     "search_r1_commit": search_r1_commit,
     "search_r1_dirty_sha256": search_r1_dirty_sha,
@@ -483,7 +539,11 @@ payload = {
     "seed_patch_sha256": digest(seed_patch),
     "worker_cuda_patch_sha256": digest(worker_cuda_patch),
     "validation_patch_sha256": digest(validation_patch),
+    "action_protocol_patch_sha256": digest(action_protocol_patch),
+    "reward_protocol_patch_sha256": digest(reward_protocol_patch),
+    "evidence_reward_patch_sha256": digest(evidence_reward_patch),
     "experiment_env_patch_sha256": digest(experiment_env_patch),
+    "action_protocol_sha256": digest(action_protocol),
     "sitecustomize_sha256": digest(sitecustomize),
     "training_wrapper_sha256": digest(training_wrapper),
 }
@@ -612,7 +672,7 @@ export VLLM_ATTENTION_BACKEND=$ATTENTION_BACKEND
 export TOKENIZERS_PARALLELISM=false
 export RQ0_SEED=$SEED
 export PYTHONHASHSEED=$SEED
-export PYTHONPATH="$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
+export PYTHONPATH="$ROOT:$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
@@ -686,7 +746,9 @@ completed_checkpoint=$(latest_checkpoint) || {
   "$COMPLETE_MARKER" "$completed_checkpoint" "$EXP" "$BACKEND" "$SEED" \
   "$PROFILE" "$TOTAL_UPDATES" "$TRAINER_STOP_STEP" "$TRAIN_SIGNATURE" \
   "$BASE_MODEL" "$TOPK" "$MAX_PROMPT_LENGTH" "$MAX_RESPONSE_LENGTH" \
-  "$MAX_START_LENGTH" "$MAX_OBS_LENGTH" "$MAX_TURNS" "$SEARCH_R1_COMMIT" <<'PY'
+  "$MAX_START_LENGTH" "$MAX_OBS_LENGTH" "$MAX_TURNS" "$SEARCH_R1_COMMIT" \
+  "$SEARCH_R1_REWARD_MODE" "$ANSWER_REWARD_WEIGHT" \
+  "$EVIDENCE_REWARD_WEIGHT" "$SEARCH_COST_WEIGHT" <<'PY'
 import json
 import os
 import sys
@@ -711,6 +773,10 @@ from pathlib import Path
     max_obs_length,
     max_turns,
     search_r1_commit,
+    reward_mode,
+    answer_reward_weight,
+    evidence_reward_weight,
+    search_cost_weight,
 ) = sys.argv[1:]
 payload = {
     "schema": 2,
@@ -730,6 +796,12 @@ payload = {
         "max_start_length": int(max_start_length),
         "max_obs_length": int(max_obs_length),
         "max_turns": int(max_turns),
+    },
+    "reward_protocol": {
+        "mode": reward_mode,
+        "answer_weight": float(answer_reward_weight),
+        "evidence_weight": float(evidence_reward_weight),
+        "search_cost_weight": float(search_cost_weight),
     },
     "search_r1_commit": search_r1_commit,
     "completed_at": datetime.now(timezone.utc).isoformat(),

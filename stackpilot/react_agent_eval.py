@@ -3,14 +3,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
-import re
 from pathlib import Path
 
 import pandas as pd
 from openai import OpenAI
 from tqdm import tqdm
 
+from stackpilot.action_protocol import parse_action
 from stackpilot.common import (
     answer_em,
     answer_f1,
@@ -27,7 +28,7 @@ from stackpilot.service_checks import (
     effective_model_name,
 )
 
-RESULT_SCHEMA = 2
+RESULT_SCHEMA = 3
 
 SYSTEM_PROMPT = """You are a search agent. Solve the question using the search tool.
 At each turn output exactly one action:
@@ -42,6 +43,110 @@ GUIDANCE = {
     "e5": "The search system is semantic. Prefer clear natural-language descriptions and paraphrased relations.",
     "colbert": "The search system uses token-level late interaction. Preserve exact entities and important relation terms in a fluent query.",
 }
+
+
+def finite_number(value: object) -> bool:
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, ValueError):
+        return False
+
+
+def normalized_title_set(values: object) -> set[str] | None:
+    if not isinstance(values, list) or any(
+        not isinstance(value, str) or not value.strip() for value in values
+    ):
+        return None
+    return {" ".join(value.lower().split()) for value in values}
+
+
+def episode_validation_error(row: dict, max_search_turns: int) -> str | None:
+    if max_search_turns < 1:
+        return "max_search_turns must be positive"
+    prediction = row.get("prediction")
+    raw_prediction = row.get("raw_text_prediction")
+    gold = row.get("gold")
+    if (
+        not isinstance(prediction, str)
+        or not isinstance(raw_prediction, str)
+        or not isinstance(gold, str)
+        or not gold.strip()
+    ):
+        return "prediction/gold fields are invalid"
+    protocol_failure = row.get("protocol_failure")
+    if isinstance(protocol_failure, bool) or protocol_failure not in (0, 1, 0.0, 1.0):
+        return "protocol_failure must be 0 or 1"
+    failed = bool(int(float(protocol_failure)))
+    if failed and prediction:
+        return "protocol failures must have an empty primary prediction"
+    if not failed and not prediction.strip():
+        return "successful episodes must have a primary prediction"
+    queries = row.get("queries")
+    if not isinstance(queries, list) or any(
+        not isinstance(query, str) or not query.strip() for query in queries
+    ):
+        return "queries must be nonempty strings"
+    search_count = row.get("search_count")
+    invalid_count = row.get("invalid_action_count")
+    if (
+        isinstance(search_count, bool)
+        or isinstance(invalid_count, bool)
+        or not finite_number(search_count)
+        or not float(search_count).is_integer()
+        or int(float(search_count)) != len(queries)
+        or not 0 <= int(float(search_count)) <= max_search_turns
+    ):
+        return "search_count is inconsistent with queries or the budget"
+    if (
+        not finite_number(invalid_count)
+        or not float(invalid_count).is_integer()
+        or int(float(invalid_count)) < 0
+        or int(float(invalid_count)) > max_search_turns + 1
+        or int(float(invalid_count)) + len(queries)
+        > max_search_turns + int(failed)
+    ):
+        return "invalid/search action counts exceed the rollout budget"
+    expected_metrics = {
+        "em": 0.0 if failed else answer_em(prediction, gold),
+        "f1": 0.0 if failed else answer_f1(prediction, gold),
+        "raw_text_em": answer_em(raw_prediction, gold),
+        "raw_text_f1": answer_f1(raw_prediction, gold),
+    }
+    for name, expected in expected_metrics.items():
+        actual = row.get(name)
+        if (
+            not finite_number(actual)
+            or not 0.0 <= float(actual) <= 1.0
+            or abs(float(actual) - expected) > 1e-9
+        ):
+            return f"{name} is inconsistent with its prediction"
+    support_titles = normalized_title_set(row.get("support_titles"))
+    retrieved_titles = normalized_title_set(row.get("retrieved_titles"))
+    if support_titles is None or not support_titles:
+        return "support_titles must be nonempty strings"
+    if retrieved_titles is None:
+        return "retrieved_titles must be strings"
+    expected_recall = len(support_titles & retrieved_titles) / len(support_titles)
+    support_recall = row.get("support_recall")
+    if (
+        not finite_number(support_recall)
+        or abs(float(support_recall) - expected_recall) > 1e-9
+    ):
+        return "support_recall is inconsistent with retrieved titles"
+    return None
+
+
+def episode_matches_source(row: dict, item: dict) -> bool:
+    expected_support = [
+        str(value).strip()
+        for value in item.get("support_titles", [])
+        if value is not None and str(value).strip()
+    ]
+    return (
+        str(row.get("question_id", "")) == str(item.get("id", ""))
+        and str(row.get("gold", "")) == str(item.get("answer", "")).strip()
+        and row.get("support_titles") == expected_support
+    )
 
 
 def file_digest(path: Path) -> str:
@@ -123,6 +228,15 @@ def run_identity(
         "schema": RESULT_SCHEMA,
         "config": cfg,
         "artifacts": {name: file_digest(path) for name, path in artifacts.items()},
+        "evaluator_files": {
+            name: file_digest(Path(__file__).with_name(name))
+            for name in (
+                "action_protocol.py",
+                "common.py",
+                "react_agent_eval.py",
+                "retrieval_clients.py",
+            )
+        },
         "model": model_identity(cfg),
     }
     if backends is not None:
@@ -133,16 +247,6 @@ def run_identity(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), payload
-
-
-def parse_action(text: str) -> tuple[str, str]:
-    search = re.search(r"<search>(.*?)</search>", text, flags=re.S | re.I)
-    if search:
-        return "search", search.group(1).strip()
-    answer = re.search(r"<answer>(.*?)</answer>", text, flags=re.S | re.I)
-    if answer:
-        return "answer", answer.group(1).strip()
-    return "invalid", text.strip()
 
 
 def format_results(results: list[dict], max_chars: int) -> str:
@@ -178,6 +282,11 @@ def run_episode(
     cfg: dict,
     oracle: bool,
 ) -> dict:
+    gold_answer = str(item.get("answer", "")).strip()
+    if not gold_answer:
+        raise RuntimeError(
+            f"Agent-evaluation row {item.get('id')!r} has no usable gold answer"
+        )
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
     user = f"Question: {item['question']}"
     if oracle:
@@ -186,11 +295,15 @@ def run_episode(
     all_titles: list[str] = []
     searches: list[str] = []
     prediction = ""
+    raw_text_prediction = ""
+    invalid_action_count = 0
+    protocol_failure = 0
     search_budget = int(cfg["agent"]["max_search_turns"])
-    max_attempts = search_budget * 2 + 2
 
     attempts = 0
-    while len(searches) < search_budget and attempts < max_attempts:
+    # Match Search-R1 training: malformed actions consume one of max_turns,
+    # followed by one forced final action when no answer was produced.
+    while attempts < search_budget:
         attempts += 1
         seed_payload = (
             f"{cfg['seed']}:{item['id']}:{retriever.name}:{int(oracle)}:{attempts}"
@@ -203,8 +316,10 @@ def run_episode(
         action, value = parse_action(content)
         if action == "answer":
             prediction = value
+            raw_text_prediction = value
             break
         if action != "search" or not value:
+            invalid_action_count += 1
             messages.append(
                 {
                     "role": "user",
@@ -235,19 +350,52 @@ def run_episode(
         ) % (2**31)
         content = completion(client, model, messages, cfg, request_seed)
         action, value = parse_action(content)
-        prediction = value if action == "answer" else content.strip()
+        raw_text_prediction = content.strip()
+        if action == "answer":
+            prediction = value
+            raw_text_prediction = value
+        else:
+            prediction = ""
+            protocol_failure = 1
+            # Match Search-R1: a forced-final search is valid syntax but cannot
+            # execute, so it fails the terminal-answer contract without being
+            # counted as a malformed action.
+            if action == "invalid":
+                invalid_action_count += 1
 
-    gold_titles = {value.lower().strip() for value in item["support_titles"]}
-    got_titles = {value.lower().strip() for value in all_titles}
+    em = 0.0 if protocol_failure else answer_em(prediction, gold_answer)
+    f1 = 0.0 if protocol_failure else answer_f1(prediction, gold_answer)
+    raw_text_em = answer_em(raw_text_prediction, gold_answer)
+    raw_text_f1 = answer_f1(raw_text_prediction, gold_answer)
+
+    gold_titles = normalized_title_set(
+        [
+            str(value).strip()
+            for value in item["support_titles"]
+            if value is not None and str(value).strip()
+        ]
+    ) or set()
+    got_titles = normalized_title_set([str(value) for value in all_titles]) or set()
     support_recall = len(gold_titles & got_titles) / max(1, len(gold_titles))
     return {
         "question_id": str(item["id"]),
         "backend": retriever.name,
         "variant": "oracle_guidance" if oracle else "blind",
         "prediction": prediction,
-        "gold": item["answer"],
-        "em": answer_em(prediction, item["answer"]),
-        "f1": answer_f1(prediction, item["answer"]),
+        "raw_text_prediction": raw_text_prediction,
+        "gold": gold_answer,
+        "support_titles": [
+            str(value).strip()
+            for value in item["support_titles"]
+            if value is not None and str(value).strip()
+        ],
+        "retrieved_titles": [str(value) for value in all_titles],
+        "em": em,
+        "f1": f1,
+        "raw_text_em": raw_text_em,
+        "raw_text_f1": raw_text_f1,
+        "protocol_failure": protocol_failure,
+        "invalid_action_count": invalid_action_count,
         "support_recall": support_recall,
         "search_count": len(searches),
         "queries": searches,
@@ -287,6 +435,9 @@ def main() -> None:
     )
     effective_model = effective_model_name(cfg)
     selected_ids = {str(item["id"]) for item in queries}
+    item_by_id = {str(item["id"]): item for item in queries}
+    expected_backends = {"bm25", "e5", "colbert"}
+    expected_variants = {"blind", "oracle_guidance"}
     existing = read_jsonl_tolerant(output_path)
     row_by_key = {
         (
@@ -298,6 +449,15 @@ def main() -> None:
         if row.get("schema") == RESULT_SCHEMA
         and row.get("run_signature") == run_signature
         and str(row.get("question_id")) in selected_ids
+        and str(row.get("backend")) in expected_backends
+        and str(row.get("variant")) in expected_variants
+        and episode_matches_source(
+            row, item_by_id[str(row.get("question_id"))]
+        )
+        and episode_validation_error(
+            row, int(cfg["agent"]["max_search_turns"])
+        )
+        is None
     }
 
     total = len(queries) * len(retrievers) * 2
@@ -313,18 +473,37 @@ def main() -> None:
                     )
                     row["schema"] = RESULT_SCHEMA
                     row["run_signature"] = run_signature
+                    problem = episode_validation_error(
+                        row, int(cfg["agent"]["max_search_turns"])
+                    )
+                    if problem is not None or not episode_matches_source(row, item):
+                        raise RuntimeError(
+                            f"New agent-evaluation row {key} is invalid: "
+                            f"{problem or 'source row mismatch'}"
+                        )
                     append_jsonl(output_path, [row])
                     row_by_key[key] = row
                 progress.update(1)
     progress.close()
 
     rows = list(row_by_key.values())
-    if not rows:
-        raise RuntimeError("No agent-evaluation rows were produced")
+    if len(rows) != total:
+        raise RuntimeError(
+            f"Expected exactly {total} agent-evaluation rows, found {len(rows)}"
+        )
     frame = pd.DataFrame(rows)
     summary = (
         frame.groupby(["backend", "variant"])[
-            ["em", "f1", "support_recall", "search_count"]
+            [
+                "em",
+                "f1",
+                "raw_text_em",
+                "raw_text_f1",
+                "protocol_failure",
+                "invalid_action_count",
+                "support_recall",
+                "search_count",
+            ]
         ]
         .mean()
         .reset_index()

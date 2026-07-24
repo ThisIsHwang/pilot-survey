@@ -8,7 +8,7 @@ from typing import Any
 
 from stackpilot.prepare_hard_rq0 import DATA_PREP_SCHEMA
 
-RUN_COMPLETION_SCHEMA = 3
+RUN_COMPLETION_SCHEMA = 4
 DATA_MANIFEST_RELATIVE_PATH = Path("data/.hard-rq0-data-manifest.json")
 
 

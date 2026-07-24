@@ -172,6 +172,14 @@ cat work/results/REPORT.md
 bash scripts/stop_servers.sh
 ```
 
+Stage-0/2 data preparation pins the HotpotQA Hub revision and creates three
+disjoint roles: 3,000 source-train examples for training, another 500
+source-train examples for trainer validation, and 500 official-validation
+examples reserved for final evaluation. Their source splits, deterministic
+selection bounds, ordered question-ID hashes, and artifact hashes are recorded
+in strict manifests. Stage-2 trains with `dev.parquet`; `queries_eval.jsonl`
+remains final-evaluation-only.
+
 The foreground vLLM alternative is:
 
 ```bash
@@ -219,11 +227,11 @@ Evaluation uses:
 
 Stage-2 policy evaluation starts only BM25 and E5: vLLM uses GPUs 0-3, E5 and
 GPU FAISS use GPU 5, and BM25 remains on CPU. BM25-specialist training uses all
-eight GPUs for Search-R1 with the CPU BM25 service. E5-specialist training also
-uses all eight GPUs and intentionally shares GPU 7 with the comparatively small
-E5/FAISS service; its rollout memory utilization is reduced to 0.50. Override
-that service GPU with `STAGE2_E5_GPU` only when the replacement remains visible
-and has enough free memory. These phases run sequentially.
+eight GPUs for Search-R1 with the CPU BM25 service. E5-specialist training uses
+GPUs 0-6 for Search-R1 and reserves physical GPU 7 exclusively for the E5
+encoder and GPU FAISS. The wrapper keeps the global optimizer batch identical
+between BM25 and E5 while adjusting only the per-GPU batch geometry. These
+phases run sequentially.
 
 Hard-RQ0 keeps its full-wiki services alive across sequential runs. During
 training, Search-R1 uses GPUs 0-6 and the E5 encoder plus GPU-FAISS index uses
@@ -286,10 +294,24 @@ overrides such as `VLLM_API_SERVER_COUNT`, `GPU_MEMORY_UTILIZATION`, and
   corpus is removed after successful promotion, unless
   `KEEP_HARD_SOURCE_ARCHIVES=1` is set. An exclusive Linux file lock prevents a
   background prefetch and a foreground retry from sharing assembly files.
-- Hard-RQ0 assets and prepared data have strict manifests. Policy rows resume by
-  a shared evaluation signature and a model-specific run signature; stale rows
-  are archived outside the report glob. Completed GRPO runs require the exact
-  final `global_step_N` checkpoint and an atomic completion marker.
+- Hard-RQ0 assets and prepared data have strict manifests. Training and trainer
+  development are disjoint slices of the pinned source training split; the
+  official development split is reserved for final evaluation. Canonical
+  `train.parquet`, `dev.parquet`, and `final_eval.jsonl` artifacts carry roles,
+  source-split and question-ID provenance, and SHA-256 identities. Wrappers
+  reject a final-evaluation artifact passed to the trainer, and checkpoint
+  signatures include the data-manifest SHA. Policy rows resume by a shared
+  evaluation signature and a model-specific run signature; stale rows are
+  archived outside the report glob. Completed GRPO runs require the exact final
+  `global_step_N` checkpoint and an atomic completion marker.
+- Search-R1 training and all evaluators share a strict single-action parser.
+  Malformed final output scores zero on primary EM/F1; legacy raw-text scoring
+  is retained only in explicitly named robustness columns. Training reward uses
+  the rollout's structured terminal answer, and EXP-005 uses actual executed
+  searches plus retriever-returned titles; prompt examples and fake model
+  control blocks cannot inflate answer, search-cost, or evidence reward.
+  Answer-only and evidence reward modes are explicit, signature-bound, and
+  reset between runs; truncated trajectories receive zero reward.
 
 ## Logs and cleanup
 

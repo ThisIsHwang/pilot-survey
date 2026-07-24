@@ -4,7 +4,9 @@ search_r1_root: ./upstream/Search-R1
 data:
   dataset_name: hotpotqa/hotpot_qa
   dataset_config: distractor
+  revision: 1908d6afbbead072334abe2965f91bd2709910ab
   train_examples: 300
+  trainer_dev_examples: 50
   eval_examples: 50
   split_train: train
   split_eval: validation

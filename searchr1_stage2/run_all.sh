@@ -39,7 +39,9 @@ export HF_HOME=${HF_HOME:-$ROOT/.cache/huggingface}
 # Model roles above are explicit. Clear stale serving/offline variables so
 # index/model downloads cannot inherit a previous manual Stage-0 launch.
 unset MODEL MODEL_PATH MODEL_LOCAL_ONLY MODEL_REVISION SERVED_MODEL_NAME \
-  HF_HUB_OFFLINE TRANSFORMERS_OFFLINE RQ0_SEED
+  HF_HUB_OFFLINE TRANSFORMERS_OFFLINE RQ0_SEED SEARCH_R1_MIXED_MODE \
+  SEARCH_R1_N_AGENT SEARCH_R1_REWARD_MODE ANSWER_REWARD_WEIGHT \
+  EVIDENCE_REWARD_WEIGHT SEARCH_COST_WEIGHT
 
 if [[ ! "$POLICY_LIMIT" =~ ^[1-9][0-9]*$ ]]; then
   echo "POLICY_LIMIT must be a positive integer; got '$POLICY_LIMIT'." >&2
@@ -90,6 +92,10 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$ROOT/upstream/Search-R1"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
   --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --search-r1-root "$ROOT/upstream/Search-R1"
 
@@ -130,9 +136,18 @@ run_policy_eval() {
 run_training() {
   local backend=$1
   local profile=$2
+  local train_gpus
+  local n_gpus
+  if [[ "$backend" == e5 ]]; then
+    train_gpus=0,1,2,3,4,5,6
+    n_gpus=7
+  else
+    train_gpus=0,1,2,3,4,5,6,7
+    n_gpus=8
+  fi
   echo "== GRPO training: $backend / $profile =="
   BACKEND="$backend" PROFILE="$profile" BASE_MODEL="$TRAIN_BASE_MODEL" \
-    E5_GPU=${STAGE2_E5_GPU:-7} \
+    TRAIN_GPUS="$train_gpus" N_GPUS="$n_gpus" E5_GPU=7 \
     bash "$ROOT/searchr1_stage2/run_single_stack_grpo.sh"
 }
 

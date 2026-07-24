@@ -6,13 +6,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from stackpilot.hard_rq0_contract import RESULT_SCHEMA
+from stackpilot.hard_rq0_contract import (
+    NUMBERED_EVALUATION_MANIFEST_SCHEMA,
+    RESULT_SCHEMA,
+)
 from stackpilot.numbered_policy_eval import (
     atomic_json,
     check_hybrid_retriever,
     load_cached_rows,
     numbered_run_signature,
     prepare_result_cache,
+    require_valid_numbered_episode,
     stable_signature,
 )
 from stackpilot.react_agent_eval import file_digest
@@ -37,9 +41,15 @@ def valid_episode() -> dict:
         "backend": "bm25",
         "topk": 3,
         "prediction": "answer",
+        "raw_text_prediction": "answer",
         "answers": ["answer"],
+        "support_titles": ["Evidence"],
         "em": 1.0,
         "f1": 1.0,
+        "raw_text_em": 1.0,
+        "raw_text_f1": 1.0,
+        "protocol_failure": 0,
+        "invalid_action_count": 0,
         "support_recall": 0.0,
         "turn1_support_recall": 0.0,
         "turn2_support_recall": 0.0,
@@ -57,6 +67,42 @@ def valid_episode() -> dict:
 
 
 class NumberedPolicyEvaluationTests(unittest.TestCase):
+    def test_new_numbered_episode_must_pass_full_contract_before_persisting(
+        self,
+    ) -> None:
+        row = valid_episode()
+        kwargs = {
+            "label": "newly generated numbered episode",
+            "key": ("toy:q1", "bm25", 3),
+            "expected_keys": {("toy:q1", "bm25", 3)},
+            "item_by_id": {
+                "toy:q1": {
+                    "id": "toy:q1",
+                    "question": "Question?",
+                    "dataset": "toy",
+                    "answers": ["answer"],
+                    "support_titles": ["Evidence"],
+                }
+            },
+            "experiment_id": "EXP-003",
+            "external_run_id": "exp003-run",
+            "run_signature": "run-signature",
+            "evaluation_signature": "evaluation-signature",
+            "tag": "mixed-blind",
+            "seed": 13,
+            "profile": "pilot",
+            "variant": "blind",
+            "inject_backend_id": False,
+            "served_model": "numbered-policy",
+            "max_search_turns": 4,
+        }
+        require_valid_numbered_episode(row, **kwargs)
+
+        corrupted = dict(row)
+        corrupted["raw_text_f1"] = 0.0
+        with self.assertRaisesRegex(RuntimeError, "newly generated"):
+            require_valid_numbered_episode(corrupted, **kwargs)
+
     def test_cache_salvages_valid_rows_and_archives_corrupt_and_stale_data(
         self,
     ) -> None:
@@ -88,6 +134,7 @@ class NumberedPolicyEvaluationTests(unittest.TestCase):
                         "question": "Question?",
                         "dataset": "toy",
                         "answers": ["answer"],
+                        "support_titles": ["Evidence"],
                     }
                 },
                 experiment_id="EXP-003",
@@ -128,6 +175,7 @@ class NumberedPolicyEvaluationTests(unittest.TestCase):
                         "question": "Question?",
                         "dataset": "toy",
                         "answers": ["answer"],
+                        "support_titles": ["Evidence"],
                     }
                 },
                 experiment_id="EXP-003",
@@ -164,8 +212,7 @@ class NumberedPolicyEvaluationTests(unittest.TestCase):
             },
         }
         upstreams = {
-            name: {"status": "ok", **identity}
-            for name, identity in base.items()
+            name: {"status": "ok", **identity} for name, identity in base.items()
         }
         payload = {
             "status": "ok",
@@ -296,7 +343,8 @@ class NumberedPolicyEvaluationTests(unittest.TestCase):
             atomic_json(
                 path,
                 {
-                    "schema": RESULT_SCHEMA,
+                    "schema": NUMBERED_EVALUATION_MANIFEST_SCHEMA,
+                    "result_schema": RESULT_SCHEMA,
                     "status": "complete",
                     "profile": "pilot",
                     "episodes_sha256": "abc",
@@ -305,6 +353,7 @@ class NumberedPolicyEvaluationTests(unittest.TestCase):
             manifest = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(manifest["status"], "complete")
             self.assertEqual(manifest["episodes_sha256"], "abc")
+            self.assertEqual(manifest["result_schema"], RESULT_SCHEMA)
 
         root = Path(__file__).resolve().parents[1]
         evaluator = (root / "experiments" / "eval_numbered_policy.sh").read_text(

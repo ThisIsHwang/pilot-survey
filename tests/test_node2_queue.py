@@ -93,9 +93,11 @@ class Node2QueueTests(unittest.TestCase):
         )
         reset = exp005.index("reset_searchr1_experiment_files.sh")
         runtime = exp005.index("apply_searchr1_runtime_patch.sh", reset)
-        evidence = exp005.index("patch_searchr1_evidence_reward.py", runtime)
+        training = exp005.index("bash hard_rq0/train_specialist.sh", runtime)
         self.assertLess(reset, runtime)
-        self.assertLess(runtime, evidence)
+        self.assertLess(runtime, training)
+        self.assertIn("SEARCH_R1_REWARD_MODE=evidence", exp005)
+        self.assertNotIn("patch_searchr1_evidence_reward.py", exp005)
 
 
 if __name__ == "__main__":

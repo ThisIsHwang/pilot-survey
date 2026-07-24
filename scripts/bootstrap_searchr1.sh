@@ -90,6 +90,10 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$SEARCH_R1"
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
   --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
+  --search-r1-root "$SEARCH_R1"
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --search-r1-root "$SEARCH_R1"
 
@@ -108,7 +112,10 @@ CORE_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
   --input "$ROOT/hard_rq0/patch_searchr1_seed.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+  --input "$ROOT/stackpilot/action_protocol.py" \
   --input "$ROOT/scripts/lib/bootstrap_env.sh" \
   --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
   --value "uv=0.11.30" --value "torch_backend=cu121" \
@@ -212,9 +219,12 @@ PY
 
 searchr1_combined_imports_are_valid() {
   "$SEARCH_R1_PYTHON" - <<'PY' || return 1
-from search_r1.llm_agent.generation import LLMGenerationManager  # noqa: F401
+from search_r1.llm_agent import generation
+from stackpilot.action_protocol import parse_action
 from verl.trainer.main_ppo import RewardManager  # noqa: F401
 
+if generation.parse_action is not parse_action:
+    raise SystemExit("Search-R1 strict action parser import is not active")
 print("Search-R1/veRL training imports passed.")
 PY
 }
@@ -292,8 +302,12 @@ import torch
 import transformers
 import vllm
 from flash_attn import flash_attn_func
-from search_r1.llm_agent.generation import LLMGenerationManager  # noqa: F401
+from search_r1.llm_agent import generation
+from stackpilot.action_protocol import parse_action
 from verl.trainer.main_ppo import RewardManager  # noqa: F401
+
+if generation.parse_action is not parse_action:
+    raise SystemExit("Search-R1 strict action parser import is not active")
 
 expected = {
     "torch": "2.4.0",

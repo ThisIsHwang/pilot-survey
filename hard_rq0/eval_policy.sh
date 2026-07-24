@@ -23,7 +23,7 @@ if [[ -z ${MODEL_REVISION:-} ]]; then
 fi
 LIMIT=${LIMIT:-}
 RESULT_SET=${RESULT_SET:-pilot}
-DATA_FILE=${DATA_FILE:-$ROOT/work/hard_rq0/data/eval_all.jsonl}
+DATA_FILE=${DATA_FILE:-$ROOT/work/hard_rq0/data/final_eval.jsonl}
 ASSET_ROOT=${HARD_ASSET_ROOT:-$ROOT/work/hard_rq0/assets/wiki18}
 BACKENDS=${BACKENDS:-"bm25 e5"}
 TOPKS=${TOPKS:-"3 5 10"}

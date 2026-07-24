@@ -26,6 +26,43 @@ if ! git -C "$SEARCH_R1" apply --unidiff-zero --reverse --check "$RUNTIME_PATCH"
   echo "Search-R1 retrieval-timeout patch is missing; rerun bootstrap_searchr1.sh" >&2
   exit 1
 fi
+if ! grep -Fq 'STACKPILOT_STRICT_ACTION_PROTOCOL_V2' \
+  "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
+  echo "Search-R1 strict action protocol patch is missing; rerun bootstrap_searchr1.sh" >&2
+  exit 1
+fi
+if grep -Fq "resp.split('</search>')" \
+  "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
+  echo "Search-R1 still truncates model actions before strict parsing; rerun bootstrap_searchr1.sh" >&2
+  exit 1
+fi
+if ! grep -Fq 'STACKPILOT_EXHAUSTIVE_SEARCH_VALIDATION_V3' \
+  "$SEARCH_R1/verl/trainer/ppo/ray_trainer.py"; then
+  echo "Search-R1 exhaustive validation patch is missing; rerun bootstrap_searchr1.sh" >&2
+  exit 1
+fi
+if ! grep -Fq 'STACKPILOT_VALIDATION_META_INFO_V1' \
+  "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
+  echo "Search-R1 validation sampling metadata patch is missing; rerun bootstrap_searchr1.sh" >&2
+  exit 1
+fi
+if ! grep -Fq 'STACKPILOT_TERMINAL_REWARD_V2' \
+  "$SEARCH_R1/verl/trainer/main_ppo.py"; then
+  echo "Search-R1 terminal reward protocol patch is missing; rerun bootstrap_searchr1.sh" >&2
+  exit 1
+fi
+for protocol_field in \
+  stackpilot_terminal_answer \
+  stackpilot_protocol_failure \
+  stackpilot_trajectory_truncated \
+  stackpilot_search_count \
+  stackpilot_retrieved_titles; do
+  if ! grep -Fq "$protocol_field" \
+    "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
+    echo "Search-R1 rollout protocol metadata is incomplete: $protocol_field" >&2
+    exit 1
+  fi
+done
 if ! nvcc --version | grep -Eq 'release 12\.9([, ]|$)'; then
   echo "Expected host CUDA toolkit 12.9." >&2
   nvcc --version >&2 || true
@@ -59,6 +96,11 @@ import importlib.metadata
 import torch
 import vllm._C  # noqa: F401
 from flash_attn import flash_attn_func
+from search_r1.llm_agent import generation
+from stackpilot.action_protocol import parse_action
+
+if generation.parse_action is not parse_action:
+    raise SystemExit("Search-R1 is not using stackpilot.action_protocol.parse_action")
 
 expected = {
     "torch": "2.4.0",

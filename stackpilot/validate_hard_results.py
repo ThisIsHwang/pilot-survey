@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -24,6 +25,8 @@ KEY_COLUMNS = ["question_id", "dataset", "backend", "topk"]
 BOUNDED_METRICS = [*METRICS]
 BINARY_METRICS = [
     "em",
+    "raw_text_em",
+    "protocol_failure",
     "recovery_at_2",
     "recovery_at_3",
     "full_recovery_at_2",
@@ -98,6 +101,7 @@ def validate_frame(
         "search_count",
         "question",
         "answers",
+        "support_titles",
         "queries",
         "turns",
     }
@@ -201,6 +205,18 @@ def validate_frame(
     if (dataset_counts != 1).any():
         bad = dataset_counts[dataset_counts != 1].head(10).to_dict()
         raise RuntimeError(f"Question IDs map to multiple datasets: {bad}")
+    for column in ("question", "answers", "support_titles"):
+        canonical = frame[column].map(
+            lambda value: json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        )
+        counts = canonical.groupby(frame["question_id"]).nunique()
+        if (counts != 1).any():
+            bad = counts[counts != 1].head(10).to_dict()
+            raise RuntimeError(
+                f"Question IDs map to multiple {column} values: {bad}"
+            )
 
     for metric in (*BOUNDED_METRICS, "search_count"):
         numeric = pd.to_numeric(frame[metric], errors="coerce")

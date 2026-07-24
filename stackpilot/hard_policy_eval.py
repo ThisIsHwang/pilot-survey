@@ -8,7 +8,6 @@ import queue
 import re
 import threading
 import time
-import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, TypeVar
@@ -18,6 +17,7 @@ import requests
 from openai import OpenAI
 from tqdm import tqdm
 
+from stackpilot.action_protocol import parse_action
 from stackpilot.common import (
     answer_em,
     answer_f1,
@@ -33,16 +33,22 @@ from stackpilot.hard_rq0_contract import (
     RESULT_SCHEMA,
     episode_validation_error,
     finite_number,
+    normalize_title,
     validate_policy_seed,
     validate_policy_selection,
 )
-from stackpilot.prepare_hard_rq0 import DATA_MANIFEST_NAME, DATA_PREP_SCHEMA
+from stackpilot.prepare_hard_rq0 import (
+    DATA_MANIFEST_NAME,
+    DATA_PREP_SCHEMA,
+    FINAL_EVAL_ROLE,
+    prepare_request,
+    validate_manifest_artifact,
+)
 from stackpilot.react_agent_eval import (
     SYSTEM_PROMPT,
     file_digest,
     format_results,
     model_identity,
-    parse_action,
 )
 from stackpilot.retrieval_clients import RetrievalClient
 from stackpilot.service_checks import check_vllm, effective_model_name
@@ -51,12 +57,6 @@ TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:[-'][A-Za-z0-9]+)?")
 ASSET_MANIFEST_NAME = ".hard-rq0-assets-manifest.json"
 JobT = TypeVar("JobT")
 ResultT = TypeVar("ResultT")
-
-
-def normalize_title(value: str) -> str:
-    text = unicodedata.normalize("NFKC", str(value)).replace("_", " ").strip()
-    text = text.strip("\"'")
-    return " ".join(text.lower().split())
 
 
 def token_set(value: str) -> set[str]:
@@ -126,25 +126,17 @@ def evaluation_context(
             f"Expected hard-RQ0 data manifest schema {DATA_PREP_SCHEMA}: "
             f"{data_manifest_path}"
         )
-    expected_data_file = data_file.parent / "eval_all.jsonl"
-    if data_file != expected_data_file.resolve():
+    if data_manifest.get("request") != prepare_request(cfg):
         raise RuntimeError(
-            f"Hard-RQ0 evaluation must use the manifested eval_all.jsonl: {expected_data_file}"
+            "Hard-RQ0 evaluation data does not match the configured pinned "
+            f"dataset request: {data_manifest_path}"
         )
-    data_record = (data_manifest.get("artifacts") or {}).get("data/eval_all.jsonl")
-    if not isinstance(data_record, dict):
-        raise RuntimeError(
-            f"Data manifest does not describe data/eval_all.jsonl: {data_manifest_path}"
-        )
+    validate_manifest_artifact(
+        data_manifest_path,
+        data_file,
+        FINAL_EVAL_ROLE,
+    )
     data_sha256 = file_digest(data_file)
-    if (
-        data_record.get("size") != data_file.stat().st_size
-        or data_record.get("sha256") != data_sha256
-    ):
-        raise RuntimeError(
-            f"Evaluation data does not match its manifest; rerun hard_rq0/prepare_data.sh: "
-            f"{data_file}"
-        )
 
     asset_root = (
         Path(os.environ.get("HARD_ASSET_ROOT") or cfg["assets"]["root"])
@@ -154,6 +146,7 @@ def evaluation_context(
     asset_manifest_path = asset_root / ASSET_MANIFEST_NAME
     require_json_manifest(asset_manifest_path, "hard-RQ0 asset")
     evaluator_names = (
+        "action_protocol.py",
         "common.py",
         "faiss_gpu.py",
         "hard_policy_eval.py",
@@ -335,14 +328,10 @@ def check_retriever(
                 "faiss_gpu_count": int(payload.get("faiss_gpu_count", 0)),
                 "faiss_gpu_load_mode": payload.get("faiss_gpu_load_mode"),
                 "faiss_storage_dtype": payload.get("faiss_storage_dtype"),
-                "faiss_temp_memory_mib": int(
-                    payload.get("faiss_temp_memory_mib", 0)
-                ),
+                "faiss_temp_memory_mib": int(payload.get("faiss_temp_memory_mib", 0)),
                 "faiss_index_bytes": int(payload.get("faiss_index_bytes", 0)),
                 "gpu_search_serialized": True,
-                "cuda_empty_cache_disabled": payload.get(
-                    "cuda_empty_cache_disabled"
-                )
+                "cuda_empty_cache_disabled": payload.get("cuda_empty_cache_disabled")
                 is True,
                 "server_files": expected_server_files,
             }
@@ -376,6 +365,46 @@ def best_answer_scores(prediction: str, answers: list[str]) -> tuple[float, floa
     )
 
 
+def expected_answer_strings(item: dict[str, Any]) -> list[str]:
+    return [
+        str(answer).strip()
+        for answer in (item.get("answers") or [item.get("answer", "")])
+        if answer is not None and str(answer).strip()
+    ]
+
+
+def expected_support_title_strings(item: dict[str, Any]) -> list[str]:
+    return [
+        str(title).strip()
+        for title in item.get("support_titles", [])
+        if title is not None and str(title).strip()
+    ]
+
+
+def episode_matches_source(row: dict[str, Any], item: dict[str, Any]) -> bool:
+    return (
+        str(row.get("question_id", "")) == str(item.get("id", ""))
+        and str(row.get("dataset", "")) == str(item.get("dataset", ""))
+        and str(row.get("question", "")) == str(item.get("question", ""))
+        and row.get("answers") == expected_answer_strings(item)
+        and row.get("support_titles") == expected_support_title_strings(item)
+    )
+
+
+def require_valid_policy_episode(
+    row: dict[str, Any],
+    item: dict[str, Any],
+    max_search_turns: int,
+    *,
+    label: str,
+) -> None:
+    problem = episode_validation_error(row, max_search_turns)
+    if problem is not None:
+        raise RuntimeError(f"{label} violates the episode contract: {problem}")
+    if not episode_matches_source(row, item):
+        raise RuntimeError(f"{label} does not match its source evaluation row")
+
+
 def recall_at(values: list[float], index: int) -> float:
     if not values:
         return 0.0
@@ -398,18 +427,23 @@ def run_episode(
     messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.append({"role": "user", "content": f"Question: {item['question']}"})
 
-    gold_titles = {normalize_title(title) for title in item["support_titles"]}
+    support_titles = expected_support_title_strings(item)
+    gold_titles = {normalize_title(title) for title in support_titles}
     cumulative_titles: set[str] = set()
     previously_seen_titles: set[str] = set()
     turn_records: list[dict[str, Any]] = []
     searches: list[str] = []
     prediction = ""
+    raw_text_prediction = ""
+    invalid_action_count = 0
+    protocol_failure = 0
     search_budget = int(cfg["agent"]["max_search_turns"])
-    max_attempts = search_budget * 2 + 2
     attempts = 0
     previous_recall = 0.0
 
-    while len(searches) < search_budget and attempts < max_attempts:
+    # Match Search-R1 training: every generated action, including a malformed
+    # one, consumes one of max_turns; one forced final action follows.
+    while attempts < search_budget:
         attempts += 1
         seed_text = f"{eval_seed}:{item['id']}:{retriever.name}:{topk}:{attempts}"
         request_seed = int.from_bytes(
@@ -420,8 +454,10 @@ def run_episode(
         action, value = parse_action(content)
         if action == "answer":
             prediction = value
+            raw_text_prediction = value
             break
         if action != "search" or not value:
+            invalid_action_count += 1
             messages.append(
                 {
                     "role": "user",
@@ -473,10 +509,30 @@ def run_episode(
         ) % (2**31)
         content = complete(client, model, messages, cfg, request_seed)
         action, value = parse_action(content)
-        prediction = value if action == "answer" else content.strip()
+        raw_text_prediction = content.strip()
+        if action == "answer":
+            prediction = value
+            raw_text_prediction = value
+        else:
+            prediction = ""
+            protocol_failure = 1
+            # A forced-final search is syntactically valid, but cannot execute
+            # another retrieval. Search-R1 records it as a terminal protocol
+            # failure without incrementing malformed-action statistics.
+            if action == "invalid":
+                invalid_action_count += 1
 
-    answers = [str(answer) for answer in item.get("answers") or [item["answer"]]]
-    em, f1 = best_answer_scores(prediction, answers)
+    answers = expected_answer_strings(item)
+    if not answers:
+        raise RuntimeError(
+            f"Hard-RQ0 evaluation row {item.get('id')!r} has no usable gold answers"
+        )
+    em, f1 = (
+        (0.0, 0.0)
+        if protocol_failure
+        else best_answer_scores(prediction, answers)
+    )
+    raw_text_em, raw_text_f1 = best_answer_scores(raw_text_prediction, answers)
     recalls = [float(record["support_recall"]) for record in turn_records]
     gains = [float(record["evidence_gain"]) for record in turn_records]
     turn1_recall = recall_at(recalls, 0)
@@ -493,9 +549,15 @@ def run_episode(
         "backend": retriever.name,
         "topk": topk,
         "prediction": prediction,
+        "raw_text_prediction": raw_text_prediction,
         "answers": answers,
+        "support_titles": support_titles,
         "em": em,
         "f1": f1,
+        "raw_text_em": raw_text_em,
+        "raw_text_f1": raw_text_f1,
+        "protocol_failure": protocol_failure,
+        "invalid_action_count": invalid_action_count,
         "support_recall": final_recall,
         "turn1_support_recall": turn1_recall,
         "turn2_support_recall": turn2_recall,
@@ -619,9 +681,9 @@ def parallel_job_results(
 
     pending_jobs = iter(jobs)
     work_queue: queue.Queue[Any] = queue.Queue(maxsize=capacity)
-    result_queue: queue.Queue[
-        tuple[JobT, bool, ResultT | BaseException]
-    ] = queue.Queue()
+    result_queue: queue.Queue[tuple[JobT, bool, ResultT | BaseException]] = (
+        queue.Queue()
+    )
     sentinel = object()
     stop_event = threading.Event()
     start_lock = threading.Lock()
@@ -669,11 +731,7 @@ def parallel_job_results(
 
     def fill() -> None:
         nonlocal exhausted, outstanding
-        while (
-            not exhausted
-            and not stop_event.is_set()
-            and outstanding < capacity
-        ):
+        while not exhausted and not stop_event.is_set() and outstanding < capacity:
             try:
                 job = next(pending_jobs)
             except StopIteration:
@@ -744,9 +802,7 @@ def parallel_job_results(
                     if remaining <= 0:
                         break
                     try:
-                        job, succeeded, payload = result_queue.get(
-                            timeout=remaining
-                        )
+                        job, succeeded, payload = result_queue.get(timeout=remaining)
                     except queue.Empty:
                         break
                     if succeeded:
@@ -781,6 +837,7 @@ def prepare_result_cache(
     tag: str,
     seed: int,
     max_search_turns: int = 4,
+    expected_items: dict[str, dict[str, Any]] | None = None,
 ) -> dict[tuple[str, str, int], dict[str, Any]]:
     current: dict[tuple[str, str, int], dict[str, Any]] = {}
     archived: list[dict[str, Any]] = []
@@ -797,6 +854,14 @@ def prepare_result_cache(
             and 0 <= float(search_count) <= max_search_turns
         )
         valid_episode = episode_validation_error(row, max_search_turns) is None
+        question_id = str(row.get("question_id", ""))
+        source_matches = (
+            expected_items is None
+            or (
+                question_id in expected_items
+                and episode_matches_source(row, expected_items[question_id])
+            )
+        )
         matches = (
             key in expected_keys
             and row.get("schema") == RESULT_SCHEMA
@@ -809,6 +874,7 @@ def prepare_result_cache(
             and bounded_metrics
             and valid_search_count
             and valid_episode
+            and source_matches
         )
         if not matches or key is None:
             archived.append(row)
@@ -907,6 +973,7 @@ def main() -> None:
         for topk in topks
     }
     expected_datasets = {str(item["id"]): str(item["dataset"]) for item in rows}
+    item_by_id = {str(item["id"]): item for item in rows}
     existing = read_jsonl_tolerant(output_path)
     row_by_key = prepare_result_cache(
         output_path,
@@ -918,6 +985,7 @@ def main() -> None:
         args.tag,
         args.seed,
         int(cfg["agent"]["max_search_turns"]),
+        expected_items=item_by_id,
     )
 
     retrievers = {
@@ -986,6 +1054,12 @@ def main() -> None:
                     "served_model": model,
                 }
             )
+            require_valid_policy_episode(
+                result,
+                item_by_id[key[0]],
+                int(cfg["agent"]["max_search_turns"]),
+                label=f"new hard-RQ0 episode {key}",
+            )
             checkpoint_rows.append(result)
             row_by_key[key] = result
             if len(checkpoint_rows) >= checkpoint_size:
@@ -1030,6 +1104,16 @@ def main() -> None:
         for backend in backends
         for topk in topks
     ]
+    for row in ordered_rows:
+        key = result_key(row)
+        if key is None or key[0] not in item_by_id:
+            raise RuntimeError(f"Completed hard-RQ0 row has an invalid key: {key}")
+        require_valid_policy_episode(
+            row,
+            item_by_id[key[0]],
+            int(cfg["agent"]["max_search_turns"]),
+            label=f"completed hard-RQ0 episode {key}",
+        )
     atomic_write_jsonl(output_path, ordered_rows)
 
     frame = pd.DataFrame(ordered_rows)

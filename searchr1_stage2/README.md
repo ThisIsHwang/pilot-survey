@@ -34,11 +34,20 @@ The corresponding remote-revision controls are
 commits; a custom remote ID defaults to `main`, which is resolved once to a
 concrete snapshot. Local model directories ignore these controls.
 
-The smoke profile uses 32 training and 32 validation examples for one update.
-The pilot profile uses all 3,000/500 examples for three epochs by default. The
-pinned trainer has an off-by-one stop condition; the wrapper compensates for it
-and verifies an exact final `global_step_<updates>` checkpoint before recording
-completion.
+The smoke profile uses the same 56-example global training/validation batch for
+both backends. The pilot data contains 3,000 training examples and a disjoint
+500-example trainer-development set, both selected from one deterministic
+shuffle of the pinned HotpotQA source `train` split. A separate 500-example
+selection from the official `validation` split is reserved for final policy
+evaluation and is never passed to the trainer. Pilot training runs for three
+shuffled epochs with the same 112-example global batch. The pinned training
+loader uses `drop_last=True`, so each epoch optimizes on 2,912 examples and
+randomly omits its final 88; exhaustive trainer validation scores all 500
+development examples. Per-GPU microbatch geometry differs only because BM25
+has eight training workers while E5 has seven; optimizer-level batching remains
+a controlled variable. The pinned trainer has an off-by-one stop condition; the
+wrapper compensates for it and verifies an exact final `global_step_<updates>`
+checkpoint before recording completion.
 
 Default remote models can be replaced with local Hugging Face directories:
 
@@ -70,8 +79,10 @@ modified; set `SEARCH_R1_RETRIEVER_TIMEOUT` to override its 120-second timeout.
 
 Policy evaluation uses vLLM on GPUs 0-3, BM25 on CPU, and E5 with GPU FAISS on
 GPU 5. BM25 training gives GPUs 0-7 to Search-R1 and leaves retrieval on CPU.
-E5 training also gives GPUs 0-7 to Search-R1 while sharing GPU 7 with E5/FAISS;
-the rollout memory fraction is reduced to 0.50. Every phase is sequential.
+E5 training gives GPUs 0-6 to Search-R1 and reserves physical GPU 7 exclusively
+for the E5 encoder and GPU FAISS. Its batch geometry is scaled from eight to
+seven data-parallel workers, and the two processes never share a GPU. Every
+phase is sequential.
 
 ## Manual sequence
 
@@ -88,6 +99,16 @@ TAG=official-searchr1 \
 MODEL_REF=PeterJinGo/SearchR1-nq_hotpotqa_train-qwen2.5-3b-it-em-grpo-v0.3 \
 LIMIT=300 bash searchr1_stage2/eval_policy.sh
 ```
+
+`scripts/prepare_data.sh` writes `queries_train.jsonl`,
+`queries_dev.jsonl`, and `queries_eval.jsonl` with explicit
+`trainer_train`, `trainer_validation`, and `final_evaluation` provenance in
+`work/data/.pilot-manifest.json`. The converter writes `train.parquet` and
+`dev.parquet`; `test.parquet` is retained only as a byte-identical legacy alias
+of `dev.parquet`. Training rejects wrong-role or stale artifacts before GPU
+allocation. Both manifests include source split, selection bounds, ordered
+question-ID hashes, and artifact SHA-256 hashes. Old manifest schemas are
+rebuilt rather than silently reused.
 
 Set `MODEL_REVISION=<full-commit-sha>` to pin either manual remote evaluation.
 Standalone remote training uses `BASE_MODEL_REVISION` in the same way. Both

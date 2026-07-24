@@ -8,8 +8,8 @@ from pathlib import Path
 import pandas as pd
 
 from stackpilot.common import ensure_dir, read_jsonl_tolerant
+from stackpilot.react_agent_eval import RESULT_SCHEMA
 
-RESULT_SCHEMA = 2
 DEFAULT_TAGS = (
     "base-qwen",
     "official-searchr1",
