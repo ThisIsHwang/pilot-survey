@@ -49,7 +49,7 @@ EXPECTED_DOCUMENTS=$(
   "$PILOT_PYTHON" -c \
     'from stackpilot.hard_assets import EXPECTED_DOCUMENTS; print(EXPECTED_DOCUMENTS)'
 )
-EXPECTED_E5_INDEX_BYTES=$((EXPECTED_DOCUMENTS * 768 * 2))
+EXPECTED_E5_INDEX_BYTES=$((EXPECTED_DOCUMENTS * 768 * 4))
 E5_MODEL_PATH=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
   bash "$ROOT/scripts/resolve_hf_model.sh" \
     "$E5_MODEL_SOURCE" "$E5_MODEL_REVISION" "$PILOT_PYTHON")
@@ -133,8 +133,8 @@ else:
     checks = (
         payload.get("faiss_gpu") is True,
         int(payload.get("faiss_gpu_count", 0)) == 1,
-        payload.get("faiss_gpu_load_mode") == "paged-fp16-flat",
-        payload.get("faiss_storage_dtype") == "float16",
+        payload.get("faiss_gpu_load_mode") == "paged-fp32-flat",
+        payload.get("faiss_storage_dtype") == "float32",
         int(payload.get("faiss_temp_memory_mib", 0)) == int(expected_temp_memory),
         int(payload.get("faiss_index_bytes", 0)) == int(expected_index_bytes),
         str(payload.get("cuda_visible_devices")) == expected_e5_gpu,

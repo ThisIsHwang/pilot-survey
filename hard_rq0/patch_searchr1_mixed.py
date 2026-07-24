@@ -9,8 +9,20 @@ from typing import Any
 
 try:
     from hard_rq0.patch_searchr1_experiment_env import patch as patch_experiment_env
+    from hard_rq0.patch_searchr1_observation_geometry import (
+        MARKER as OBSERVATION_GEOMETRY_MARKER,
+    )
+    from hard_rq0.patch_searchr1_observation_geometry import (
+        validate_patched as validate_observation_geometry,
+    )
 except ModuleNotFoundError:  # direct `python hard_rq0/...py` execution
     from patch_searchr1_experiment_env import patch as patch_experiment_env
+    from patch_searchr1_observation_geometry import (
+        MARKER as OBSERVATION_GEOMETRY_MARKER,
+    )
+    from patch_searchr1_observation_geometry import (
+        validate_patched as validate_observation_geometry,
+    )
 
 LEGACY_MARKER = "# STACKPILOT_MIXED_ROUTING_V1"
 MARKER = "# STACKPILOT_MIXED_ROUTING_V2"
@@ -61,11 +73,7 @@ def assign_training_backend_ids(
     group_backends = ["bm25"] * (n_groups // 2) + ["e5"] * (n_groups // 2)
     rng = random.Random((int(seed) << 32) ^ int(mixed_step))
     rng.shuffle(group_backends)
-    backend_ids = [
-        backend
-        for backend in group_backends
-        for _ in range(n_agent)
-    ]
+    backend_ids = [backend for backend in group_backends for _ in range(n_agent)]
 
     for group_start in range(0, len(backend_ids), n_agent):
         group = backend_ids[group_start : group_start + n_agent]
@@ -75,8 +83,7 @@ def assign_training_backend_ids(
             )
     expected_per_backend = len(backend_ids) // 2
     if any(
-        backend_ids.count(backend) != expected_per_backend
-        for backend in VALID_BACKENDS
+        backend_ids.count(backend) != expected_per_backend for backend in VALID_BACKENDS
     ):
         raise AssertionError("internal error: mixed-routing batch is not 50:50")
     return backend_ids
@@ -113,16 +120,16 @@ def patch(search_r1_root: Path) -> None:
     patch_experiment_env(search_r1_root)
     target = search_r1_root / "search_r1" / "llm_agent" / "generation.py"
     text = target.read_text(encoding="utf-8")
-    legacy_helper_import = '''from patch_searchr1_mixed import (
+    legacy_helper_import = """from patch_searchr1_mixed import (
     assign_training_backend_ids as _stackpilot_assign_training_backend_ids,
     validate_validation_backend_ids as _stackpilot_validate_validation_backend_ids,
 )
-'''
-    helper_import = '''from hard_rq0.patch_searchr1_mixed import (
+"""
+    helper_import = """from hard_rq0.patch_searchr1_mixed import (
     assign_training_backend_ids as _stackpilot_assign_training_backend_ids,
     validate_validation_backend_ids as _stackpilot_validate_validation_backend_ids,
 )
-'''
+"""
     import_anchor = "from typing import List, Dict, Any, Tuple\n"
     if legacy_helper_import in text:
         text = replace_once(
@@ -229,7 +236,7 @@ def patch(search_r1_root: Path) -> None:
     )
     # V1 used a different assignment body. Keep the exact old block here so a
     # direct rerun can migrate an already-patched Search-R1 checkout safely.
-    legacy_body = '''        mixed_mode = os.environ.get("SEARCH_R1_MIXED_MODE", "").strip().lower()
+    legacy_body = """        mixed_mode = os.environ.get("SEARCH_R1_MIXED_MODE", "").strip().lower()
         batch_size = int(initial_input_ids.shape[0])
         self._episode_backend_ids = [None] * batch_size
         if mixed_mode:
@@ -280,7 +287,7 @@ def patch(search_r1_root: Path) -> None:
                     f"got {mixed_mode!r}"
                 )
 
-'''
+"""
     if MARKER in text:
         pass
     elif LEGACY_MARKER in text:
@@ -298,14 +305,14 @@ def patch(search_r1_root: Path) -> None:
     else:
         text = replace_once(text, loop_anchor, loop_replacement, "run_llm_loop anchor")
 
-    search_anchor = '''        search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
+    search_anchor = """        search_queries = [content for action, content in zip(cur_actions, contents) if action == 'search']
         if do_search:
             search_results = self.batch_search(search_queries)
             assert len(search_results) == sum([1 for action in cur_actions if action == 'search'])
         else:
             search_results = [''] * sum([1 for action in cur_actions if action == 'search'])
-'''
-    search_replacement = '''        search_indices = [
+"""
+    search_replacement = """        search_indices = [
             index
             for index, (action, active) in enumerate(zip(cur_actions, active_mask))
             if active and action == 'search'
@@ -323,11 +330,8 @@ def patch(search_r1_root: Path) -> None:
             assert len(search_results) == len(search_indices)
         else:
             search_results = [''] * len(search_indices)
-'''
-    if (
-        MARKER not in target.read_text(encoding="utf-8")
-        and search_anchor in text
-    ):
+"""
+    if MARKER not in target.read_text(encoding="utf-8") and search_anchor in text:
         # A pristine checkout still needs the request-routing changes. V1 and V2
         # checkouts already contain them.
         text = replace_once(
@@ -347,6 +351,7 @@ def patch(search_r1_root: Path) -> None:
         """Batchified search with optional episode-stable backend IDs."""
         results = self._batch_search(queries, backend_ids=backend_ids)['result']
         self._stackpilot_last_search_titles = []
+        self._stackpilot_last_observed_titles = []
         for result_index, retrieval_result in enumerate(results):
             titles = []
             for document_index, item in enumerate(retrieval_result):
@@ -396,8 +401,15 @@ def patch(search_r1_root: Path) -> None:
         match = function_pattern.search(text)
         assert match is not None
         text = text[: match.start()] + replacement + text[match.end() :]
-    elif "def batch_search(self, queries: List[str] = None, backend_ids=None)" not in text:
-        raise RuntimeError("Could not locate Search-R1 batch_search/_batch_search block")
+    elif (
+        "def batch_search(self, queries: List[str] = None, backend_ids=None)"
+        not in text
+    ):
+        raise RuntimeError(
+            "Could not locate Search-R1 batch_search/_batch_search block"
+        )
+    if OBSERVATION_GEOMETRY_MARKER in text:
+        validate_observation_geometry(text, target)
     target.write_text(text, encoding="utf-8")
 
     trainer_target = search_r1_root / "verl" / "trainer" / "ppo" / "ray_trainer.py"

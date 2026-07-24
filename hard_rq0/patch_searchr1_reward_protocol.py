@@ -6,7 +6,7 @@ from pathlib import Path
 
 LEGACY_MARKER = "# STACKPILOT_TERMINAL_REWARD_V1"
 MARKER = "# STACKPILOT_TERMINAL_REWARD_V2"
-EVIDENCE_MARKER = "# STACKPILOT_EVIDENCE_REWARD_V3"
+EVIDENCE_MARKER_RE = re.compile(r"# STACKPILOT_EVIDENCE_REWARD_V[34]")
 
 PINNED_SCORE_BLOCK = """            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
 
@@ -116,9 +116,7 @@ TERMINAL_SCORE_BLOCK = """            # STACKPILOT_TERMINAL_REWARD_V2
 """
 
 BASE_SCORE = "            score = float(answer_score)\n"
-REWARD_ASSIGNMENT = (
-    "            reward_tensor[i, valid_response_length - 1] = score\n"
-)
+REWARD_ASSIGNMENT = "            reward_tensor[i, valid_response_length - 1] = score\n"
 
 
 def replace_once(text: str, old: str, new: str, label: str) -> str:
@@ -131,11 +129,11 @@ def replace_once(text: str, old: str, new: str, label: str) -> str:
 def _remove_current_evidence_reward(text: str, target: Path) -> str:
     """Return the canonical answer-only V2 reward implementation."""
 
-    if EVIDENCE_MARKER not in text:
+    if EVIDENCE_MARKER_RE.search(text) is None:
         return text
 
     helper_pattern = re.compile(
-        r"\n# STACKPILOT_EVIDENCE_REWARD_V3\n"
+        r"\n# STACKPILOT_EVIDENCE_REWARD_V[34]\n"
         r"def _normalize_evidence_title\(value\):.*?"
         r"\n\nclass RewardManager\(\):\n",
         re.DOTALL,
@@ -143,23 +141,22 @@ def _remove_current_evidence_reward(text: str, target: Path) -> str:
     text, helper_count = helper_pattern.subn("\nclass RewardManager():\n", text)
     if helper_count != 1:
         raise RuntimeError(
-            f"Could not remove the V3 evidence helper from {target}; "
+            f"Could not remove the current evidence helper from {target}; "
             f"found {helper_count}"
         )
 
     score_start_text = (
-        "            extra_info = data_item.non_tensor_batch.get("
-        "'extra_info', {})\n"
+        "            extra_info = data_item.non_tensor_batch.get('extra_info', {})\n"
     )
     start = text.find(score_start_text)
     if start < 0:
         raise RuntimeError(
-            f"Could not locate the V3 evidence score block in {target}"
+            f"Could not locate the current evidence score block in {target}"
         )
     end = text.find(REWARD_ASSIGNMENT, start)
     if end < 0:
         raise RuntimeError(
-            f"Could not locate the V3 evidence reward assignment in {target}"
+            f"Could not locate the current evidence reward assignment in {target}"
         )
     text = text[:start] + BASE_SCORE + "\n" + text[end:]
     if "unicodedata." not in text:
@@ -185,8 +182,10 @@ def _remove_legacy_evidence_reward(text: str, target: Path) -> str:
         )
 
     score_starts = (
-        '            if int(valid_response_length) <= 0:\n'
-        '                raise RuntimeError("evidence reward received an empty response")',
+        (
+            "            if int(valid_response_length) <= 0:\n"
+            '                raise RuntimeError("evidence reward received an empty response")'
+        ),
         "            answer_score = compute_score_fn(\n",
     )
     start_positions = [

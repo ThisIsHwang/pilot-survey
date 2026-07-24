@@ -4,9 +4,10 @@ import argparse
 from pathlib import Path
 
 LEGACY_MARKER = "# STACKPILOT_EXPERIMENT_ENV_V1"
-MARKER = "# STACKPILOT_EXPERIMENT_ENV_V2"
+PREVIOUS_MARKER = "# STACKPILOT_EXPERIMENT_ENV_V2"
+MARKER = "# STACKPILOT_EXPERIMENT_ENV_V3"
 OLD_RAY_INIT = "        ray.init(runtime_env={'env_vars': {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}})"
-LEGACY_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
+LEGACY_RAY_INIT = """        # STACKPILOT_EXPERIMENT_ENV_V1
         ray_env = {'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}
         for env_name in (
             'RQ0_SEED',
@@ -21,15 +22,17 @@ LEGACY_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
         ):
             if env_name in os.environ:
                 ray_env[env_name] = os.environ[env_name]
-        ray.init(runtime_env={'env_vars': ray_env})'''
-NEW_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
+        ray.init(runtime_env={'env_vars': ray_env})"""
+NEW_RAY_INIT = """        # STACKPILOT_EXPERIMENT_ENV_V1
         # STACKPILOT_EXPERIMENT_ENV_V2
+        # STACKPILOT_EXPERIMENT_ENV_V3
         ray_env = {
             'TOKENIZERS_PARALLELISM': 'true',
             'NCCL_DEBUG': os.environ.get('NCCL_DEBUG', 'WARN'),
         }
         for env_name in (
             'RQ0_SEED',
+            'STACKPILOT_EXPERIMENT_MODE',
             'SEARCH_R1_MIXED_MODE',
             'SEARCH_R1_N_AGENT',
             'SEARCH_R1_RETRIEVER_TIMEOUT',
@@ -49,29 +52,36 @@ NEW_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
         ray_temp_dir = os.environ.get('STACKPILOT_RAY_TMP_DIR')
         if ray_temp_dir:
             ray_init_kwargs['_temp_dir'] = ray_temp_dir
-        ray.init(**ray_init_kwargs)'''
+        ray.init(**ray_init_kwargs)"""
 
 
 def patch(search_r1_root: Path) -> None:
     target = search_r1_root / "verl" / "trainer" / "main_ppo.py"
     text = target.read_text(encoding="utf-8")
     if MARKER in text:
-        reward_mode_entry = "            'SEARCH_R1_REWARD_MODE',\n"
-        if reward_mode_entry not in text:
-            anchor = "            'SEARCH_R1_RETRIEVER_TIMEOUT',\n"
-            if text.count(anchor) != 1:
+        for required in (
+            "            'SEARCH_R1_REWARD_MODE',\n",
+            "            'STACKPILOT_EXPERIMENT_MODE',\n",
+        ):
+            if required not in text:
                 raise RuntimeError(
-                    f"Could not migrate reward-mode propagation in {target}"
+                    f"Experiment env marker is present but incomplete in {target}"
                 )
-            text = text.replace(
-                anchor,
-                anchor + reward_mode_entry,
-                1,
-            )
-            target.write_text(text, encoding="utf-8")
-            print(f"Updated numbered-experiment Ray env patch: {target}")
-            return
         print(f"Experiment-env patch already present: {target}")
+        return
+    if PREVIOUS_MARKER in text:
+        marker_anchor = "        # STACKPILOT_EXPERIMENT_ENV_V2\n"
+        seed_anchor = "            'RQ0_SEED',\n"
+        if text.count(marker_anchor) != 1 or text.count(seed_anchor) != 1:
+            raise RuntimeError(f"Could not migrate experiment env V2 in {target}")
+        text = text.replace(marker_anchor, marker_anchor + f"        {MARKER}\n", 1)
+        text = text.replace(
+            seed_anchor,
+            seed_anchor + "            'STACKPILOT_EXPERIMENT_MODE',\n",
+            1,
+        )
+        target.write_text(text, encoding="utf-8")
+        print(f"Updated numbered-experiment Ray env patch: {target}")
         return
     if "import os\n" not in text:
         anchor = "import re\nimport numpy as np\n"

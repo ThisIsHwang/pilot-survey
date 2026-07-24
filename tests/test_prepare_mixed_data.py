@@ -70,9 +70,7 @@ class PrepareMixedDataTests(unittest.TestCase):
 
         self.assertEqual(original, before)
         self.assertEqual(len(rows), 2)
-        by_backend = {
-            row["extra_info"]["routing_backend"]: row for row in rows
-        }
+        by_backend = {row["extra_info"]["routing_backend"]: row for row in rows}
         self.assertEqual(set(by_backend), {"bm25", "e5"})
         for backend, row in by_backend.items():
             info = row["extra_info"]
@@ -95,9 +93,7 @@ class PrepareMixedDataTests(unittest.TestCase):
             uid_backends[row["extra_info"]["index"]].add(
                 row["extra_info"]["routing_backend"]
             )
-        self.assertTrue(
-            all(len(backends) == 1 for backends in uid_backends.values())
-        )
+        self.assertTrue(all(len(backends) == 1 for backends in uid_backends.values()))
 
     def test_hidden_pairs_keep_prompts_identical_and_unmarked(self) -> None:
         original = source_row()
@@ -137,9 +133,7 @@ class PrepareMixedDataTests(unittest.TestCase):
             "musique:q1::retrieval_backend=bm25",
         )
         self.assertEqual(
-            switched["prompt"][0]["content"].count(
-                "<retrieval_environment>"
-            ),
+            switched["prompt"][0]["content"].count("<retrieval_environment>"),
             1,
         )
         self.assertEqual(hidden["prompt"], source_row()["prompt"])
@@ -160,9 +154,7 @@ class PrepareMixedDataTests(unittest.TestCase):
         controlled = [source_row("q1"), source_row("q2")]
         datasets = types.ModuleType("datasets")
         datasets.Dataset = FakeDataset
-        datasets.load_dataset = (
-            lambda *args, **kwargs: copy.deepcopy(controlled)
-        )
+        datasets.load_dataset = lambda *args, **kwargs: copy.deepcopy(controlled)
         FakeDataset.fail_writes = False
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -175,6 +167,17 @@ class PrepareMixedDataTests(unittest.TestCase):
                 self.assertTrue(prepare(source, output, 42, "backend-id"))
                 self.assertEqual(output.read_bytes(), first)
                 self.assertTrue(manifest_path(output).is_file())
+                manifest = json.loads(manifest_path(output).read_text("utf-8"))
+                self.assertEqual(manifest["request"]["source_rows"], 2)
+                self.assertEqual(manifest["output"]["rows"], 4)
+
+                source.write_bytes(b"changed-pinned-source")
+                self.assertFalse(prepare(source, output, 42, "backend-id"))
+                rebuilt = json.loads(manifest_path(output).read_text("utf-8"))
+                self.assertNotEqual(
+                    rebuilt["request"]["input_sha256"],
+                    manifest["request"]["input_sha256"],
+                )
 
                 FakeDataset.fail_writes = True
                 with self.assertRaisesRegex(RuntimeError, "simulated parquet"):
@@ -189,9 +192,7 @@ class PrepareMixedDataTests(unittest.TestCase):
         controlled = [source_row("q1")]
         datasets = types.ModuleType("datasets")
         datasets.Dataset = FakeDataset
-        datasets.load_dataset = (
-            lambda *args, **kwargs: copy.deepcopy(controlled)
-        )
+        datasets.load_dataset = lambda *args, **kwargs: copy.deepcopy(controlled)
         FakeDataset.fail_writes = False
 
         with tempfile.TemporaryDirectory() as temporary:

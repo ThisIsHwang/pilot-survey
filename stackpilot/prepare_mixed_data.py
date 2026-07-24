@@ -9,7 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-MIXED_DATA_SCHEMA = 2
+MIXED_DATA_SCHEMA = 3
 MARKER_TEMPLATE = "<retrieval_environment>{backend}</retrieval_environment>\n"
 MARKER_PATTERN = re.compile(
     r"\A(?:<retrieval_environment>\s*(?:bm25|e5)\s*</retrieval_environment>\r?\n)+",
@@ -109,11 +109,17 @@ def manifest_path(output_path: Path) -> Path:
     return output_path.with_name(f".{output_path.name}.stackpilot.json")
 
 
-def preparation_request(input_path: Path, seed: int, mode: str) -> dict[str, Any]:
+def preparation_request(
+    input_path: Path,
+    seed: int,
+    mode: str,
+    *,
+    source_rows: int | None = None,
+) -> dict[str, Any]:
     source = input_path.resolve()
     if not source.is_file():
         raise FileNotFoundError(f"Mixed-policy source parquet is missing: {source}")
-    return {
+    request = {
         "schema": MIXED_DATA_SCHEMA,
         "input_path": str(source),
         "input_size": source.stat().st_size,
@@ -122,6 +128,11 @@ def preparation_request(input_path: Path, seed: int, mode: str) -> dict[str, Any
         "mode": mode,
         "preparer_sha256": file_sha256(Path(__file__).resolve()),
     }
+    if source_rows is not None:
+        if source_rows < 0:
+            raise ValueError("source_rows must be non-negative")
+        request["source_rows"] = int(source_rows)
+    return request
 
 
 def prepared_cache_valid(
@@ -143,6 +154,11 @@ def prepared_cache_valid(
     if not isinstance(output, dict):
         return False
     if output.get("size") != output_path.stat().st_size:
+        return False
+    source_rows = request.get("source_rows")
+    if not isinstance(source_rows, int) or source_rows < 0:
+        return False
+    if output.get("rows") != source_rows * len(BACKENDS):
         return False
     return output.get("sha256") == file_sha256(output_path)
 
@@ -173,12 +189,17 @@ def prepare(
 
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}; got {mode!r}")
-    request = preparation_request(input_path, seed, mode)
+    source = load_dataset("parquet", data_files=str(input_path), split="train")
+    request = preparation_request(
+        input_path,
+        seed,
+        mode,
+        source_rows=len(source),
+    )
     if not force and prepared_cache_valid(output_path, request):
         print(f"Reusing verified {mode} rows: {output_path}")
         return True
 
-    source = load_dataset("parquet", data_files=str(input_path), split="train")
     rows = paired_rows(
         list(source),
         expose_backend=mode == "backend-id",
@@ -198,6 +219,7 @@ def prepare(
             "schema": MIXED_DATA_SCHEMA,
             "request": request,
             "output": {
+                "rows": len(dataset),
                 "size": output_path.stat().st_size,
                 "sha256": file_sha256(output_path),
             },

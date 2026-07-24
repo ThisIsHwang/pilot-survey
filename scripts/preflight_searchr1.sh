@@ -31,6 +31,13 @@ if ! grep -Fq 'STACKPILOT_STRICT_ACTION_PROTOCOL_V2' \
   echo "Search-R1 strict action protocol patch is missing; rerun bootstrap_searchr1.sh" >&2
   exit 1
 fi
+if ! grep -Fq 'STACKPILOT_OBSERVATION_GEOMETRY_V1' \
+  "$SEARCH_R1/search_r1/llm_agent/generation.py" ||
+  ! grep -Fq 'tokenize_observation_batch' \
+    "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
+  echo "Search-R1 fixed observation geometry patch is missing; rerun the training wrapper." >&2
+  exit 1
+fi
 if grep -Fq "resp.split('</search>')" \
   "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
   echo "Search-R1 still truncates model actions before strict parsing; rerun bootstrap_searchr1.sh" >&2
@@ -56,7 +63,8 @@ for protocol_field in \
   stackpilot_protocol_failure \
   stackpilot_trajectory_truncated \
   stackpilot_search_count \
-  stackpilot_retrieved_titles; do
+  stackpilot_retrieved_titles \
+  stackpilot_observed_titles; do
   if ! grep -Fq "$protocol_field" \
     "$SEARCH_R1/search_r1/llm_agent/generation.py"; then
     echo "Search-R1 rollout protocol metadata is incomplete: $protocol_field" >&2

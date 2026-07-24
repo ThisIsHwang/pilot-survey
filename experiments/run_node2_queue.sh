@@ -346,7 +346,7 @@ pretrain_first_mixed_policy() {
     seed_text=${EXP003_SEEDS:-13 42 87}
   elif [[ "$RUN_EXP004" == 1 ]]; then
     experiment_id=EXP-004
-    seed_text=${EXP004_SEEDS:-42}
+    seed_text=${EXP004_SEEDS:-13 42 87}
   else
     echo "No EXP-003/004 training stage is enabled; skipping overlap pretraining."
     return 0
@@ -545,11 +545,11 @@ if [[ "$RUN_EXP003" == 1 ]]; then
     bash "$ROOT/experiments/EXP-003/run.sh"
 fi
 if [[ "$RUN_EXP004" == 1 ]]; then
-  PROFILE="$PROFILE" SEEDS="${EXP004_SEEDS:-42}" \
+  PROFILE="$PROFILE" SEEDS="${EXP004_SEEDS:-13 42 87}" \
     bash "$ROOT/experiments/EXP-004/run.sh"
 fi
 if [[ "$RUN_EXP005" == 1 ]]; then
-  PROFILE="$PROFILE" SEEDS="${EXP005_SEEDS:-42}" \
+  PROFILE="$PROFILE" SEEDS="${EXP005_SEEDS:-13 42 87}" \
     BACKEND_LIST="${EXP005_BACKENDS:-bm25 e5}" \
     bash "$ROOT/experiments/EXP-005/run.sh"
 fi

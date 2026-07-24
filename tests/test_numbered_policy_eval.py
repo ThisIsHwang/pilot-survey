@@ -50,6 +50,8 @@ def valid_episode() -> dict:
         "raw_text_f1": 1.0,
         "protocol_failure": 0,
         "invalid_action_count": 0,
+        "retrieved_support_title_recall": 0.0,
+        "observed_support_title_recall": 0.0,
         "support_recall": 0.0,
         "turn1_support_recall": 0.0,
         "turn2_support_recall": 0.0,

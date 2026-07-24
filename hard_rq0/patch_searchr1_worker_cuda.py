@@ -4,7 +4,8 @@ import argparse
 from pathlib import Path
 
 LEGACY_MARKER = "# STACKPILOT_RAY_WORKER_CUDA_SCOPE_V1"
-MARKER = "# STACKPILOT_RAY_WORKER_CUDA_SCOPE_V2"
+PREVIOUS_MARKER = "# STACKPILOT_RAY_WORKER_CUDA_SCOPE_V2"
+MARKER = "# STACKPILOT_RAY_WORKER_CUDA_SCOPE_V3"
 OLD = """\
     def __init__(self, config: DictConfig, role: str):
         super().__init__()
@@ -54,7 +55,7 @@ LEGACY = """\
         if seed_text is not None:
             torch.cuda.manual_seed_all(int(seed_text) + self.rank)
 """
-NEW = """\
+PREVIOUS = """\
     def __init__(self, config: DictConfig, role: str):
         super().__init__()
         self.config = config
@@ -96,6 +97,62 @@ NEW = """\
         if seed_text is not None:
             torch.cuda.manual_seed_all(int(seed_text) + self.rank)
 """
+NEW = """\
+    def __init__(self, config: DictConfig, role: str):
+        super().__init__()
+        self.config = config
+        import torch.distributed
+
+        # STACKPILOT_RAY_WORKER_CUDA_SCOPE_V3
+        # Ray installs the actor's CUDA_VISIBLE_DEVICES before deserializing
+        # its class. A dependency may initialize CUDA during deserialization,
+        # but the runtime must still see exactly Ray's one assigned device.
+        visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+        visible_device_ids = (
+            []
+            if visible_devices is None
+            else [item.strip() for item in visible_devices.split(",") if item.strip()]
+        )
+        if len(visible_device_ids) != 1:
+            raise RuntimeError(
+                "Each FSDP worker must receive exactly one Ray-assigned GPU; "
+                f"CUDA_VISIBLE_DEVICES={visible_devices!r}"
+            )
+        runtime_device_count = torch._C._cuda_getDeviceCount()
+        device_count = torch.cuda.device_count()
+        if runtime_device_count != 1 or device_count != 1:
+            raise RuntimeError(
+                "Each FSDP worker must see exactly one CUDA device after Ray "
+                f"assignment; CUDA_VISIBLE_DEVICES={visible_devices!r}, "
+                f"CUDA runtime device count={runtime_device_count}, "
+                f"torch.cuda.device_count()={device_count}"
+            )
+        torch.cuda.set_device(0)
+        seed_text = os.environ.get("RQ0_SEED")
+        if seed_text is not None:
+            worker_role = os.environ.get("STACKPILOT_WORKER_ROLE") or os.environ.get("WG_PREFIX")
+            global_rank_text = os.environ.get("STACKPILOT_GLOBAL_RANK") or os.environ.get("RANK")
+            if not worker_role or global_rank_text is None:
+                raise RuntimeError(
+                    "Ray experiment worker is missing its explicit role/global rank"
+                )
+            if int(global_rank_text) != self.rank:
+                raise RuntimeError(
+                    "Ray worker seed rank disagrees with Worker.rank: "
+                    f"{global_rank_text} != {self.rank}"
+                )
+            os.environ["STACKPILOT_WORKER_ROLE"] = worker_role
+            os.environ["STACKPILOT_GLOBAL_RANK"] = str(self.rank)
+            import sitecustomize as stackpilot_sitecustomize
+            finalize_seed = getattr(
+                stackpilot_sitecustomize, "finalize_worker_cuda_seed", None
+            )
+            if not callable(finalize_seed):
+                raise RuntimeError(
+                    "StackPilot sitecustomize seed finalizer is not installed"
+                )
+            finalize_seed(torch)
+"""
 
 
 def patch(search_r1_root: Path) -> Path:
@@ -108,7 +165,12 @@ def patch(search_r1_root: Path) -> Path:
                 f"is incomplete in {target}"
             )
         return target
-    old_block = LEGACY if LEGACY_MARKER in text else OLD
+    if PREVIOUS_MARKER in text:
+        old_block = PREVIOUS
+    elif LEGACY_MARKER in text:
+        old_block = LEGACY
+    else:
+        old_block = OLD
     occurrences = text.count(old_block)
     if occurrences != 1:
         raise RuntimeError(

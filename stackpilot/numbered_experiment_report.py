@@ -16,11 +16,18 @@ from stackpilot.hard_rq0_contract import (
     RESULT_SCHEMA,
     episode_validation_error,
 )
-from stackpilot.hard_rq0_report import markdown_table, matched_hard_question_ids
+from stackpilot.hard_rq0_report import (
+    exact_outer_merge,
+    markdown_table,
+    matched_hard_question_ids,
+    seed_mean_interval,
+)
 
 REPORT_METRICS = [
     "em",
     "f1",
+    "retrieved_support_title_recall",
+    "observed_support_title_recall",
     "support_recall",
     "turn2_evidence_gain",
     "turn3_evidence_gain",
@@ -98,10 +105,7 @@ def manifested_max_search_turns(
             f"Manifest max_search_turns must be positive: {manifest_path}"
         )
     expected_signature = str(manifest.get("evaluation_signature", ""))
-    if (
-        not expected_signature
-        or stable_signature(context) != expected_signature
-    ):
+    if not expected_signature or stable_signature(context) != expected_signature:
         raise RuntimeError(
             f"Manifest evaluation context signature mismatch: {manifest_path}"
         )
@@ -115,13 +119,17 @@ def load_completed_numbered_results(
     rows: list[dict[str, Any]] = []
     matched_manifests = 0
     seen_runs: set[str] = set()
+    reference_expected_keys: set[tuple[str, str, int]] | None = None
+    reference_evaluation_signature: str | None = None
     for manifest_path in sorted(root.rglob("evaluation_manifest.json")):
         if "archive" in manifest_path.parts:
             continue
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"Invalid evaluation manifest {manifest_path}: {exc}") from exc
+            raise RuntimeError(
+                f"Invalid evaluation manifest {manifest_path}: {exc}"
+            ) from exc
         if manifest.get("profile") != profile:
             continue
         matched_manifests += 1
@@ -142,9 +150,7 @@ def load_completed_numbered_results(
         if not run_id or not run_signature or run_id in seen_runs:
             raise RuntimeError(f"Invalid or duplicate run identity in {manifest_path}")
         seen_runs.add(run_id)
-        context, max_search_turns = manifested_max_search_turns(
-            manifest, manifest_path
-        )
+        context, max_search_turns = manifested_max_search_turns(manifest, manifest_path)
         if (
             not str(manifest.get("variant", "")).strip()
             or not str(manifest.get("policy_tag", "")).strip()
@@ -163,9 +169,7 @@ def load_completed_numbered_results(
         expected_digest = str(manifest.get("episodes_sha256", ""))
         actual_digest = sha256_file(episodes_path)
         if not expected_digest or actual_digest != expected_digest:
-            raise RuntimeError(
-                f"Completed evaluation digest mismatch: {episodes_path}"
-            )
+            raise RuntimeError(f"Completed evaluation digest mismatch: {episodes_path}")
         episode_rows = read_jsonl_tolerant(episodes_path)
         if any(row.get("schema") != RESULT_SCHEMA for row in episode_rows):
             raise RuntimeError(
@@ -214,6 +218,27 @@ def load_completed_numbered_results(
             for backend in backends
             for topk in topks
         }
+        if reference_expected_keys is None:
+            reference_expected_keys = expected_keys
+            reference_evaluation_signature = str(
+                manifest.get("evaluation_signature", "")
+            )
+        else:
+            if expected_keys != reference_expected_keys:
+                raise RuntimeError(
+                    "Completed runs declare different evaluation grids: "
+                    f"{manifest_path}; "
+                    f"missing={sorted(reference_expected_keys - expected_keys)[:10]}, "
+                    f"extra={sorted(expected_keys - reference_expected_keys)[:10]}"
+                )
+            if (
+                str(manifest.get("evaluation_signature", ""))
+                != reference_evaluation_signature
+            ):
+                raise RuntimeError(
+                    "Completed runs do not share one evaluation context: "
+                    f"{manifest_path}"
+                )
         keys: set[tuple[str, str, int]] = set()
         expected_provenance = {
             "experiment_id": experiment_id,
@@ -239,8 +264,7 @@ def load_completed_numbered_results(
                 raise RuntimeError(f"Duplicate episode key {key} in {episodes_path}")
             keys.add(key)
             if any(
-                row.get(name) != value
-                for name, value in expected_provenance.items()
+                row.get(name) != value for name, value in expected_provenance.items()
             ):
                 raise RuntimeError(
                     f"Episode provenance does not match {manifest_path}: {key}"
@@ -248,8 +272,7 @@ def load_completed_numbered_results(
             problem = episode_validation_error(row, max_search_turns)
             if problem is not None:
                 raise RuntimeError(
-                    f"Episode contract does not match {manifest_path}: "
-                    f"{key}: {problem}"
+                    f"Episode contract does not match {manifest_path}: {key}: {problem}"
                 )
         if keys != expected_keys:
             missing = sorted(expected_keys - keys)[:10]
@@ -278,53 +301,57 @@ def add_subsets(frame: pd.DataFrame, matched: pd.DataFrame) -> pd.DataFrame:
 def specialist_oracle(hard: pd.DataFrame, metric: str) -> pd.DataFrame:
     selected = pd.concat(
         [
-            hard[(hard["policy_tag"] == "bm25-specialist") & (hard["backend"] == "bm25")],
+            hard[
+                (hard["policy_tag"] == "bm25-specialist") & (hard["backend"] == "bm25")
+            ],
             hard[(hard["policy_tag"] == "e5-specialist") & (hard["backend"] == "e5")],
         ],
         ignore_index=True,
     )
-    return (
-        selected.groupby(
-            ["subset", "seed", "question_id", "dataset", "backend", "topk"],
-            as_index=False,
-        )[metric]
-        .mean()
-        .rename(columns={metric: "specialist_oracle"})
-    )
+    keys = ["subset", "seed", "question_id", "dataset", "backend", "topk"]
+    duplicates = selected.duplicated(keys, keep=False)
+    if duplicates.any():
+        raise RuntimeError(
+            "Specialist oracle has duplicate comparison cells:\n"
+            f"{selected.loc[duplicates, keys].head(20).to_string(index=False)}"
+        )
+    return selected[keys + [metric]].rename(columns={metric: "specialist_oracle"})
 
 
 def mixed_regret(hard: pd.DataFrame, mixed: pd.DataFrame, metric: str) -> pd.DataFrame:
+    keys = ["subset", "seed", "question_id", "dataset", "backend", "topk"]
     oracle = specialist_oracle(hard, metric)
-    policy = mixed[mixed["policy_tag"] == "mixed-blind"][
-        ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
-    ].rename(columns={metric: "mixed_score"})
-    common_seeds = sorted(set(policy["seed"]) & set(oracle["seed"]))
-    if not common_seeds:
-        raise RuntimeError("EXP-002 specialists and EXP-003 have no common seeds")
-    merged = policy[policy["seed"].isin(common_seeds)].merge(
-        oracle[oracle["seed"].isin(common_seeds)],
-        on=["subset", "seed", "question_id", "dataset", "backend", "topk"],
-        validate="one_to_one",
+    policy = mixed[mixed["policy_tag"] == "mixed-blind"][keys + [metric]].rename(
+        columns={metric: "mixed_score"}
+    )
+    merged = exact_outer_merge(
+        policy,
+        oracle,
+        on=keys,
+        left_name="EXP-003 mixed-blind",
+        right_name="EXP-002 specialist oracle",
     )
     merged["metric"] = metric
     merged["mixed_regret"] = merged["specialist_oracle"] - merged["mixed_score"]
     return merged
 
 
-def metadata_value(blind: pd.DataFrame, oracle: pd.DataFrame, metric: str) -> pd.DataFrame:
-    left = blind[blind["policy_tag"] == "mixed-blind"][
-        ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
-    ].rename(columns={metric: "blind_score"})
-    right = oracle[oracle["policy_tag"] == "mixed-backend-id"][
-        ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
-    ].rename(columns={metric: "id_score"})
-    common_seeds = sorted(set(left["seed"]) & set(right["seed"]))
-    if not common_seeds:
-        raise RuntimeError("EXP-003 and EXP-004 have no common seeds")
-    merged = left[left["seed"].isin(common_seeds)].merge(
-        right[right["seed"].isin(common_seeds)],
-        on=["subset", "seed", "question_id", "dataset", "backend", "topk"],
-        validate="one_to_one",
+def metadata_value(
+    blind: pd.DataFrame, oracle: pd.DataFrame, metric: str
+) -> pd.DataFrame:
+    keys = ["subset", "seed", "question_id", "dataset", "backend", "topk"]
+    left = blind[blind["policy_tag"] == "mixed-blind"][keys + [metric]].rename(
+        columns={metric: "blind_score"}
+    )
+    right = oracle[oracle["policy_tag"] == "mixed-backend-id"][keys + [metric]].rename(
+        columns={metric: "id_score"}
+    )
+    merged = exact_outer_merge(
+        left,
+        right,
+        on=keys,
+        left_name="EXP-003 mixed-blind",
+        right_name="EXP-004 mixed-backend-id",
     )
     merged["metric"] = metric
     merged["metadata_value"] = merged["id_score"] - merged["blind_score"]
@@ -334,21 +361,25 @@ def metadata_value(blind: pd.DataFrame, oracle: pd.DataFrame, metric: str) -> pd
 def evidence_reward_value(
     hard: pd.DataFrame, evidence: pd.DataFrame, metric: str
 ) -> pd.DataFrame:
+    keys = ["subset", "seed", "question_id", "dataset", "backend", "topk"]
     rows = []
     for evidence_tag, answer_tag in EVIDENCE_TO_ANSWER_POLICY.items():
         evidence_rows = evidence[evidence["policy_tag"] == evidence_tag][
-            ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
+            keys + [metric]
         ].rename(columns={metric: "evidence_reward_score"})
-        answer_rows = hard[hard["policy_tag"] == answer_tag][
-            ["subset", "seed", "question_id", "dataset", "backend", "topk", metric]
-        ].rename(columns={metric: "answer_only_score"})
-        common_seeds = sorted(set(evidence_rows["seed"]) & set(answer_rows["seed"]))
-        if not common_seeds:
-            continue
-        merged = evidence_rows[evidence_rows["seed"].isin(common_seeds)].merge(
-            answer_rows[answer_rows["seed"].isin(common_seeds)],
-            on=["subset", "seed", "question_id", "dataset", "backend", "topk"],
-            validate="one_to_one",
+        answer_rows = hard[hard["policy_tag"] == answer_tag][keys + [metric]].rename(
+            columns={metric: "answer_only_score"}
+        )
+        if evidence_rows.empty or answer_rows.empty:
+            raise RuntimeError(
+                f"EXP-005 comparison is missing {evidence_tag} or {answer_tag}"
+            )
+        merged = exact_outer_merge(
+            evidence_rows,
+            answer_rows,
+            on=keys,
+            left_name=f"EXP-005 {evidence_tag}",
+            right_name=f"EXP-002 {answer_tag}",
         )
         merged["evidence_policy"] = evidence_tag
         merged["answer_policy"] = answer_tag
@@ -357,8 +388,6 @@ def evidence_reward_value(
             merged["evidence_reward_score"] - merged["answer_only_score"]
         )
         rows.append(merged)
-    if not rows:
-        raise RuntimeError("EXP-005 has no seed-matched answer-only specialist results")
     return pd.concat(rows, ignore_index=True)
 
 
@@ -373,12 +402,23 @@ def aggregate(
         "metric",
         *(extra_groups or []),
     ]
-    return (
-        frame.groupby(groups)[value]
-        .agg(**{value: "mean", f"{value}_std": "std", "cells": "count"})
-        .reset_index()
-        .sort_values(groups)
-    )
+    rows = []
+    for keys, group in frame.groupby(groups):
+        per_seed = group.groupby("seed")[value].mean()
+        interval = seed_mean_interval(per_seed)
+        rows.append(
+            {
+                **dict(zip(groups, keys)),
+                value: interval["mean"],
+                f"{value}_std": interval["seed_std"],
+                "n_seeds": interval["n_seeds"],
+                "seed_ci_low": interval["seed_ci_low"],
+                "seed_ci_high": interval["seed_ci_high"],
+                "seed_values": interval["seed_values"],
+                "cells": len(group),
+            }
+        )
+    return pd.DataFrame(rows).sort_values(groups)
 
 
 def main() -> None:
@@ -429,7 +469,9 @@ def main() -> None:
     regrets.to_csv(Path(output_dir) / "mixed_regret_cells.csv", index=False)
     values.to_csv(Path(output_dir) / "metadata_value_cells.csv", index=False)
     regret_summary.to_csv(Path(output_dir) / "mixed_regret_summary.csv", index=False)
-    metadata_summary.to_csv(Path(output_dir) / "metadata_value_summary.csv", index=False)
+    metadata_summary.to_csv(
+        Path(output_dir) / "metadata_value_summary.csv", index=False
+    )
 
     lines = [
         "# Numbered mixed-policy experiment report",

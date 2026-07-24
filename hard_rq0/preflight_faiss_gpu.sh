@@ -10,7 +10,7 @@ PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
   exit 1
 }
 E5_GPU=${E5_GPU:-7}
-E5_MIN_FREE_MEMORY_MIB=${E5_MIN_FREE_MEMORY_MIB:-40960}
+E5_MIN_FREE_MEMORY_MIB=${E5_MIN_FREE_MEMORY_MIB:-71680}
 FAISS_SMOKE_TEMP_MEMORY_MIB=${FAISS_SMOKE_TEMP_MEMORY_MIB:-64}
 
 for name in E5_GPU E5_MIN_FREE_MEMORY_MIB FAISS_SMOKE_TEMP_MEMORY_MIB; do
@@ -36,7 +36,7 @@ free_mib=$(nvidia-smi --id="$E5_GPU" --query-gpu=memory.free \
   exit 1
 }
 if (( free_mib < E5_MIN_FREE_MEMORY_MIB )); then
-  echo "E5 GPU $E5_GPU has ${free_mib} MiB free; the paged 30.06 GiB FP16 index requires at least ${E5_MIN_FREE_MEMORY_MIB} MiB headroom." >&2
+  echo "E5 GPU $E5_GPU has ${free_mib} MiB free; the paged 60.13 GiB FP32 index requires at least ${E5_MIN_FREE_MEMORY_MIB} MiB headroom." >&2
   echo "Stop the stale GPU process before loading the Hard-RQ0 E5 index." >&2
   exit 1
 fi
@@ -66,7 +66,7 @@ vectors = np.asarray(
 cpu_index = faiss.IndexFlatIP(vectors.shape[1])
 cpu_index.add(vectors)
 options = faiss.GpuMultipleClonerOptions()
-options.useFloat16 = True
+options.useFloat16 = False
 options.shard = True
 scratch = int(os.environ["FAISS_SMOKE_TEMP_MEMORY_MIB"])
 with paged_flat_gpu_loader(faiss, temp_memory_mib=scratch) as state:

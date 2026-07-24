@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -35,6 +36,7 @@ from stackpilot.hybrid_rrf_server import create_app as create_hybrid_app
 from stackpilot.hybrid_rrf_server import fuse
 from stackpilot.mixed_retriever_server import create_app
 from stackpilot.numbered_experiment_report import (
+    aggregate,
     evidence_reward_value,
     metadata_value,
     mixed_regret,
@@ -87,7 +89,7 @@ def run_patched_reward(
         non_tensors.update(
             {
                 "extra_info": {"support_titles": ["William Shakespeare"]},
-                "stackpilot_retrieved_titles": ["William Shakespeare"],
+                "stackpilot_observed_titles": ["William Shakespeare"],
                 "stackpilot_search_count": 2,
             }
         )
@@ -416,7 +418,7 @@ class Manager:
                 "_support_recall_from_titles(",
                 first,
             )
-            self.assertIn("'stackpilot_retrieved_titles'", first)
+            self.assertIn("'stackpilot_observed_titles'", first)
             self.assertIn("'stackpilot_search_count'", first)
             self.assertNotIn("solution_str=response_str", first)
             self.assertNotIn("solution_str=sequences_str", first)
@@ -445,9 +447,7 @@ class Manager:
             compile(first, str(target), "exec")
 
     def test_terminal_reward_bypasses_the_broken_single_tag_extractor(self) -> None:
-        qa_em = run_path(
-            "upstream/Search-R1/verl/utils/reward_score/qa_em.py"
-        )
+        qa_em = run_path("upstream/Search-R1/verl/utils/reward_score/qa_em.py")
         ground_truth = {"target": ["William Shakespeare"]}
         clean_response = "<answer>William Shakespeare</answer>"
         self.assertEqual(
@@ -630,6 +630,41 @@ class RewardManager():
         self.assertAlmostEqual(float(value["metadata_value"].mean()), 0.15)
         reward = evidence_reward_value(hard, evidence, "support_recall")
         self.assertTrue((reward["evidence_reward_value"] > 0).all())
+        with self.assertRaisesRegex(RuntimeError, "incomplete matched grid"):
+            mixed_regret(hard, blind.iloc[:-1], "support_recall")
+        wrong_seed = oracle.copy()
+        wrong_seed["seed"] = 13
+        with self.assertRaisesRegex(RuntimeError, "incomplete matched grid"):
+            metadata_value(blind, wrong_seed, "support_recall")
+        with self.assertRaisesRegex(RuntimeError, "incomplete matched grid"):
+            evidence_reward_value(hard, evidence.iloc[:-1], "support_recall")
+
+    def test_numbered_aggregate_uses_training_seed_means(self) -> None:
+        frame = pd.DataFrame(
+            [
+                {
+                    "subset": "all",
+                    "dataset": "toy",
+                    "backend": "bm25",
+                    "topk": 3,
+                    "metric": "support_recall",
+                    "seed": seed,
+                    "value": value,
+                }
+                for seed, values in ((13, (0.0, 2.0)), (42, (10.0, 10.0)))
+                for value in values
+            ]
+        )
+
+        summary = aggregate(frame, "value").iloc[0]
+
+        self.assertEqual(summary["value"], 5.5)
+        self.assertAlmostEqual(summary["value_std"], 9.0 / (2**0.5))
+        self.assertEqual(summary["n_seeds"], 2)
+        self.assertEqual(
+            json.loads(summary["seed_values"]),
+            {"13": 1.0, "42": 10.0},
+        )
 
     def test_run_scripts_bind_numbers_to_variants(self) -> None:
         root = Path(__file__).resolve().parents[1]

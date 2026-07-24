@@ -25,7 +25,8 @@ llm:
 
 agent:
   max_search_turns: 4
-  result_snippet_chars: 700
+  # Fixed total budget for the complete top-k bundle, matching Search-R1.
+  observation_token_budget: 500
 
 data:
   repo_id: RUC-NLPIR/FlashRAG_datasets
@@ -38,6 +39,9 @@ data:
   eval_examples_per_dataset: 500
   split_train: train
   split_eval: dev
+  # Keep every pinned benchmark row. Corpus-missing gold titles remain in the
+  # denominator and are reported explicitly instead of being filtered away.
+  gold_title_corpus_policy: retain-and-report-all-gold
 
 training:
   seeds: [13, 42, 87]

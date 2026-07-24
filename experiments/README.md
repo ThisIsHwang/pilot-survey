@@ -69,9 +69,21 @@ Truncated trajectories receive exactly zero reward in either mode.
 
 1. Complete EXP-002 before interpreting EXP-003/004.
 2. Run EXP-003 with seeds 13, 42, and 87.
-3. Run EXP-004 at seed 42 first; expand to three seeds only when metadata value is at least 0.03.
-4. EXP-005 is a reward-diagnostic experiment, not the main mixed-policy baseline.
+3. Run EXP-004 with the same predeclared seeds 13, 42, and 87. Do not decide
+   whether to add seeds after looking at seed 42.
+4. Run EXP-005 with the same three seeds. It is a reward-diagnostic experiment,
+   not the main mixed-policy baseline.
 5. EXP-006 is evaluation-only and uses checkpoints from EXP-002 through EXP-004.
+
+The combined report requires an exact one-to-one question×seed×backend×top-k
+grid for every paired comparison; a missing or failed cell aborts reporting
+instead of disappearing in an inner join. Summary standard deviations and
+intervals are calculated from training-seed means, and every seed value is
+shown. With three seeds these numbered results are exploratory. Confirmatory
+claims require at least eight predeclared training seeds. The numbered report
+uses seed-level descriptive t intervals; the preregistered Hard-RQ0 report
+applies exact seed sign-flip tests and Holm correction to its secondary
+interaction family.
 
 ## Main decision pattern
 

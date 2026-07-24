@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from stackpilot.common import answer_em, answer_f1
 
-RESULT_SCHEMA = 4
+RESULT_SCHEMA = 5
 NUMBERED_EVALUATION_MANIFEST_SCHEMA = 3
 BASE_POLICY_TAG = "base-qwen"
 SPECIALIST_TAGS = ("bm25-specialist", "e5-specialist")
@@ -22,6 +22,8 @@ METRICS = (
     "raw_text_em",
     "raw_text_f1",
     "protocol_failure",
+    "retrieved_support_title_recall",
+    "observed_support_title_recall",
     "support_recall",
     "turn1_support_recall",
     "turn2_support_recall",
@@ -140,9 +142,13 @@ def episode_validation_error(
         return "answers must be nonempty strings"
     answers = [answer.strip() for answer in raw_answers]
     raw_support_titles = row.get("support_titles")
-    if not isinstance(raw_support_titles, list) or not raw_support_titles or any(
-        not isinstance(title, str) or not title.strip()
-        for title in raw_support_titles
+    if (
+        not isinstance(raw_support_titles, list)
+        or not raw_support_titles
+        or any(
+            not isinstance(title, str) or not title.strip()
+            for title in raw_support_titles
+        )
     ):
         return "support_titles must be nonempty strings"
     support_titles = [title.strip() for title in raw_support_titles]
@@ -192,15 +198,14 @@ def episode_validation_error(
     }
     for metric, expected_value in expected_answer_metrics.items():
         if abs(float(row[metric]) - expected_value) > 1e-9:
-            return (
-                f"{metric} is inconsistent with its prediction and nonempty answers"
-            )
+            return f"{metric} is inconsistent with its prediction and nonempty answers"
 
     recalls: list[float] = []
     gains: list[float] = []
     previous_recall = 0.0
     previously_seen_titles: set[str] = set()
-    cumulative_titles: set[str] = set()
+    cumulative_retrieved_titles: set[str] = set()
+    cumulative_observed_titles: set[str] = set()
     bounded_features = (
         "query_question_overlap",
         "query_has_quotes",
@@ -223,9 +228,12 @@ def episode_validation_error(
         ):
             return f"turn {index} query does not match queries"
         retrieved_titles = turn.get("retrieved_titles")
+        observed_titles = turn.get("observed_titles")
         new_support_titles = turn.get("new_support_titles")
-        if not isinstance(retrieved_titles, list) or not isinstance(
-            new_support_titles, list
+        if (
+            not isinstance(retrieved_titles, list)
+            or not isinstance(observed_titles, list)
+            or not isinstance(new_support_titles, list)
         ):
             return f"turn {index} retrieval-title fields must be lists"
         if any(
@@ -235,26 +243,53 @@ def episode_validation_error(
             return f"turn {index} retrieved titles must be nonempty strings"
         if len(retrieved_titles) > int(float(topk)):
             return f"turn {index} has more retrieved titles than topk"
-        normalized_retrieved = {
-            normalize_title(title) for title in retrieved_titles
-        }
+        normalized_retrieved = {normalize_title(title) for title in retrieved_titles}
+        if any(
+            not isinstance(title, str) or not title.strip() for title in observed_titles
+        ):
+            return f"turn {index} observed titles must be nonempty strings"
+        normalized_observed = {normalize_title(title) for title in observed_titles}
+        if not normalized_observed <= normalized_retrieved:
+            return f"turn {index} observed titles are not a subset of retrieved titles"
         expected_new_support = sorted(
-            (gold_titles & normalized_retrieved) - previously_seen_titles
+            (gold_titles & normalized_observed) - previously_seen_titles
         )
         if new_support_titles != expected_new_support:
             return f"turn {index} new support titles are inconsistent"
-        cumulative_titles.update(normalized_retrieved)
-        expected_recall = len(gold_titles & cumulative_titles) / len(gold_titles)
+        cumulative_retrieved_titles.update(normalized_retrieved)
+        cumulative_observed_titles.update(normalized_observed)
+        expected_retrieved_recall = len(
+            gold_titles & cumulative_retrieved_titles
+        ) / len(gold_titles)
+        expected_observed_recall = len(gold_titles & cumulative_observed_titles) / len(
+            gold_titles
+        )
         recall = turn.get("support_recall")
+        retrieved_recall = turn.get("retrieved_support_title_recall")
+        observed_recall = turn.get("observed_support_title_recall")
         gain = turn.get("evidence_gain")
         if not finite_number(recall) or not 0.0 <= float(recall) <= 1.0:
             return f"turn {index} support recall is invalid"
         if not finite_number(gain) or not 0.0 <= float(gain) <= 1.0:
             return f"turn {index} evidence gain is invalid"
+        if (
+            not finite_number(retrieved_recall)
+            or not 0.0 <= float(retrieved_recall) <= 1.0
+            or abs(float(retrieved_recall) - expected_retrieved_recall) > 1e-9
+        ):
+            return f"turn {index} retrieved support-title recall is inconsistent"
+        if (
+            not finite_number(observed_recall)
+            or not 0.0 <= float(observed_recall) <= 1.0
+            or abs(float(observed_recall) - expected_observed_recall) > 1e-9
+        ):
+            return f"turn {index} observed support-title recall is inconsistent"
         recall_value = float(recall)
         gain_value = float(gain)
-        if abs(recall_value - expected_recall) > 1e-9:
+        if abs(recall_value - expected_observed_recall) > 1e-9:
             return f"turn {index} support recall is inconsistent with titles"
+        if float(observed_recall) > float(retrieved_recall) + 1e-9:
+            return f"turn {index} observed recall exceeds retrieved recall"
         if recall_value + 1e-9 < previous_recall:
             return f"turn {index} support recall decreases"
         if abs(gain_value - (recall_value - previous_recall)) > 1e-9:
@@ -272,7 +307,7 @@ def episode_validation_error(
                 return f"turn {index} {feature} is invalid"
         recalls.append(recall_value)
         gains.append(gain_value)
-        previously_seen_titles.update(normalized_retrieved)
+        previously_seen_titles.update(normalized_observed)
         previous_recall = recall_value
 
     def recall_at(index: int) -> float:
@@ -288,6 +323,10 @@ def episode_validation_error(
     turn3 = recall_at(2)
     first_miss = turn1 < 1.0
     expected = {
+        "retrieved_support_title_recall": (
+            len(gold_titles & cumulative_retrieved_titles) / len(gold_titles)
+        ),
+        "observed_support_title_recall": recalls[-1] if recalls else 0.0,
         "support_recall": recalls[-1] if recalls else 0.0,
         "turn1_support_recall": turn1,
         "turn2_support_recall": turn2,
