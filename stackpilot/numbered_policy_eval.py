@@ -77,8 +77,10 @@ def atomic_bytes(path: Path, payload: bytes) -> None:
 
 def archive_path(output_path: Path, kind: str, suffix: str) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
-    return output_path.parent / "archive" / (
-        f"{output_path.stem}.{kind}-{timestamp}.{suffix}"
+    return (
+        output_path.parent
+        / "archive"
+        / (f"{output_path.stem}.{kind}-{timestamp}.{suffix}")
     )
 
 
@@ -383,13 +385,9 @@ def check_hybrid_retriever(
         "rrf_constant": float(payload["rrf_constant"]),
         "upstream_topk": int(payload["upstream_topk"]),
         "default_topk": int(payload.get("default_topk", 3)),
-        "request_timeout_seconds": float(
-            payload.get("request_timeout_seconds", 180.0)
-        ),
+        "request_timeout_seconds": float(payload.get("request_timeout_seconds", 180.0)),
         "upstream_urls": expected_urls,
-        "upstreams": {
-            name: base_identities[name] for name in ("bm25", "e5")
-        },
+        "upstreams": {name: base_identities[name] for name in ("bm25", "e5")},
         "server_file_sha256": expected_server_digest,
     }
 
@@ -422,9 +420,7 @@ def check_retriever_services(
         for name in sorted(base_names)
     }
     if "e5" in base_identities:
-        expected_revision = str(
-            cfg["retrieval"].get("e5_model_revision", "")
-        ).strip()
+        expected_revision = str(cfg["retrieval"].get("e5_model_revision", "")).strip()
         actual_revision = str(
             base_identities["e5"].get("retriever_model_revision", "")
         ).strip()
@@ -449,9 +445,7 @@ def check_retriever_services(
             identities[backend] = {
                 **base_identities[backend],
                 "port": ports[backend],
-                "retrieve_url": (
-                    f"http://127.0.0.1:{ports[backend]}/retrieve"
-                ),
+                "retrieve_url": (f"http://127.0.0.1:{ports[backend]}/retrieve"),
             }
     return identities
 
@@ -689,9 +683,14 @@ def main() -> None:
         "e5": f"http://127.0.0.1:{args.e5_port}/retrieve",
         "hybrid": f"http://127.0.0.1:{args.hybrid_port}/retrieve",
     }
-    retrievers = {
-        name: RetrievalClient(name, urls[name]) for name in backends
-    }
+    retrievers = {name: RetrievalClient(name, urls[name]) for name in backends}
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        os.environ.get("MODEL_PATH") or args.model,
+        local_files_only=True,
+        trust_remote_code=False,
+    )
     thread_state = threading.local()
     client_registry: list[OpenAI] = []
     client_registry_lock = threading.Lock()
@@ -710,9 +709,7 @@ def main() -> None:
                 client_registry.append(client)
         return client
 
-    EvaluationJob = tuple[
-        dict[str, Any], str, int, tuple[str, str, int]
-    ]
+    EvaluationJob = tuple[dict[str, Any], str, int, tuple[str, str, int]]
 
     def evaluate(job: EvaluationJob) -> dict[str, Any]:
         item, backend, topk, key = job
@@ -731,6 +728,7 @@ def main() -> None:
                 cfg=cfg,
                 topk=topk,
                 eval_seed=args.seed,
+                tokenizer=tokenizer,
             )
         except Exception as exc:
             raise RuntimeError(f"Numbered evaluation episode failed: {key}") from exc

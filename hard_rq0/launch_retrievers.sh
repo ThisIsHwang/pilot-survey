@@ -242,16 +242,16 @@ if int(payload.get("corpus_documents", -1)) != int(expected_documents):
 if expected_backend == "e5":
     if payload.get("faiss_gpu") is not True or int(payload.get("faiss_gpu_count", 0)) != 1:
         raise SystemExit(f"E5 did not initialize one visible FAISS GPU: {payload}")
-    if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+    if payload.get("faiss_gpu_load_mode") != "paged-fp32-flat":
         raise SystemExit(f"E5 did not use the memory-safe paged FAISS loader: {payload}")
-    if payload.get("faiss_storage_dtype") != "float16":
-        raise SystemExit(f"E5 did not use FP16 FAISS storage: {payload}")
+    if payload.get("faiss_storage_dtype") != "float32":
+        raise SystemExit(f"E5 did not use FP32 FAISS storage: {payload}")
     if int(payload.get("faiss_temp_memory_mib", 0)) != int(expected_faiss_temp_memory_mib):
         raise SystemExit(f"E5 used unexpected FAISS scratch memory: {payload}")
-    expected_index_bytes = int(expected_documents) * 768 * 2
+    expected_index_bytes = int(expected_documents) * 768 * 4
     if int(payload.get("faiss_index_bytes", 0)) != expected_index_bytes:
         raise SystemExit(
-            "E5 loaded an incomplete FP16 vector payload: "
+            "E5 loaded an incomplete FP32 vector payload: "
             f"{payload.get('faiss_index_bytes')} != {expected_index_bytes}"
         )
     if str(payload.get("cuda_visible_devices")) != expected_e5_gpu:

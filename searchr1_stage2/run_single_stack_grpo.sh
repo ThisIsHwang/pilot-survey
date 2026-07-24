@@ -138,6 +138,8 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
   --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
+  --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
@@ -365,8 +367,10 @@ TRAIN_SIGNATURE=$("$SEARCH_R1_PYTHON" - \
   "$ROOT/searchr1_stage2/searchr1-runtime.patch" "$INDEX_MANIFEST" \
   "$DATA_MANIFEST" "$SEARCHR1_DATA_MANIFEST" \
   "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
   "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   "$ROOT/stackpilot/action_protocol.py" \
+  "$ROOT/stackpilot/observation_geometry.py" \
   "$ROOT/searchr1_stage2/run_single_stack_grpo.sh" "$SEARCH_R1_DIRTY_SHA" <<'PY'
 import hashlib
 import json
@@ -402,8 +406,10 @@ from pathlib import Path
     data_manifest,
     searchr1_data_manifest,
     action_protocol_patch,
+    observation_geometry_patch,
     reward_protocol_patch,
     action_protocol,
+    observation_geometry,
     training_wrapper,
     search_r1_dirty_sha,
 ) = sys.argv[1:]
@@ -459,8 +465,10 @@ payload = {
     "data_manifest_sha256": digest(data_manifest),
     "searchr1_data_manifest_sha256": digest(searchr1_data_manifest),
     "action_protocol_patch_sha256": digest(action_protocol_patch),
+    "observation_geometry_patch_sha256": digest(observation_geometry_patch),
     "reward_protocol_patch_sha256": digest(reward_protocol_patch),
     "action_protocol_sha256": digest(action_protocol),
+    "observation_geometry_sha256": digest(observation_geometry),
     "training_wrapper_sha256": digest(training_wrapper),
 }
 canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))

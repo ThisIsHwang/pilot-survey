@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from hard_rq0.patch_searchr1_worker_cuda import LEGACY, LEGACY_MARKER, MARKER, NEW, OLD
 from hard_rq0.patch_searchr1_worker_cuda import patch as patch_worker_cuda
+from hard_rq0.sitecustomize import derive_seed
 
 ROOT = Path(__file__).resolve().parents[1]
 SITECUSTOMIZE = ROOT / "hard_rq0" / "sitecustomize.py"
@@ -46,7 +47,11 @@ class SiteCustomizeTests(unittest.TestCase):
         with (
             patch.dict(
                 os.environ,
-                {"RQ0_SEED": "41", "RANK": "3"},
+                {
+                    "RQ0_SEED": "41",
+                    "STACKPILOT_WORKER_ROLE": "test-role",
+                    "STACKPILOT_GLOBAL_RANK": "3",
+                },
                 clear=False,
             ),
             patch.dict(
@@ -55,11 +60,14 @@ class SiteCustomizeTests(unittest.TestCase):
             ),
             patch("random.seed") as python_seed,
         ):
-            runpy.run_path(str(SITECUSTOMIZE), run_name="_stackpilot_sitecustomize_test")
+            runpy.run_path(
+                str(SITECUSTOMIZE), run_name="_stackpilot_sitecustomize_test"
+            )
 
-        python_seed.assert_called_once_with(44)
-        self.assertEqual(numpy_seed.values, [44])
-        self.assertEqual(torch_seed.values, [44])
+        expected = derive_seed(41, "test-role", 3)
+        python_seed.assert_called_once_with(expected)
+        self.assertEqual(numpy_seed.values, [expected])
+        self.assertEqual(torch_seed.values, [expected])
 
 
 class _FakeCuda:
@@ -107,7 +115,9 @@ class _FakeDistributed(types.ModuleType):
 
 
 class WorkerCudaPatchTests(unittest.TestCase):
-    def make_checkout(self, source: str = OLD) -> tuple[tempfile.TemporaryDirectory, Path]:
+    def make_checkout(
+        self, source: str = OLD
+    ) -> tuple[tempfile.TemporaryDirectory, Path]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
         target = root / "verl" / "workers" / "fsdp_workers.py"
@@ -145,12 +155,7 @@ class WorkerCudaPatchTests(unittest.TestCase):
 
     def test_patch_applies_to_the_pinned_searchr1_worker(self) -> None:
         source = (
-            ROOT
-            / "upstream"
-            / "Search-R1"
-            / "verl"
-            / "workers"
-            / "fsdp_workers.py"
+            ROOT / "upstream" / "Search-R1" / "verl" / "workers" / "fsdp_workers.py"
         )
         with tempfile.TemporaryDirectory() as temporary:
             checkout = Path(temporary)
@@ -198,6 +203,14 @@ class ActorRolloutRefWorker(Worker):
         fake_torch._C = _FakeTorchC(events, runtime_count)
         fake_distributed = _FakeDistributed(events)
         fake_torch.distributed = fake_distributed
+        fake_sitecustomize = types.ModuleType("sitecustomize")
+        effective_seed = derive_seed(13, "test-worker", 2)
+
+        def finalize_worker_cuda_seed(torch_module: object) -> int:
+            torch_module.cuda.manual_seed_all(effective_seed)
+            return effective_seed
+
+        fake_sitecustomize.finalize_worker_cuda_seed = finalize_worker_cuda_seed
         namespace: dict[str, object] = {
             "DictConfig": object,
         }
@@ -207,6 +220,9 @@ class ActorRolloutRefWorker(Worker):
                 {
                     "CUDA_VISIBLE_DEVICES": visible_devices,
                     "RQ0_SEED": "13",
+                    "STACKPILOT_EXPERIMENT_MODE": "1",
+                    "STACKPILOT_WORKER_ROLE": "test-worker",
+                    "STACKPILOT_GLOBAL_RANK": "2",
                 },
                 clear=False,
             ),
@@ -215,6 +231,7 @@ class ActorRolloutRefWorker(Worker):
                 {
                     "torch": fake_torch,
                     "torch.distributed": fake_distributed,
+                    "sitecustomize": fake_sitecustomize,
                 },
             ),
         ):
@@ -238,7 +255,7 @@ class ActorRolloutRefWorker(Worker):
                 "torch._C._cuda_getDeviceCount",
                 "cuda.device_count",
                 ("cuda.set_device", 0),
-                ("cuda.manual_seed_all", 15),
+                ("cuda.manual_seed_all", derive_seed(13, "test-worker", 2)),
                 "dist.is_initialized",
                 ("dist.init_process_group", "nccl"),
             ],
@@ -253,7 +270,7 @@ class ActorRolloutRefWorker(Worker):
                 "torch._C._cuda_getDeviceCount",
                 "cuda.device_count",
                 ("cuda.set_device", 0),
-                ("cuda.manual_seed_all", 15),
+                ("cuda.manual_seed_all", derive_seed(13, "test-worker", 2)),
                 "dist.is_initialized",
                 ("dist.init_process_group", "nccl"),
             ],

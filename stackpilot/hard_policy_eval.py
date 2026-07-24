@@ -8,9 +8,10 @@ import queue
 import re
 import threading
 import time
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator, TypeVar
+from typing import Any, TypeVar
 
 import pandas as pd
 import requests
@@ -37,6 +38,7 @@ from stackpilot.hard_rq0_contract import (
     validate_policy_seed,
     validate_policy_selection,
 )
+from stackpilot.observation_geometry import render_retrieval_observation
 from stackpilot.prepare_hard_rq0 import (
     DATA_MANIFEST_NAME,
     DATA_PREP_SCHEMA,
@@ -47,7 +49,6 @@ from stackpilot.prepare_hard_rq0 import (
 from stackpilot.react_agent_eval import (
     SYSTEM_PROMPT,
     file_digest,
-    format_results,
     model_identity,
 )
 from stackpilot.retrieval_clients import RetrievalClient
@@ -151,6 +152,7 @@ def evaluation_context(
         "faiss_gpu.py",
         "hard_policy_eval.py",
         "hard_rq0_contract.py",
+        "observation_geometry.py",
         "react_agent_eval.py",
         "retrieval_concurrency.py",
         "retrieval_clients.py",
@@ -292,14 +294,14 @@ def check_retriever(
             or int(payload.get("faiss_gpu_count", 0)) != 1
         ):
             raise RuntimeError(f"E5 retriever is not using one FAISS GPU: {payload}")
-        if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+        if payload.get("faiss_gpu_load_mode") != "paged-fp32-flat":
             raise RuntimeError(
                 f"E5 retriever is not using the memory-safe paged FAISS loader: "
                 f"{payload}"
             )
-        if payload.get("faiss_storage_dtype") != "float16":
+        if payload.get("faiss_storage_dtype") != "float32":
             raise RuntimeError(
-                f"E5 retriever is not using FP16 FAISS storage: {payload}"
+                f"E5 retriever is not using FP32 FAISS storage: {payload}"
             )
         if payload.get("gpu_search_serialized") is not True:
             raise RuntimeError(
@@ -423,13 +425,15 @@ def run_episode(
     cfg: dict[str, Any],
     topk: int,
     eval_seed: int,
+    tokenizer: Any,
 ) -> dict[str, Any]:
     messages: list[dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
     messages.append({"role": "user", "content": f"Question: {item['question']}"})
 
     support_titles = expected_support_title_strings(item)
     gold_titles = {normalize_title(title) for title in support_titles}
-    cumulative_titles: set[str] = set()
+    cumulative_retrieved_titles: set[str] = set()
+    cumulative_observed_titles: set[str] = set()
     previously_seen_titles: set[str] = set()
     turn_records: list[dict[str, Any]] = []
     searches: list[str] = []
@@ -469,32 +473,47 @@ def run_episode(
         results = retriever.search(value, topk)
         previous_query = searches[-1] if searches else None
         searches.append(value)
-        retrieved_titles = [str(result["title"]) for result in results]
+        rendered = render_retrieval_observation(
+            results,
+            tokenizer,
+            int(cfg["agent"]["observation_token_budget"]),
+        )
+        retrieved_titles = list(rendered.retrieved_titles)
+        observed_titles = list(rendered.observed_titles)
         normalized_retrieved = {normalize_title(title) for title in retrieved_titles}
-        cumulative_titles.update(normalized_retrieved)
-        matched = gold_titles & cumulative_titles
-        recall = len(matched) / max(1, len(gold_titles))
+        normalized_observed = {normalize_title(title) for title in observed_titles}
+        cumulative_retrieved_titles.update(normalized_retrieved)
+        cumulative_observed_titles.update(normalized_observed)
+        retrieved_recall = len(gold_titles & cumulative_retrieved_titles) / max(
+            1, len(gold_titles)
+        )
+        observed_recall = len(gold_titles & cumulative_observed_titles) / max(
+            1, len(gold_titles)
+        )
+        recall = observed_recall
         gain = recall - previous_recall
         new_support = sorted(
-            (gold_titles & normalized_retrieved) - previously_seen_titles
+            (gold_titles & normalized_observed) - previously_seen_titles
         )
         turn_records.append(
             {
                 "turn": len(searches),
                 "query": value,
                 "retrieved_titles": retrieved_titles,
+                "observed_titles": observed_titles,
+                "retrieved_support_title_recall": retrieved_recall,
+                "observed_support_title_recall": observed_recall,
                 "support_recall": recall,
                 "evidence_gain": gain,
                 "new_support_titles": new_support,
+                "observation_token_count": rendered.token_count,
+                "observation_truncated": int(rendered.truncated),
                 **query_features(str(item["question"]), value, previous_query),
             }
         )
-        previously_seen_titles.update(normalized_retrieved)
+        previously_seen_titles.update(normalized_observed)
         previous_recall = recall
-        observation = format_results(results, int(cfg["agent"]["result_snippet_chars"]))
-        messages.append(
-            {"role": "user", "content": f"<information>\n{observation}\n</information>"}
-        )
+        messages.append({"role": "user", "content": rendered.visible_text})
 
     if not prediction:
         messages.append(
@@ -527,11 +546,7 @@ def run_episode(
         raise RuntimeError(
             f"Hard-RQ0 evaluation row {item.get('id')!r} has no usable gold answers"
         )
-    em, f1 = (
-        (0.0, 0.0)
-        if protocol_failure
-        else best_answer_scores(prediction, answers)
-    )
+    em, f1 = (0.0, 0.0) if protocol_failure else best_answer_scores(prediction, answers)
     raw_text_em, raw_text_f1 = best_answer_scores(raw_text_prediction, answers)
     recalls = [float(record["support_recall"]) for record in turn_records]
     gains = [float(record["evidence_gain"]) for record in turn_records]
@@ -541,6 +556,11 @@ def run_episode(
     turn2_gain = gain_at(gains, 1)
     turn3_gain = gain_at(gains, 2)
     final_recall = recalls[-1] if recalls else 0.0
+    retrieved_final_recall = (
+        float(turn_records[-1]["retrieved_support_title_recall"])
+        if turn_records
+        else 0.0
+    )
     first_miss = turn1_recall < 1.0
     return {
         "question_id": str(item["id"]),
@@ -558,6 +578,8 @@ def run_episode(
         "raw_text_f1": raw_text_f1,
         "protocol_failure": protocol_failure,
         "invalid_action_count": invalid_action_count,
+        "retrieved_support_title_recall": retrieved_final_recall,
+        "observed_support_title_recall": final_recall,
         "support_recall": final_recall,
         "turn1_support_recall": turn1_recall,
         "turn2_support_recall": turn2_recall,
@@ -855,12 +877,9 @@ def prepare_result_cache(
         )
         valid_episode = episode_validation_error(row, max_search_turns) is None
         question_id = str(row.get("question_id", ""))
-        source_matches = (
-            expected_items is None
-            or (
-                question_id in expected_items
-                and episode_matches_source(row, expected_items[question_id])
-            )
+        source_matches = expected_items is None or (
+            question_id in expected_items
+            and episode_matches_source(row, expected_items[question_id])
         )
         matches = (
             key in expected_keys
@@ -993,6 +1012,14 @@ def main() -> None:
         for backend in backends
     }
     model = effective_model_name(cfg)
+    from transformers import AutoTokenizer
+
+    tokenizer_source = os.environ.get("MODEL_PATH") or cfg["llm"]["model"]
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_source,
+        local_files_only=True,
+        trust_remote_code=False,
+    )
     thread_state = threading.local()
     client_registry: list[OpenAI] = []
     client_registry_lock = threading.Lock()
@@ -1024,6 +1051,7 @@ def main() -> None:
                 cfg,
                 topk,
                 args.seed,
+                tokenizer,
             )
         except Exception as exc:
             raise RuntimeError(f"Hard-RQ0 episode failed: {key}") from exc

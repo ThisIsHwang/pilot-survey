@@ -94,6 +94,8 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$ROOT/upstream/Search-R1"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
   --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --search-r1-root "$ROOT/upstream/Search-R1"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \

@@ -4,7 +4,7 @@ set -Eeuo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 cd "$ROOT"
 PROFILE=${PROFILE:-pilot}
-SEEDS=${SEEDS:-"42"}
+SEEDS=${SEEDS:-"13 42 87"}
 if [[ -z ${LIMIT:-} ]]; then
   if [[ "$PROFILE" == smoke ]]; then LIMIT=20; else LIMIT=500; fi
 fi

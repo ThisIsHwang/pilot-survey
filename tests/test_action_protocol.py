@@ -85,10 +85,23 @@ class DummyRetriever:
         ]
 
 
+class DummyTokenizer:
+    def __call__(self, text: str, *, add_special_tokens: bool = False, **kwargs):
+        assert not add_special_tokens
+        return {"input_ids": [ord(character) for character in text]}
+
+    def decode(self, values, **kwargs) -> str:
+        return "".join(chr(int(value)) for value in values)
+
+
 def episode_config() -> dict[str, object]:
     return {
         "seed": 13,
-        "agent": {"max_search_turns": 1, "result_snippet_chars": 200},
+        "agent": {
+            "max_search_turns": 1,
+            "observation_token_budget": 500,
+            "result_snippet_chars": 200,
+        },
         "llm": {"temperature": 0.0, "max_tokens": 64},
         "retrieval": {"topk": 3},
     }
@@ -120,6 +133,7 @@ def test_malformed_final_answer_is_excluded_from_primary_metrics() -> None:
             episode_config(),
             topk=3,
             eval_seed=13,
+            tokenizer=DummyTokenizer(),
         )
 
     assert result["prediction"] == ""
@@ -135,22 +149,16 @@ def test_malformed_final_answer_is_excluded_from_primary_metrics() -> None:
 
     title_tamper = deepcopy(result)
     title_tamper["turns"][0]["retrieved_titles"] = ["Someone Else"]
-    assert "support titles are inconsistent" in str(
+    assert "observed titles are not a subset" in str(
         episode_validation_error(title_tamper, 1)
     )
 
     primary_tamper = dict(result, em=1.0, f1=1.0)
-    assert "em is inconsistent" in str(
-        episode_validation_error(primary_tamper, 1)
-    )
+    assert "em is inconsistent" in str(episode_validation_error(primary_tamper, 1))
     raw_tamper = dict(result, raw_text_f1=0.5)
-    assert "raw_text_f1 is inconsistent" in str(
-        episode_validation_error(raw_tamper, 1)
-    )
+    assert "raw_text_f1 is inconsistent" in str(episode_validation_error(raw_tamper, 1))
     count_tamper = dict(result, invalid_action_count=2)
-    assert "action counts exceed" in str(
-        episode_validation_error(count_tamper, 1)
-    )
+    assert "action counts exceed" in str(episode_validation_error(count_tamper, 1))
 
 
 def test_multiple_actions_are_retried_instead_of_becoming_a_search() -> None:
@@ -169,6 +177,7 @@ def test_multiple_actions_are_retried_instead_of_becoming_a_search() -> None:
             episode_config(),
             topk=3,
             eval_seed=13,
+            tokenizer=DummyTokenizer(),
         )
 
     assert result["prediction"] == "William Shakespeare"
@@ -224,6 +233,7 @@ def test_forced_final_search_is_failure_but_not_a_malformed_action() -> None:
             episode_config(),
             topk=3,
             eval_seed=13,
+            tokenizer=DummyTokenizer(),
         )
 
     assert result["prediction"] == ""

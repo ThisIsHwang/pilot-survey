@@ -158,6 +158,7 @@ fi
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_mixed.py" --search-r1-root "$SEARCH_R1"
 
@@ -183,9 +184,11 @@ TRAIN_SIGNATURE=$(
     "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
     "$ROOT/hard_rq0/patch_searchr1_validation.py" \
     "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+    "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
     "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
     "$ROOT/hard_rq0/sitecustomize.py" \
     "$ROOT/stackpilot/action_protocol.py" \
+    "$ROOT/stackpilot/observation_geometry.py" \
     "$ROOT/stackpilot/prepare_mixed_data.py" \
     "$ROOT/stackpilot/mixed_retriever_server.py" "$DATA_MANIFEST" \
     "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
@@ -198,8 +201,8 @@ from pathlib import Path
     learning_rate, rollout_memory, log_batch, actor_param_offload,
     actor_grad_offload, actor_optimizer_offload, ref_param_offload,
     mixed_patch, env_patch, seed_patch, worker_cuda_patch, validation_patch,
-    action_protocol_patch, reward_protocol_patch, sitecustomize,
-    action_protocol, mixed_preparer,
+    action_protocol_patch, observation_geometry_patch, reward_protocol_patch,
+    sitecustomize, action_protocol, observation_geometry, mixed_preparer,
     mixed_router, data_manifest, wrapper,
 ) = sys.argv[1:]
 def digest(path):
@@ -272,9 +275,11 @@ payload = {
         'worker_cuda': digest(worker_cuda_patch),
         'validation': digest(validation_patch),
         'action_protocol_patch': digest(action_protocol_patch),
+        'observation_geometry_patch': digest(observation_geometry_patch),
         'reward_protocol_patch': digest(reward_protocol_patch),
         'sitecustomize': digest(sitecustomize),
         'action_protocol': digest(action_protocol),
+        'observation_geometry': digest(observation_geometry),
         'mixed_preparer': digest(mixed_preparer),
         'mixed_router': digest(mixed_router),
         'wrapper': digest(wrapper),
@@ -432,6 +437,9 @@ export CUDA_VISIBLE_DEVICES=$TRAIN_GPUS
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
 export TOKENIZERS_PARALLELISM=false
 export RQ0_SEED=$SEED
+export STACKPILOT_EXPERIMENT_MODE=1
+export STACKPILOT_WORKER_ROLE=driver
+export STACKPILOT_GLOBAL_RANK=0
 export PYTHONHASHSEED=$SEED
 export SEARCH_R1_MIXED_MODE=$MIXED_MODE
 export SEARCH_R1_N_AGENT=$N_AGENT

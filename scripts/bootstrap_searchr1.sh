@@ -92,6 +92,8 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$SEARCH_R1"
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
   --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
+  --search-r1-root "$SEARCH_R1"
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --search-r1-root "$SEARCH_R1"
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
@@ -113,9 +115,11 @@ CORE_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
   --input "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_validation.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --input "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --input "$ROOT/stackpilot/action_protocol.py" \
+  --input "$ROOT/stackpilot/observation_geometry.py" \
   --input "$ROOT/scripts/lib/bootstrap_env.sh" \
   --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
   --value "uv=0.11.30" --value "torch_backend=cu121" \

@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import tempfile
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime
@@ -14,9 +15,16 @@ from pathlib import Path
 from typing import Any
 
 from stackpilot.common import ensure_dir, load_config, write_jsonl
+from stackpilot.hard_rq0_contract import normalize_title
+from stackpilot.retrieval_clients import normalize_document
 
 DATA_MANIFEST_NAME = ".hard-rq0-data-manifest.json"
-DATA_PREP_SCHEMA = 5
+DATA_PREP_SCHEMA = 6
+SPLIT_CONTRACT_SCHEMA = 2
+QUESTION_NORMALIZATION_ALGORITHM = "nfkc-lower-whitespace-v1"
+TITLE_COVERAGE_SCHEMA = 1
+TITLE_NORMALIZATION_ALGORITHM = "hard-rq0-normalize-title-v1"
+GOLD_TITLE_CORPUS_POLICY = "retain-and-report-all-gold"
 PINNED_REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
 TRAIN_ROLE = "trainer_train"
 VALIDATION_ROLE = "trainer_validation"
@@ -179,6 +187,12 @@ def to_searchr1_row(item: dict[str, Any]) -> dict[str, Any]:
         "index": item["id"],
         "question_id": item["id"],
         "support_titles": item["support_titles"],
+        "gold_support_title_count": item["gold_support_title_count"],
+        "corpus_covered_support_titles": item["corpus_covered_support_titles"],
+        "corpus_covered_support_title_count": item[
+            "corpus_covered_support_title_count"
+        ],
+        "gold_title_corpus_coverage": item["gold_title_corpus_coverage"],
     }
     routing_backend = str(item.get("routing_backend", "")).strip().lower()
     if routing_backend:
@@ -235,6 +249,39 @@ def question_id_fingerprint(identifiers: Iterable[Any]) -> dict[str, Any]:
     }
 
 
+def normalize_question(value: Any) -> str:
+    return " ".join(unicodedata.normalize("NFKC", str(value)).lower().split())
+
+
+def normalized_question_fingerprint(
+    rows: Iterable[dict[str, Any]],
+) -> dict[str, Any]:
+    values = [normalize_question(row.get("question", "")) for row in rows]
+    if any(not value for value in values):
+        raise RuntimeError("Cannot fingerprint an empty normalized question")
+    fingerprint = question_id_fingerprint(values)
+    fingerprint["algorithm"] = QUESTION_NORMALIZATION_ALGORITHM
+    return fingerprint
+
+
+def _valid_normalized_question_fingerprint(
+    value: Any,
+    *,
+    expected_count: int | None = None,
+) -> bool:
+    return bool(
+        isinstance(value, dict)
+        and value.get("algorithm") == QUESTION_NORMALIZATION_ALGORITHM
+        and (expected_count is None or value.get("count") == expected_count)
+        and value.get("unique_count") == value.get("count")
+        and all(
+            isinstance(value.get(key), str)
+            and re.fullmatch(r"[0-9a-f]{64}", value[key]) is not None
+            for key in ("ordered_sha256", "set_sha256")
+        )
+    )
+
+
 def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
     data_cfg = cfg["data"]
     revision = str(data_cfg.get("revision") or "").strip()
@@ -243,6 +290,7 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
             "data.revision must be an immutable 40-character "
             f"Hugging Face commit SHA; got {revision!r}"
         )
+    corpus_path = Path(str(cfg["assets"]["corpus_path"])).resolve()
     datasets = [str(value) for value in data_cfg["datasets"]]
     if not datasets or len(set(datasets)) != len(datasets):
         raise ValueError(f"data.datasets must be nonempty and unique; got {datasets}")
@@ -266,7 +314,7 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
             "key or give both the same value"
         )
     # Accept the old spelling so existing server configs can be regenerated
-    # safely, but write only the unambiguous trainer-dev name to schema 5.
+    # safely, but write only the unambiguous trainer-dev name to the manifest.
     validation_count = int(
         canonical_dev_count
         if canonical_dev_count is not None
@@ -278,6 +326,14 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
             f"got train={train_count}, validation={validation_count}, "
             f"eval={eval_count}"
         )
+    coverage_policy = str(
+        data_cfg.get("gold_title_corpus_policy", GOLD_TITLE_CORPUS_POLICY)
+    ).strip()
+    if coverage_policy != GOLD_TITLE_CORPUS_POLICY:
+        raise ValueError(
+            "data.gold_title_corpus_policy must be "
+            f"{GOLD_TITLE_CORPUS_POLICY!r}; got {coverage_policy!r}"
+        )
     return {
         "schema": DATA_PREP_SCHEMA,
         "repo_id": str(data_cfg["repo_id"]),
@@ -288,6 +344,9 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
         "eval_examples_per_dataset": eval_count,
         "split_train": str(data_cfg["split_train"]),
         "split_eval": str(data_cfg["split_eval"]),
+        "gold_title_corpus_policy": coverage_policy,
+        "title_normalization_algorithm": TITLE_NORMALIZATION_ALGORITHM,
+        "corpus_path": str(corpus_path),
         "seed": int(cfg["seed"]),
         "prompt_sha256": hashlib.sha256(PROMPT.encode("utf-8")).hexdigest(),
         "preparer_sha256": file_sha256(Path(__file__)),
@@ -401,7 +460,10 @@ def _split_contract_valid_unchecked(
     contract: Any,
     request: dict[str, Any],
 ) -> bool:
-    if not isinstance(contract, dict) or contract.get("schema") != 1:
+    if (
+        not isinstance(contract, dict)
+        or contract.get("schema") != SPLIT_CONTRACT_SCHEMA
+    ):
         return False
     roles = contract.get("roles")
     if not isinstance(roles, dict) or set(roles) != {
@@ -431,6 +493,11 @@ def _split_contract_valid_unchecked(
             expected_count=expected_total,
         ):
             return False
+        if not _valid_normalized_question_fingerprint(
+            role_record.get("normalized_questions"),
+            expected_count=expected_total,
+        ):
+            return False
         for offset, dataset_name in enumerate(request["datasets"]):
             dataset_record = datasets.get(dataset_name)
             if not isinstance(dataset_record, dict):
@@ -453,13 +520,33 @@ def _split_contract_valid_unchecked(
                 or dataset_record.get("selection")
                 != {"start": start, "stop": start + count}
                 or dataset_record.get("count") != count
+                or dataset_record.get("requested_source_split") != source_split
+                or dataset_record.get("actual_source_split") != source_split
+                or dataset_record.get("requested_count") != count
+                or dataset_record.get("actual_count") != count
+                or not isinstance(dataset_record.get("source_available_count"), int)
+                or dataset_record["source_available_count"] < start + count
                 or not _valid_question_id_fingerprint(
                     dataset_record.get("question_ids"),
                     expected_count=count,
                 )
+                or not _valid_normalized_question_fingerprint(
+                    dataset_record.get("normalized_questions"),
+                    expected_count=count,
+                )
             ):
                 return False
-    return True
+    combined_count = sum(per_dataset_counts.values()) * len(request["datasets"])
+    return bool(
+        _valid_question_id_fingerprint(
+            contract.get("combined_question_ids"),
+            expected_count=combined_count,
+        )
+        and _valid_normalized_question_fingerprint(
+            contract.get("combined_normalized_questions"),
+            expected_count=combined_count,
+        )
+    )
 
 
 def split_contract_valid(contract: Any, request: dict[str, Any]) -> bool:
@@ -467,6 +554,88 @@ def split_contract_valid(contract: Any, request: dict[str, Any]) -> bool:
         return _split_contract_valid_unchecked(contract, request)
     except (KeyError, TypeError, ValueError):
         return False
+
+
+def _coverage_summary_valid(value: Any, expected_rows: int) -> bool:
+    if not isinstance(value, dict) or value.get("rows") != expected_rows:
+        return False
+    integer_fields = (
+        "rows_zero",
+        "rows_partial",
+        "rows_full",
+        "gold_titles",
+        "corpus_covered_gold_titles",
+    )
+    if any(
+        not isinstance(value.get(field), int) or value[field] < 0
+        for field in integer_fields
+    ):
+        return False
+    if value["rows_zero"] + value["rows_partial"] + value["rows_full"] != expected_rows:
+        return False
+    if value["corpus_covered_gold_titles"] > value["gold_titles"]:
+        return False
+    mean_coverage = value.get("mean_gold_title_corpus_coverage")
+    return bool(isinstance(mean_coverage, (int, float)) and 0.0 <= mean_coverage <= 1.0)
+
+
+def support_title_coverage_valid(
+    value: Any,
+    request: dict[str, Any],
+    split_contract: dict[str, Any],
+) -> bool:
+    if not isinstance(value, dict) or value.get("schema") != TITLE_COVERAGE_SCHEMA:
+        return False
+    if value.get("policy") != request.get("gold_title_corpus_policy"):
+        return False
+    if value.get("title_normalization_algorithm") != request.get(
+        "title_normalization_algorithm"
+    ):
+        return False
+    corpus_path = Path(str(value.get("corpus_path") or ""))
+    if (
+        corpus_path.resolve() != Path(request["corpus_path"]).resolve()
+        or not corpus_path.is_file()
+        or value.get("corpus_size") != corpus_path.stat().st_size
+        or not isinstance(value.get("corpus_rows_scanned"), int)
+        or value["corpus_rows_scanned"] < 1
+    ):
+        return False
+    required = value.get("required_unique_normalized_titles")
+    matched = value.get("matched_unique_normalized_titles")
+    if (
+        not isinstance(required, int)
+        or required < 1
+        or not isinstance(matched, int)
+        or not 0 <= matched <= required
+    ):
+        return False
+    roles = value.get("roles")
+    if not isinstance(roles, dict) or set(roles) != {
+        TRAIN_ROLE,
+        VALIDATION_ROLE,
+        FINAL_EVAL_ROLE,
+    }:
+        return False
+    for role in (TRAIN_ROLE, VALIDATION_ROLE, FINAL_EVAL_ROLE):
+        role_record = roles.get(role)
+        split_role = split_contract["roles"][role]
+        if not isinstance(role_record, dict) or not _coverage_summary_valid(
+            role_record.get("summary"), int(split_role["count"])
+        ):
+            return False
+        datasets = role_record.get("datasets")
+        if not isinstance(datasets, dict) or set(datasets) != set(request["datasets"]):
+            return False
+        if any(
+            not _coverage_summary_valid(
+                datasets.get(dataset_name),
+                int(split_role["datasets"][dataset_name]["actual_count"]),
+            )
+            for dataset_name in request["datasets"]
+        ):
+            return False
+    return True
 
 
 def _artifact_question_ids_match_contract(
@@ -510,6 +679,10 @@ def prepared_cache_valid(
         return False
     contract = manifest.get("split_contract")
     if not split_contract_valid(contract, request):
+        return False
+    if not support_title_coverage_valid(
+        manifest.get("support_title_coverage"), request, contract
+    ):
         return False
     records = manifest.get("artifacts")
     expected = expected_artifacts(request)
@@ -564,12 +737,115 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _normalized_support_titles(row: dict[str, Any]) -> list[tuple[str, str]]:
+    result: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw_title in row.get("support_titles") or []:
+        original = str(raw_title).strip()
+        normalized = normalize_title(original)
+        if original and normalized and normalized not in seen:
+            seen.add(normalized)
+            result.append((original, normalized))
+    return result
+
+
+def find_required_corpus_titles(
+    corpus_path: Path,
+    required_titles: set[str],
+) -> tuple[set[str], int]:
+    if not corpus_path.is_file():
+        raise RuntimeError(f"Missing pinned wiki-18 corpus: {corpus_path}")
+    remaining = set(required_titles)
+    found: set[str] = set()
+    scanned = 0
+    if not remaining:
+        return found, scanned
+    with corpus_path.open("r", encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            scanned += 1
+            try:
+                document = json.loads(line)
+            except json.JSONDecodeError as error:
+                raise RuntimeError(
+                    f"Invalid wiki-18 JSON on line {line_number}: {corpus_path}"
+                ) from error
+            if not isinstance(document, dict):
+                raise RuntimeError(
+                    f"wiki-18 line {line_number} is not an object: {corpus_path}"
+                )
+            title, _ = normalize_document(document)
+            normalized = normalize_title(title)
+            if normalized in remaining:
+                remaining.remove(normalized)
+                found.add(normalized)
+                if not remaining:
+                    break
+    return found, scanned
+
+
+def annotate_gold_title_coverage(
+    rows: list[dict[str, Any]],
+    corpus_titles: set[str],
+) -> None:
+    for row in rows:
+        pairs = _normalized_support_titles(row)
+        covered = [original for original, title in pairs if title in corpus_titles]
+        total = len(pairs)
+        matched = len(covered)
+        row["gold_support_title_count"] = total
+        row["corpus_covered_support_titles"] = covered
+        row["corpus_covered_support_title_count"] = matched
+        row["gold_title_corpus_coverage"] = matched / total if total else 0.0
+
+
+def title_coverage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total_gold = sum(int(row["gold_support_title_count"]) for row in rows)
+    matched_gold = sum(int(row["corpus_covered_support_title_count"]) for row in rows)
+    return {
+        "rows": len(rows),
+        "rows_zero": sum(
+            int(row["corpus_covered_support_title_count"]) == 0 for row in rows
+        ),
+        "rows_partial": sum(
+            0
+            < int(row["corpus_covered_support_title_count"])
+            < int(row["gold_support_title_count"])
+            for row in rows
+        ),
+        "rows_full": sum(
+            int(row["corpus_covered_support_title_count"])
+            == int(row["gold_support_title_count"])
+            for row in rows
+        ),
+        "gold_titles": total_gold,
+        "corpus_covered_gold_titles": matched_gold,
+        "mean_gold_title_corpus_coverage": (
+            sum(float(row["gold_title_corpus_coverage"]) for row in rows) / len(rows)
+            if rows
+            else 0.0
+        ),
+    }
+
+
 def validate_unique_rows(rows: list[dict[str, Any]], label: str) -> None:
     identifiers = [str(row.get("id", "")).strip() for row in rows]
     if any(not identifier for identifier in identifiers):
         raise RuntimeError(f"{label} contains an empty question ID")
     if len(set(identifiers)) != len(identifiers):
         raise RuntimeError(f"{label} contains duplicate question IDs")
+    normalized = [normalize_question(row.get("question", "")) for row in rows]
+    if any(not question for question in normalized):
+        raise RuntimeError(f"{label} contains an empty normalized question")
+    duplicates = [
+        question for question, count in Counter(normalized).items() if count > 1
+    ]
+    if duplicates:
+        raise RuntimeError(
+            f"{label} contains duplicate normalized questions; "
+            f"examples={duplicates[:10]}"
+        )
 
 
 def validate_disjoint_rows(
@@ -586,6 +862,14 @@ def validate_disjoint_rows(
             f"{left_label} and {right_label} question IDs overlap; "
             f"examples={overlap[:10]}"
         )
+    left_questions = {normalize_question(row.get("question", "")) for row in left}
+    right_questions = {normalize_question(row.get("question", "")) for row in right}
+    question_overlap = sorted((left_questions & right_questions) - {""})
+    if question_overlap:
+        raise RuntimeError(
+            f"{left_label} and {right_label} normalized questions overlap; "
+            f"examples={question_overlap[:10]}"
+        )
 
 
 def validate_support_titles(
@@ -594,7 +878,7 @@ def validate_support_titles(
     purpose: str,
     work_dir: Path,
 ) -> None:
-    if purpose not in {"validation", "evaluation"}:
+    if purpose not in {"training", "validation", "evaluation"}:
         raise ValueError(f"Unsupported support-title validation purpose: {purpose!r}")
     missing_rows = [row for row in rows if not row["support_titles"]]
     diagnostic_path = (
@@ -643,6 +927,7 @@ def prepare(config_path: str) -> None:
             VALIDATION_ROLE: {},
             FINAL_EVAL_ROLE: {},
         }
+        selected_datasets: dict[str, dict[str, list[dict[str, Any]]]] = {}
         summary_lines = [f"source_revision={revision}"]
 
         for offset, dataset_name in enumerate(request["datasets"]):
@@ -731,6 +1016,12 @@ def prepare(config_path: str) -> None:
                 f"{dataset_name} eval",
             )
             validate_support_titles(
+                train_rows,
+                dataset_name,
+                "training",
+                work_dir,
+            )
+            validate_support_titles(
                 validation_rows,
                 dataset_name,
                 "validation",
@@ -742,19 +1033,11 @@ def prepare(config_path: str) -> None:
                 "evaluation",
                 work_dir,
             )
-
-            dataset_dir = ensure_dir(staging_data_root / dataset_name)
-            write_jsonl(dataset_dir / "train.jsonl", train_rows)
-            write_jsonl(dataset_dir / "dev.jsonl", validation_rows)
-            shutil.copyfile(
-                dataset_dir / "dev.jsonl",
-                dataset_dir / "validation.jsonl",
-            )
-            write_jsonl(dataset_dir / "final_eval.jsonl", eval_rows)
-            shutil.copyfile(
-                dataset_dir / "final_eval.jsonl",
-                dataset_dir / "eval.jsonl",
-            )
+            selected_datasets[dataset_name] = {
+                TRAIN_ROLE: train_rows,
+                VALIDATION_ROLE: validation_rows,
+                FINAL_EVAL_ROLE: eval_rows,
+            }
             all_train_rows.extend(train_rows)
             all_validation_rows.extend(validation_rows)
             all_eval_rows.extend(eval_rows)
@@ -774,43 +1057,48 @@ def prepare(config_path: str) -> None:
             )
             contract_datasets[TRAIN_ROLE][dataset_name] = {
                 "source_split": train_split_name,
+                "requested_source_split": train_split_name,
+                "actual_source_split": train_split_name,
                 "shuffle_seed": train_shuffle_seed,
                 "selection": {"start": 0, "stop": train_count},
                 "count": len(train_ids),
+                "requested_count": train_count,
+                "actual_count": len(train_ids),
+                "source_available_count": len(train_split),
                 "question_ids": question_id_fingerprint(train_ids),
+                "normalized_questions": normalized_question_fingerprint(train_rows),
             }
             contract_datasets[VALIDATION_ROLE][dataset_name] = {
                 "source_split": train_split_name,
+                "requested_source_split": train_split_name,
+                "actual_source_split": train_split_name,
                 "shuffle_seed": train_shuffle_seed,
                 "selection": {
                     "start": train_count,
                     "stop": train_count + validation_count,
                 },
                 "count": len(validation_ids),
+                "requested_count": validation_count,
+                "actual_count": len(validation_ids),
+                "source_available_count": len(train_split),
                 "question_ids": question_id_fingerprint(validation_ids),
+                "normalized_questions": normalized_question_fingerprint(
+                    validation_rows
+                ),
             }
             contract_datasets[FINAL_EVAL_ROLE][dataset_name] = {
                 "source_split": eval_split_name,
+                "requested_source_split": eval_split_name,
+                "actual_source_split": eval_split_name,
                 "shuffle_seed": eval_shuffle_seed,
                 "selection": {"start": 0, "stop": eval_count},
                 "count": len(eval_ids),
+                "requested_count": eval_count,
+                "actual_count": len(eval_ids),
+                "source_available_count": len(eval_split),
                 "question_ids": question_id_fingerprint(eval_ids),
+                "normalized_questions": normalized_question_fingerprint(eval_rows),
             }
-
-            train_datasets.append(
-                Dataset.from_list([to_searchr1_row(row) for row in train_rows])
-            )
-            validation_datasets.append(
-                Dataset.from_list([to_searchr1_row(row) for row in validation_rows])
-            )
-            summary_lines.append(
-                f"{dataset_name}: train={len(train_rows)}, "
-                f"trainer_dev={len(validation_rows)}, "
-                f"final_eval={len(eval_rows)}, "
-                f"final_eval_split={eval_split_name}, "
-                "mean_support_titles="
-                f"{sum(len(x['support_titles']) for x in eval_rows) / len(eval_rows):.2f}"
-            )
 
         validate_unique_rows(all_train_rows, "combined hard-RQ0 train")
         validate_unique_rows(all_validation_rows, "combined hard-RQ0 validation")
@@ -833,6 +1121,87 @@ def prepare(config_path: str) -> None:
             "combined hard-RQ0 validation",
             "combined hard-RQ0 eval",
         )
+
+        rows_by_role = {
+            TRAIN_ROLE: all_train_rows,
+            VALIDATION_ROLE: all_validation_rows,
+            FINAL_EVAL_ROLE: all_eval_rows,
+        }
+        required_titles = {
+            normalized
+            for rows in rows_by_role.values()
+            for row in rows
+            for _, normalized in _normalized_support_titles(row)
+        }
+        corpus_path = Path(request["corpus_path"])
+        matched_titles, corpus_rows_scanned = find_required_corpus_titles(
+            corpus_path,
+            required_titles,
+        )
+        for rows in rows_by_role.values():
+            annotate_gold_title_coverage(rows, matched_titles)
+
+        support_title_coverage = {
+            "schema": TITLE_COVERAGE_SCHEMA,
+            "policy": GOLD_TITLE_CORPUS_POLICY,
+            "title_normalization_algorithm": TITLE_NORMALIZATION_ALGORITHM,
+            "corpus_path": str(corpus_path),
+            "corpus_size": corpus_path.stat().st_size,
+            "corpus_rows_scanned": corpus_rows_scanned,
+            "required_unique_normalized_titles": len(required_titles),
+            "matched_unique_normalized_titles": len(matched_titles),
+            "roles": {},
+        }
+        for role, rows in rows_by_role.items():
+            support_title_coverage["roles"][role] = {
+                "summary": title_coverage_summary(rows),
+                "datasets": {
+                    dataset_name: title_coverage_summary(
+                        selected_datasets[dataset_name][role]
+                    )
+                    for dataset_name in request["datasets"]
+                },
+            }
+
+        for dataset_name in request["datasets"]:
+            train_rows = selected_datasets[dataset_name][TRAIN_ROLE]
+            validation_rows = selected_datasets[dataset_name][VALIDATION_ROLE]
+            eval_rows = selected_datasets[dataset_name][FINAL_EVAL_ROLE]
+            dataset_dir = ensure_dir(staging_data_root / dataset_name)
+            write_jsonl(dataset_dir / "train.jsonl", train_rows)
+            write_jsonl(dataset_dir / "dev.jsonl", validation_rows)
+            shutil.copyfile(
+                dataset_dir / "dev.jsonl",
+                dataset_dir / "validation.jsonl",
+            )
+            write_jsonl(dataset_dir / "final_eval.jsonl", eval_rows)
+            shutil.copyfile(
+                dataset_dir / "final_eval.jsonl",
+                dataset_dir / "eval.jsonl",
+            )
+            train_datasets.append(
+                Dataset.from_list([to_searchr1_row(row) for row in train_rows])
+            )
+            validation_datasets.append(
+                Dataset.from_list([to_searchr1_row(row) for row in validation_rows])
+            )
+            eval_coverage = title_coverage_summary(eval_rows)
+            summary_lines.append(
+                f"{dataset_name}: train={len(train_rows)}, "
+                f"trainer_dev={len(validation_rows)}, "
+                f"final_eval={len(eval_rows)}, "
+                f"final_eval_split={request['split_eval']}, "
+                "mean_support_titles="
+                f"{sum(len(x['support_titles']) for x in eval_rows) / len(eval_rows):.2f}, "
+                "mean_gold_title_corpus_coverage="
+                f"{eval_coverage['mean_gold_title_corpus_coverage']:.4f}"
+            )
+        summary_lines.append(
+            "gold_title_corpus_policy="
+            f"{GOLD_TITLE_CORPUS_POLICY}; "
+            f"matched_unique_titles={len(matched_titles)}/{len(required_titles)}"
+        )
+
         write_jsonl(staging_data_root / "final_eval.jsonl", all_eval_rows)
         shutil.copyfile(
             staging_data_root / "final_eval.jsonl",
@@ -875,21 +1244,36 @@ def prepare(config_path: str) -> None:
             }
         )
         split_contract = {
-            "schema": 1,
+            "schema": SPLIT_CONTRACT_SCHEMA,
+            "combined_question_ids": question_id_fingerprint(
+                all_train_ids + all_validation_ids + all_eval_ids
+            ),
+            "combined_normalized_questions": normalized_question_fingerprint(
+                all_train_rows + all_validation_rows + all_eval_rows
+            ),
             "roles": {
                 TRAIN_ROLE: {
                     "count": len(all_train_ids),
                     "question_ids": question_id_fingerprint(train_parquet_ids),
+                    "normalized_questions": normalized_question_fingerprint(
+                        all_train_rows
+                    ),
                     "datasets": contract_datasets[TRAIN_ROLE],
                 },
                 VALIDATION_ROLE: {
                     "count": len(all_validation_ids),
                     "question_ids": question_id_fingerprint(all_validation_ids),
+                    "normalized_questions": normalized_question_fingerprint(
+                        all_validation_rows
+                    ),
                     "datasets": contract_datasets[VALIDATION_ROLE],
                 },
                 FINAL_EVAL_ROLE: {
                     "count": len(all_eval_ids),
                     "question_ids": question_id_fingerprint(all_eval_ids),
+                    "normalized_questions": normalized_question_fingerprint(
+                        all_eval_rows
+                    ),
                     "datasets": contract_datasets[FINAL_EVAL_ROLE],
                 },
             },
@@ -912,6 +1296,7 @@ def prepare(config_path: str) -> None:
         "created_at": datetime.now(UTC).isoformat(),
         "request": request,
         "split_contract": split_contract,
+        "support_title_coverage": support_title_coverage,
         "artifacts": records,
     }
     atomic_write_json(manifest_path, manifest)
@@ -1114,6 +1499,9 @@ def _validate_training_parquet(
             source_path,
             seed,
             derived_mode,
+            source_rows=int(
+                manifest["split_contract"]["roles"][expected_role]["count"]
+            ),
         )
         if request != expected_request or not mixed_cache_valid(path, expected_request):
             raise RuntimeError(

@@ -15,7 +15,9 @@ The first RQ0 used a small HotpotQA context corpus, top-k 10, and usually one se
   split after the 5,000 training rows (1,000 total)
 - final evaluation: 500 rows per dataset from the official pinned development
   split, reserved exclusively for reporting (1,000 total)
-- primary analysis: gain over base Qwen and home-backend excess gain
+- primary analysis: all-question, top-k 3 observed support-title recall,
+  summarized as equal-weight home-backend excess across specialist×dataset
+  strata within each training seed
 - diagnostic subset: questions that are difficult on both retrievers at base-Qwen turn 1 but recoverable by that same fixed base policy by turn 3
 
 The central difference-in-differences interaction is:
@@ -100,19 +102,21 @@ appears later as a ten-minute NCCL/FSDP broadcast timeout.
 
 ### Search-R1 rollout limits
 
-Specialist training uses the retrieval-context geometry from the pinned
-Search-R1 recipe: a 4096-token prompt limit, 500-token generated responses,
-a 2048-token initial prompt, at most 500 retrieved-content tokens per search,
-four search turns, and top-k 3 retrieval.
+Training and Hard-RQ0 evaluation share one token-budget renderer: a 4096-token
+prompt limit, 500-token generated responses, a 2048-token initial prompt, and
+exactly 500 tokenizer tokens for the complete ranked retrieval bundle on each
+search turn. The budget is total, not per document, and is fixed for top-k 3,
+5, and 10. Increasing top-k therefore changes retrieval depth without silently
+increasing the amount of context the policy can read. Later-ranked document
+titles can be retrieved but truncated before reaching the model.
 
-The upstream message
-`[WARNING] OBSERVATION TOO LONG, CONSIDER CHANGING YOUR CONFIG, N & 500` is
-expected when any retrieval result in a rollout batch exceeds that budget. The
-pinned implementation concatenates ranked passages and keeps the first 500
-tokens; it does not indicate a failed or stalled training step. Raising the
-limit merely to silence the warning would change the paper-aligned protocol.
-The separate Stage-2 transfer pilot intentionally retains its historical
-top-k-10, three-turn protocol.
+Every episode records both `retrieved_support_title_recall` over all returned
+titles and `observed_support_title_recall` over titles whose complete headers
+fit in the 500-token prompt. The historical `support_recall` and turn-specific
+aliases now mean observed support-title recall. The observed metric is the
+primary evidence endpoint; the retrieved metric diagnoses ranking independently
+of context truncation. Stage-2 uses the same bounded renderer while retaining
+its historical top-k-10, three-turn protocol.
 
 ### Action and reward protocol
 
@@ -138,9 +142,10 @@ evaluation. `train_specialist.sh` defaults to
 first restoring the canonical answer-only trainer. The mode, all three reward
 weights, and both reward patch hashes are bound into the checkpoint signature,
 so an evidence-patched shared Search-R1 tree cannot contaminate a later
-answer-only run. EXP-005 also consumes the retriever's structured
-executed-search count and retrieved titles. Prompt examples and model-authored
-fake control blocks therefore cannot add a search or evidence hit. A malformed
+answer-only run. EXP-005 also consumes the structured executed-search count
+and titles actually visible after observation truncation. Prompt examples,
+truncated documents, and model-authored fake control blocks therefore cannot
+add a search or evidence hit. A malformed
 terminal action receives no answer/evidence bonus (while costs from searches
 that actually ran still apply), and an empty response fails immediately instead
 of writing reward at index `-1`. If the accumulated trajectory was truncated
@@ -190,16 +195,30 @@ bash hard_rq0/prepare_data.sh
 cat work/hard_rq0/data/SUMMARY.txt
 ```
 
-No new human annotation is created. The script uses existing answers and supporting-document metadata. It stops with diagnostic examples if a dataset revision does not expose supporting titles in a recognized format.
+No new human annotation is created. The script uses existing answers and
+supporting-document metadata. It stops with diagnostic examples if a dataset
+revision does not expose supporting titles in a recognized format. Requested
+splits and counts are strict: there is no automatic split fallback or silent
+shortening, including smoke runs. IDs and NFKC/lowercase/whitespace-normalized
+questions must be unique within and disjoint across trainer train, trainer dev,
+and final evaluation.
 Training and trainer development rows are disjoint deterministic slices of the
 pinned source training split. The official pinned development split is never
 passed to the trainer and is reserved for final reporting. The canonical files
 are `work/hard_rq0/searchr1/train.parquet`,
 `work/hard_rq0/searchr1/dev.parquet`, and
 `work/hard_rq0/data/final_eval.jsonl`. Their manifest records each artifact's
-role, source split, question-ID hash, and file SHA-256. Training and evaluation
+role, requested and actual source split/count, ID and normalized-question
+hashes, and file SHA-256. Training and evaluation
 entry points fail closed if an input has the wrong manifested role; changing a
 manifest also invalidates the matching checkpoint signature.
+
+Gold support titles are normalized exactly as in evaluation and checked
+against the pinned wiki-18 corpus in one streaming pass. Zero- and
+partial-coverage questions are retained under the fixed
+`retain-and-report-all-gold` policy; missing titles remain in the denominator.
+Per-row coverage and role/dataset coverage distributions are committed to the
+data manifest so corpus limitations are visible rather than selection-filtered.
 
 ### 4. Start full-wiki retrieval servers
 
@@ -224,7 +243,8 @@ LIMIT=20 \
 
 Each raw episode stores:
 
-- support recall after turns 1, 2, and 3
+- retrieved and actually observed support-title recall
+- observed support-title recall after turns 1, 2, and 3
 - marginal evidence gain at turns 2 and 3
 - recovery and full recovery after a first-turn miss
 - generated queries and retrieved titles
@@ -320,15 +340,19 @@ For each dataset and top-k, a question enters this subset when:
 
 This removes questions that E5 already solves immediately and questions that the fixed base policy cannot recover. Specialist outcomes never select the subset, avoiding outcome-conditioned specialization estimates. All-question results remain primary and are always reported.
 
-## Go / no-go rule
+## Primary decision and secondary analyses
 
-Continue only when, across three specialist seeds:
+There is one pre-registered primary endpoint: the all-question, top-k 3
+observed support-title-recall home-backend excess. Question cells are averaged
+within each specialist×dataset stratum, strata are equally averaged within
+each training seed, and uncertainty is a Student-t 95% interval over those seed
+means. Every seed value is printed.
 
-- matched-hard home-backend excess is at least 0.05 on support recall, turn-2/3 marginal evidence gain, or recovery;
-- the crossed seed/question bootstrap 95% interval is above zero; and
-- turn-1 interaction is small while turn-2/3 interaction becomes positive.
-
-If the interaction remains below 0.03, reject the hidden-retriever specialization hypothesis for this setup. A large gain over base on both backends instead supports a general search/reasoning or hard-retriever curriculum effect.
+Three seeds are exploratory and cannot produce a confirmatory GO; at least
+eight predeclared training seeds are required for that label. Other metrics,
+top-k values, datasets, specialists, and the matched-hard subset are secondary.
+They use exact one-sided seed sign-flip p-values with a single Holm correction
+family. Crossed seed/question bootstrap intervals remain descriptive only.
 
 ## Overrides
 

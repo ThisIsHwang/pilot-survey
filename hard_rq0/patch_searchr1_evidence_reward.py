@@ -17,9 +17,9 @@ except ModuleNotFoundError:  # direct `python hard_rq0/...py` execution
     from patch_searchr1_reward_protocol import MARKER as TERMINAL_REWARD_MARKER
     from patch_searchr1_reward_protocol import patch as patch_terminal_reward
 
-MARKER = "# STACKPILOT_EVIDENCE_REWARD_V3"
+MARKER = "# STACKPILOT_EVIDENCE_REWARD_V4"
 
-HELPER = """# STACKPILOT_EVIDENCE_REWARD_V3
+HELPER = """# STACKPILOT_EVIDENCE_REWARD_V4
 def _normalize_evidence_title(value):
     text = unicodedata.normalize("NFKC", str(value)).replace("_", " ").strip()
     text = text.strip("\\\"'").lower()
@@ -53,16 +53,16 @@ EVIDENCE_SCORE = """            extra_info = data_item.non_tensor_batch.get('ext
                 if isinstance(extra_info, dict)
                 else []
             )
-            retrieved_titles = data_item.non_tensor_batch.get(
-                'stackpilot_retrieved_titles'
+            observed_titles = data_item.non_tensor_batch.get(
+                'stackpilot_observed_titles'
             )
-            if isinstance(retrieved_titles, np.ndarray):
-                retrieved_titles = retrieved_titles.tolist()
-            elif isinstance(retrieved_titles, tuple):
-                retrieved_titles = list(retrieved_titles)
-            if not isinstance(retrieved_titles, list):
+            if isinstance(observed_titles, np.ndarray):
+                observed_titles = observed_titles.tolist()
+            elif isinstance(observed_titles, tuple):
+                observed_titles = list(observed_titles)
+            if not isinstance(observed_titles, list):
                 raise RuntimeError(
-                    "evidence reward requires stackpilot_retrieved_titles list"
+                    "evidence reward requires stackpilot_observed_titles list"
                 )
             try:
                 search_count = int(
@@ -80,7 +80,7 @@ EVIDENCE_SCORE = """            extra_info = data_item.non_tensor_batch.get('ext
                 0.0
                 if protocol_failure
                 else _support_recall_from_titles(
-                    retrieved_titles,
+                    observed_titles,
                     support_titles,
                 )
             )
@@ -113,7 +113,7 @@ def validate_patched(text: str, target: Path) -> None:
         MARKER,
         TERMINAL_REWARD_MARKER,
         "_support_recall_from_titles(",
-        "'stackpilot_retrieved_titles'",
+        "'stackpilot_observed_titles'",
         "'stackpilot_search_count'",
         "'stackpilot_trajectory_truncated'",
         "_stackpilot_answer_em(terminal_answer, targets)",

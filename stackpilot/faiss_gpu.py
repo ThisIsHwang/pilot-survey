@@ -1,12 +1,12 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Iterator
+from typing import Any
 
-
-PAGED_FLAT_LOAD_MODE = "paged-fp16-flat"
-PAGED_FLAT_STORAGE_DTYPE = "float16"
+PAGED_FLAT_LOAD_MODE = "paged-fp32-flat"
+PAGED_FLAT_STORAGE_DTYPE = "float32"
 
 
 @dataclass
@@ -37,10 +37,8 @@ def _paged_flat_index_to_gpu(
             "The paged FAISS loader requires exactly one visible GPU; "
             f"found {faiss.get_num_gpus()}"
         )
-    if clone_options is None or not bool(
-        getattr(clone_options, "useFloat16", False)
-    ):
-        raise RuntimeError("The paged FAISS loader requires FP16 GPU storage")
+    if clone_options is None:
+        raise RuntimeError("The paged FAISS loader requires clone options")
     if not bool(getattr(clone_options, "shard", False)):
         raise RuntimeError("The paged FAISS loader requires shard=True")
 
@@ -82,7 +80,10 @@ def _paged_flat_index_to_gpu(
     resources.setTempMemory(state.temp_memory_mib * 1024 * 1024)
     config = faiss.GpuIndexFlatConfig()
     config.device = 0
-    config.useFloat16 = True
+    # Search-R1 requests FP16 in its generic FAISS clone path. The Hard-RQ0
+    # backend deliberately overrides it: one H100 80GB can hold the 60.1 GiB
+    # wiki-18 flat index in FP32, avoiding half-storage near-tie rank swaps.
+    config.useFloat16 = False
     if hasattr(config, "use_cuvs"):
         # The native GpuIndex::add path pages large host inputs. cuVS bypasses
         # that path in FAISS 1.14.x and recreates the full-transfer OOM.
@@ -100,11 +101,11 @@ def _paged_flat_index_to_gpu(
 
     print(
         "Loading FAISS IndexFlat on the single visible GPU with native paged "
-        f"FP16 add: documents={documents:,}, dimension={dimension}, "
+        f"FP32 add: documents={documents:,}, dimension={dimension}, "
         f"scratch={state.temp_memory_mib} MiB"
     )
     # One call is intentional. GpuIndexFlat::add first reserves the complete
-    # FP16 destination and then GpuIndex::add pages the 60 GiB host matrix.
+    # FP32 destination and then GpuIndex::add pages the 60 GiB host matrix.
     # Repeating small Python add calls would cause destination reallocations.
     gpu_index.add_c(documents, index.get_xb())
     if hasattr(resources, "syncDefaultStreamCurrentDevice"):
@@ -117,10 +118,10 @@ def _paged_flat_index_to_gpu(
 
     state.documents = documents
     state.dimension = dimension
-    state.index_bytes = documents * dimension * 2
+    state.index_bytes = documents * dimension * 4
     print(
         "Paged FAISS GPU load complete: "
-        f"{documents:,} vectors, {state.index_bytes / (1024 ** 3):.2f} GiB FP16"
+        f"{documents:,} vectors, {state.index_bytes / (1024**3):.2f} GiB FP32"
     )
     return gpu_index
 

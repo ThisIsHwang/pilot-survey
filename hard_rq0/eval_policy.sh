@@ -240,6 +240,15 @@ result_set = sys.argv[4]
 bm25_port, e5_port, llm_port = map(int, sys.argv[5:8])
 served_model_name = sys.argv[8]
 config = yaml.safe_load(source.read_text(encoding="utf-8"))
+if config.get("agent", {}).get("observation_token_budget") != 500:
+    raise SystemExit(
+        "Hard-RQ0 evaluation requires agent.observation_token_budget=500 "
+        "to match Search-R1 training."
+    )
+if "result_snippet_chars" in config["agent"]:
+    raise SystemExit(
+        "Hard-RQ0 evaluation must not use the legacy per-document character budget."
+    )
 config["work_dir"] = str(root / "work" / "hard_rq0" / "runs" / result_set)
 config["assets"]["root"] = str(Path(sys.argv[9]).resolve())
 config["assets"]["corpus_path"] = str(Path(sys.argv[9]).resolve() / "wiki-18.jsonl")
@@ -285,10 +294,10 @@ if payload.get("status") != "ok" or payload.get("backend") != backend:
 if backend == "e5":
     if payload.get("faiss_gpu") is not True or int(payload.get("faiss_gpu_count", 0)) != 1:
         raise SystemExit(f"E5 is not using one visible FAISS GPU: {payload}")
-    if payload.get("faiss_gpu_load_mode") != "paged-fp16-flat":
+    if payload.get("faiss_gpu_load_mode") != "paged-fp32-flat":
         raise SystemExit(f"E5 is not using the memory-safe paged FAISS loader: {payload}")
-    if payload.get("faiss_storage_dtype") != "float16":
-        raise SystemExit(f"E5 is not using FP16 FAISS storage: {payload}")
+    if payload.get("faiss_storage_dtype") != "float32":
+        raise SystemExit(f"E5 is not using FP32 FAISS storage: {payload}")
     if str(payload.get("cuda_visible_devices")) != expected_e5_gpu:
         raise SystemExit(f"E5 is running on an unexpected CUDA device: {payload}")
     if Path(str(payload.get("retriever_model", ""))).resolve() != expected_e5_model:

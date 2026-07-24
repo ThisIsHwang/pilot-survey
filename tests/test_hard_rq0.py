@@ -7,6 +7,7 @@ import io
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -22,6 +23,16 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pandas as pd
 
+from hard_rq0.patch_searchr1_action_protocol import (
+    patch as patch_searchr1_action_protocol,
+)
+from hard_rq0.patch_searchr1_mixed import patch as patch_searchr1_mixed
+from hard_rq0.patch_searchr1_observation_geometry import (
+    MARKER as OBSERVATION_GEOMETRY_MARKER,
+)
+from hard_rq0.patch_searchr1_observation_geometry import (
+    patch as patch_searchr1_observation_geometry,
+)
 from hard_rq0.patch_searchr1_validation import (
     GENERATION_META_MARKER as SEARCH_R1_VALIDATION_META_MARKER,
 )
@@ -128,18 +139,29 @@ from stackpilot.hard_rq0_contract import (
 )
 from stackpilot.hard_rq0_report import (
     crossed_cluster_bootstrap,
+    exact_one_sided_sign_flip,
     gain_over_base,
+    holm_adjust,
     home_excess,
     matched_hard_question_ids,
+    primary_interaction,
+    seed_mean_interval,
 )
 from stackpilot.normalize_hard_results import normalize
 from stackpilot.prepare_hard_rq0 import (
     DATA_PREP_SCHEMA,
+    GOLD_TITLE_CORPUS_POLICY,
+    SPLIT_CONTRACT_SCHEMA,
+    TITLE_COVERAGE_SCHEMA,
+    TITLE_NORMALIZATION_ALGORITHM,
+    annotate_gold_title_coverage,
     artifact_records,
     atomic_write_json,
     expected_artifact_metadata,
     expected_artifacts,
     extract_support_titles,
+    find_required_corpus_titles,
+    normalized_question_fingerprint,
     prepare,
     prepare_request,
     prepared_cache_valid,
@@ -169,6 +191,120 @@ def write_corpus_tar(path: Path, payload: bytes, *, compressed: bool) -> None:
     member.size = len(payload)
     with tarfile.open(path, mode) as archive:
         archive.addfile(member, io.BytesIO(payload))
+
+
+def synthetic_split_contract(
+    request: dict,
+    ids_by_role: dict[str, list[str]],
+) -> dict:
+    if request["datasets"] != ["toy"]:
+        raise ValueError("synthetic split helper expects the toy dataset")
+    role_specs = {
+        "trainer_train": (
+            request["split_train"],
+            request["seed"],
+            0,
+            request["train_examples_per_dataset"],
+        ),
+        "trainer_validation": (
+            request["split_train"],
+            request["seed"],
+            request["train_examples_per_dataset"],
+            request["trainer_dev_examples_per_dataset"],
+        ),
+        "final_evaluation": (
+            request["split_eval"],
+            request["seed"] + 100,
+            0,
+            request["eval_examples_per_dataset"],
+        ),
+    }
+    roles: dict[str, dict] = {}
+    combined_rows = []
+    for role, (
+        source_split,
+        shuffle_seed,
+        start,
+        requested_count,
+    ) in role_specs.items():
+        identifiers = ids_by_role[role]
+        rows = [
+            {"id": identifier, "question": f"synthetic question {identifier}"}
+            for identifier in identifiers
+        ]
+        combined_rows.extend(rows)
+        roles[role] = {
+            "count": len(identifiers),
+            "question_ids": question_id_fingerprint(identifiers),
+            "normalized_questions": normalized_question_fingerprint(rows),
+            "datasets": {
+                "toy": {
+                    "source_split": source_split,
+                    "requested_source_split": source_split,
+                    "actual_source_split": source_split,
+                    "shuffle_seed": shuffle_seed,
+                    "selection": {
+                        "start": start,
+                        "stop": start + requested_count,
+                    },
+                    "count": len(identifiers),
+                    "requested_count": requested_count,
+                    "actual_count": len(identifiers),
+                    "source_available_count": start + requested_count,
+                    "question_ids": question_id_fingerprint(identifiers),
+                    "normalized_questions": normalized_question_fingerprint(rows),
+                }
+            },
+        }
+    combined_ids = [
+        identifier
+        for role in ("trainer_train", "trainer_validation", "final_evaluation")
+        for identifier in ids_by_role[role]
+    ]
+    return {
+        "schema": SPLIT_CONTRACT_SCHEMA,
+        "combined_question_ids": question_id_fingerprint(combined_ids),
+        "combined_normalized_questions": normalized_question_fingerprint(combined_rows),
+        "roles": roles,
+    }
+
+
+def synthetic_support_title_coverage(root: Path, split_contract: dict) -> dict:
+    corpus_path = root / "synthetic-wiki18.jsonl"
+    corpus_path.write_text(
+        '{"title":"Synthetic","text":"document"}\n', encoding="utf-8"
+    )
+
+    def summary(count: int) -> dict:
+        return {
+            "rows": count,
+            "rows_zero": 0,
+            "rows_partial": 0,
+            "rows_full": count,
+            "gold_titles": count,
+            "corpus_covered_gold_titles": count,
+            "mean_gold_title_corpus_coverage": 1.0,
+        }
+
+    roles = {}
+    for role, role_record in split_contract["roles"].items():
+        roles[role] = {
+            "summary": summary(role_record["count"]),
+            "datasets": {
+                "toy": summary(role_record["datasets"]["toy"]["actual_count"])
+            },
+        }
+    return {
+        "schema": TITLE_COVERAGE_SCHEMA,
+        "policy": GOLD_TITLE_CORPUS_POLICY,
+        "title_normalization_algorithm": TITLE_NORMALIZATION_ALGORITHM,
+        "corpus_path": str(corpus_path.resolve()),
+        "corpus_size": corpus_path.stat().st_size,
+        "corpus_rows_scanned": 1,
+        "required_unique_normalized_titles": 1,
+        "matched_unique_normalized_titles": 1,
+        "roles": roles,
+    }
 
 
 class HardRQ0Tests(unittest.TestCase):
@@ -450,12 +586,12 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertEqual(calls["temp_memory"], 512 * 1024 * 1024)
         self.assertEqual(calls["dimension"], 3)
         self.assertEqual(calls["config"].device, 0)
-        self.assertTrue(calls["config"].useFloat16)
+        self.assertFalse(calls["config"].useFloat16)
         self.assertFalse(calls["config"].use_cuvs)
         self.assertTrue(calls["synced"])
         self.assertEqual(state.documents, 5)
-        self.assertEqual(state.index_bytes, 5 * 3 * 2)
-        self.assertEqual(state.mode, "paged-fp16-flat")
+        self.assertEqual(state.index_bytes, 5 * 3 * 4)
+        self.assertEqual(state.mode, "paged-fp32-flat")
         self.assertEqual(len(state.resources), 1)
 
     def test_h100_evaluation_and_prefetch_defaults_are_wired(self) -> None:
@@ -563,6 +699,7 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("patch_searchr1_worker_cuda.py", script)
         self.assertIn("patch_searchr1_validation.py", script)
         self.assertIn("patch_searchr1_action_protocol.py", script)
+        self.assertIn("patch_searchr1_observation_geometry.py", script)
         self.assertIn("patch_searchr1_reward_protocol.py", script)
         self.assertIn("patch_searchr1_experiment_env.py", script)
         self.assertIn("ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}", script)
@@ -578,6 +715,63 @@ class HardRQ0Tests(unittest.TestCase):
             merger,
         )
 
+    def test_searchr1_observation_geometry_patch_is_idempotent(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        source = (
+            root
+            / "upstream"
+            / "Search-R1"
+            / "search_r1"
+            / "llm_agent"
+            / "generation.py"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            search_r1 = Path(temporary)
+            target = search_r1 / "search_r1" / "llm_agent" / "generation.py"
+            target.parent.mkdir(parents=True)
+            shutil.copyfile(source, target)
+
+            patch_searchr1_action_protocol(search_r1)
+            patch_searchr1_observation_geometry(search_r1)
+            first = target.read_text(encoding="utf-8")
+            patch_searchr1_observation_geometry(search_r1)
+            second = target.read_text(encoding="utf-8")
+
+        self.assertEqual(first, second)
+        self.assertIn(OBSERVATION_GEOMETRY_MARKER, first)
+        self.assertIn("tokenize_observation_batch(", first)
+        self.assertIn("'stackpilot_observed_titles'", first)
+        self.assertNotIn("OBSERVATION TOO LONG", first)
+
+    def test_mixed_patch_preserves_observation_geometry_state(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        upstream = root / "upstream" / "Search-R1"
+        with tempfile.TemporaryDirectory() as temporary:
+            search_r1 = Path(temporary)
+            generation = search_r1 / "search_r1" / "llm_agent" / "generation.py"
+            main_ppo = search_r1 / "verl" / "trainer" / "main_ppo.py"
+            generation.parent.mkdir(parents=True)
+            main_ppo.parent.mkdir(parents=True)
+            shutil.copyfile(
+                upstream / "search_r1" / "llm_agent" / "generation.py",
+                generation,
+            )
+            shutil.copyfile(
+                upstream / "verl" / "trainer" / "main_ppo.py",
+                main_ppo,
+            )
+
+            patch_searchr1_action_protocol(search_r1)
+            patch_searchr1_observation_geometry(search_r1)
+            patch_searchr1_mixed(search_r1)
+            patched = generation.read_text(encoding="utf-8")
+
+        self.assertIn(OBSERVATION_GEOMETRY_MARKER, patched)
+        self.assertIn("self._stackpilot_last_observed_titles = []", patched)
+        self.assertIn("self._stackpilot_last_observed_titles.append(", patched)
+        self.assertIn("tokenize_observation_batch(", patched)
+        compile(patched, str(generation), "exec")
+
     def test_stage2_entrypoints_apply_all_searchr1_safety_patches(self) -> None:
         root = Path(__file__).resolve().parents[1]
         entrypoints = (
@@ -590,6 +784,7 @@ class HardRQ0Tests(unittest.TestCase):
             "patch_searchr1_worker_cuda.py",
             "patch_searchr1_validation.py",
             "patch_searchr1_action_protocol.py",
+            "patch_searchr1_observation_geometry.py",
             "patch_searchr1_reward_protocol.py",
             "patch_searchr1_experiment_env.py",
         )
@@ -948,10 +1143,10 @@ class HardRQ0Tests(unittest.TestCase):
                 "index_documents": EXPECTED_DOCUMENTS,
                 "faiss_gpu": True,
                 "faiss_gpu_count": 1,
-                "faiss_gpu_load_mode": "paged-fp16-flat",
-                "faiss_storage_dtype": "float16",
+                "faiss_gpu_load_mode": "paged-fp32-flat",
+                "faiss_storage_dtype": "float32",
                 "faiss_temp_memory_mib": 512,
-                "faiss_index_bytes": EXPECTED_DOCUMENTS * 768 * 2,
+                "faiss_index_bytes": EXPECTED_DOCUMENTS * 768 * 4,
                 "gpu_search_serialized": True,
                 "cuda_empty_cache_disabled": True,
                 "retriever_model": "/models/e5/snapshots/revision",
@@ -992,6 +1187,10 @@ class HardRQ0Tests(unittest.TestCase):
                 "question": "Question one?",
                 "answers": ["one"],
                 "support_titles": ["One"],
+                "gold_support_title_count": 1,
+                "corpus_covered_support_titles": ["One"],
+                "corpus_covered_support_title_count": 1,
+                "gold_title_corpus_coverage": 1.0,
             },
             {
                 "id": "musique:q1",
@@ -1000,6 +1199,10 @@ class HardRQ0Tests(unittest.TestCase):
                 "question": "Question two?",
                 "answers": ["two"],
                 "support_titles": ["Two"],
+                "gold_support_title_count": 1,
+                "corpus_covered_support_titles": ["Two"],
+                "corpus_covered_support_title_count": 1,
+                "gold_title_corpus_coverage": 1.0,
             },
         ]
 
@@ -1038,6 +1241,8 @@ class HardRQ0Tests(unittest.TestCase):
                         "raw_text_f1": 1.0,
                         "protocol_failure": 0,
                         "invalid_action_count": 0,
+                        "retrieved_support_title_recall": 0.5,
+                        "observed_support_title_recall": 0.5,
                         "support_recall": 0.5,
                         "turn1_support_recall": 0.0,
                         "turn2_support_recall": 0.5,
@@ -1058,7 +1263,10 @@ class HardRQ0Tests(unittest.TestCase):
                                 "turn": 1,
                                 "query": "first query",
                                 "retrieved_titles": [],
+                                "observed_titles": [],
                                 "new_support_titles": [],
+                                "retrieved_support_title_recall": 0.0,
+                                "observed_support_title_recall": 0.0,
                                 "support_recall": 0.0,
                                 "evidence_gain": 0.0,
                                 "query_token_count": 2.0,
@@ -1072,7 +1280,10 @@ class HardRQ0Tests(unittest.TestCase):
                                 "turn": 2,
                                 "query": "second query",
                                 "retrieved_titles": ["Toy"],
+                                "observed_titles": ["Toy"],
                                 "new_support_titles": ["toy"],
+                                "retrieved_support_title_recall": 0.5,
+                                "observed_support_title_recall": 0.5,
                                 "support_recall": 0.5,
                                 "evidence_gain": 0.5,
                                 "query_token_count": 2.0,
@@ -1121,6 +1332,93 @@ class HardRQ0Tests(unittest.TestCase):
             float(interactions.loc["e5-specialist", "home_excess_gain"]),
             0.10,
         )
+        with self.assertRaisesRegex(RuntimeError, "incomplete matched grid"):
+            gain_over_base(
+                frame[
+                    ~(
+                        (frame["policy_tag"] == "e5-specialist")
+                        & (frame["backend"] == "e5")
+                    )
+                ],
+                "support_recall",
+            )
+        with self.assertRaisesRegex(RuntimeError, "incomplete matched grid"):
+            home_excess(
+                gains[
+                    ~(
+                        (gains["policy_tag"] == "bm25-specialist")
+                        & (gains["backend"] == "e5")
+                    )
+                ]
+            )
+
+    def test_seed_level_interval_sign_flip_and_holm_contract(self) -> None:
+        interval = seed_mean_interval(pd.Series({13: 1.0, 42: 2.0, 87: 3.0}))
+
+        self.assertEqual(interval["mean"], 2.0)
+        self.assertEqual(interval["seed_std"], 1.0)
+        self.assertEqual(interval["n_seeds"], 3)
+        self.assertAlmostEqual(float(interval["seed_ci_low"]), -0.484338, places=5)
+        self.assertAlmostEqual(float(interval["seed_ci_high"]), 4.484338, places=5)
+        self.assertEqual(
+            json.loads(str(interval["seed_values"])),
+            {"13": 1.0, "42": 2.0, "87": 3.0},
+        )
+        self.assertEqual(
+            exact_one_sided_sign_flip(pd.Series([1.0, 1.0, 1.0])),
+            0.125,
+        )
+        adjusted = holm_adjust(pd.Series([0.01, 0.03, 0.04]))
+        np.testing.assert_allclose(adjusted.to_numpy(), [0.03, 0.06, 0.06])
+
+    def test_primary_interaction_is_equal_strata_and_seed_gated(self) -> None:
+        rows = []
+        for seed in (13, 42, 87):
+            rows.extend(
+                {
+                    "subset": "all",
+                    "topk": 3,
+                    "metric": "observed_support_title_recall",
+                    "policy_tag": "bm25-specialist",
+                    "dataset": "large",
+                    "seed": seed,
+                    "home_excess_gain": 0.0,
+                }
+                for _ in range(9)
+            )
+            rows.append(
+                {
+                    "subset": "all",
+                    "topk": 3,
+                    "metric": "observed_support_title_recall",
+                    "policy_tag": "e5-specialist",
+                    "dataset": "small",
+                    "seed": seed,
+                    "home_excess_gain": 2.0,
+                }
+            )
+
+        exploratory = primary_interaction(pd.DataFrame(rows), threshold=0.5).iloc[0]
+        self.assertEqual(exploratory["n_strata"], 2)
+        self.assertEqual(exploratory["home_excess_gain"], 1.0)
+        self.assertEqual(exploratory["inference_status"], "exploratory")
+        self.assertEqual(exploratory["decision"], "EXPLORATORY-SIGNAL")
+
+        confirmatory_rows = []
+        for seed in range(8):
+            confirmatory_rows.extend(
+                {
+                    **row,
+                    "seed": seed,
+                }
+                for row in rows[:10]
+            )
+        confirmatory = primary_interaction(
+            pd.DataFrame(confirmatory_rows), threshold=0.5
+        ).iloc[0]
+        self.assertEqual(confirmatory["n_seeds"], 8)
+        self.assertEqual(confirmatory["inference_status"], "confirmatory")
+        self.assertEqual(confirmatory["decision"], "GO")
 
     def test_matched_hard_requires_base_difficulty_and_recovery(self) -> None:
         rows = []
@@ -1226,10 +1524,11 @@ class HardRQ0Tests(unittest.TestCase):
                 "split_eval": "dev",
             },
         }
-        request = prepare_request(config)
-        self.assertEqual(request["trainer_dev_examples_per_dataset"], 1)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            config["assets"] = {"corpus_path": str(root / "synthetic-wiki18.jsonl")}
+            request = prepare_request(config)
+            self.assertEqual(request["trainer_dev_examples_per_dataset"], 1)
             paths = expected_artifacts(request)
             metadata = expected_artifact_metadata(request)
             canonical_payloads: dict[str, str] = {}
@@ -1249,62 +1548,10 @@ class HardRQ0Tests(unittest.TestCase):
                 for relative_path, record in metadata.items()
                 if record["role"] != "metadata"
             }
-            split_contract = {
-                "schema": 1,
-                "roles": {
-                    "trainer_train": {
-                        "count": 2,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["trainer_train"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "train",
-                                "shuffle_seed": 42,
-                                "selection": {"start": 0, "stop": 2},
-                                "count": 2,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["trainer_train"]
-                                ),
-                            }
-                        },
-                    },
-                    "trainer_validation": {
-                        "count": 1,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["trainer_validation"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "train",
-                                "shuffle_seed": 42,
-                                "selection": {"start": 2, "stop": 3},
-                                "count": 1,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["trainer_validation"]
-                                ),
-                            }
-                        },
-                    },
-                    "final_evaluation": {
-                        "count": 1,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["final_evaluation"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "dev",
-                                "shuffle_seed": 142,
-                                "selection": {"start": 0, "stop": 1},
-                                "count": 1,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["final_evaluation"]
-                                ),
-                            }
-                        },
-                    },
-                },
-            }
+            split_contract = synthetic_split_contract(request, ids_by_role)
+            support_title_coverage = synthetic_support_title_coverage(
+                root, split_contract
+            )
             manifest_path = root / "data" / ".hard-rq0-data-manifest.json"
             atomic_write_json(
                 manifest_path,
@@ -1312,6 +1559,7 @@ class HardRQ0Tests(unittest.TestCase):
                     "schema": DATA_PREP_SCHEMA,
                     "request": request,
                     "split_contract": split_contract,
+                    "support_title_coverage": support_title_coverage,
                     "artifacts": artifact_records(
                         root,
                         paths,
@@ -1408,11 +1656,27 @@ class HardRQ0Tests(unittest.TestCase):
             root = Path(temporary)
             work_dir = root / "work"
             config_path = root / "config.json"
+            corpus_path = root / "wiki-18.jsonl"
+            corpus_path.write_text(
+                "".join(
+                    json.dumps(
+                        {"title": title, "text": f"{title} document"},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                    for title in (
+                        [f"Train Title {index}" for index in range(6)]
+                        + [f"Title {index}" for index in range(6)]
+                    )
+                ),
+                encoding="utf-8",
+            )
             config_path.write_text(
                 json.dumps(
                     {
                         "seed": 42,
                         "work_dir": str(work_dir),
+                        "assets": {"corpus_path": str(corpus_path)},
                         "data": {
                             "repo_id": "example/data",
                             "revision": "a" * 40,
@@ -1636,6 +1900,11 @@ class HardRQ0Tests(unittest.TestCase):
 
             def write_derived(source: Path, output: Path) -> None:
                 output.write_bytes(b"derived:" + source.read_bytes())
+                relative_source = (
+                    source.resolve().relative_to(work_dir.resolve()).as_posix()
+                )
+                source_role = manifest["artifacts"][relative_source]["role"]
+                source_rows = manifest["split_contract"]["roles"][source_role]["count"]
                 atomic_write_json(
                     mixed_manifest_path(output),
                     {
@@ -1644,8 +1913,10 @@ class HardRQ0Tests(unittest.TestCase):
                             source,
                             seed=13,
                             mode="backend-id",
+                            source_rows=source_rows,
                         ),
                         "output": {
+                            "rows": source_rows * 2,
                             "size": output.stat().st_size,
                             "sha256": mixed_file_sha256(output),
                         },
@@ -1790,6 +2061,7 @@ class HardRQ0Tests(unittest.TestCase):
                     {
                         "seed": 42,
                         "work_dir": str(root / "work"),
+                        "assets": {"corpus_path": str(root / "wiki-18.jsonl")},
                         "data": {
                             "repo_id": "example/data",
                             "revision": "a" * 40,
@@ -1839,6 +2111,7 @@ class HardRQ0Tests(unittest.TestCase):
                     {
                         "seed": 42,
                         "work_dir": str(root / "work"),
+                        "assets": {"corpus_path": str(root / "wiki-18.jsonl")},
                         "data": {
                             "repo_id": "example/data",
                             "revision": "a" * 40,
@@ -1887,6 +2160,7 @@ class HardRQ0Tests(unittest.TestCase):
                     {
                         "seed": 42,
                         "work_dir": str(root / "work"),
+                        "assets": {"corpus_path": str(root / "wiki-18.jsonl")},
                         "data": {
                             "repo_id": "example/data",
                             "revision": "a" * 40,
@@ -1913,11 +2187,42 @@ class HardRQ0Tests(unittest.TestCase):
     def test_disjoint_row_validator_rejects_question_overlap(self) -> None:
         with self.assertRaisesRegex(RuntimeError, "question IDs overlap"):
             validate_disjoint_rows(
-                [{"id": "q1"}],
-                [{"id": "q1"}],
+                [{"id": "q1", "question": "first"}],
+                [{"id": "q1", "question": "second"}],
                 "validation",
                 "final evaluation",
             )
+        with self.assertRaisesRegex(RuntimeError, "normalized questions overlap"):
+            validate_disjoint_rows(
+                [{"id": "q1", "question": "  Ｗhat   Is This? "}],
+                [{"id": "q2", "question": "what is this?"}],
+                "training",
+                "final evaluation",
+            )
+
+    def test_gold_title_corpus_coverage_retains_partial_and_zero_rows(self) -> None:
+        rows = [
+            {"id": "q1", "support_titles": ["Found", "Missing"]},
+            {"id": "q2", "support_titles": ["Absent"]},
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            corpus = Path(temporary) / "wiki-18.jsonl"
+            corpus.write_text(
+                '{"title":"Found","text":"available"}\n',
+                encoding="utf-8",
+            )
+            matched, scanned = find_required_corpus_titles(
+                corpus,
+                {"found", "missing", "absent"},
+            )
+        annotate_gold_title_coverage(rows, matched)
+
+        self.assertEqual(scanned, 1)
+        self.assertEqual([row["id"] for row in rows], ["q1", "q2"])
+        self.assertEqual(rows[0]["corpus_covered_support_titles"], ["Found"])
+        self.assertEqual(rows[0]["gold_title_corpus_coverage"], 0.5)
+        self.assertEqual(rows[1]["corpus_covered_support_title_count"], 0)
+        self.assertEqual(rows[1]["gold_title_corpus_coverage"], 0.0)
 
     def test_validation_support_titles_are_required_with_separate_diagnostic(
         self,
@@ -2274,6 +2579,9 @@ class HardRQ0Tests(unittest.TestCase):
             manifest_config = {
                 "seed": 7,
                 "work_dir": str(root),
+                "assets": {
+                    "corpus_path": str(root / "synthetic-wiki18.jsonl"),
+                },
                 "data": {
                     "repo_id": "example/data",
                     "revision": "b" * 40,
@@ -2319,68 +2627,17 @@ class HardRQ0Tests(unittest.TestCase):
                 for relative_path, record in metadata.items()
                 if record["role"] != "metadata"
             }
-            split_contract = {
-                "schema": 1,
-                "roles": {
-                    "trainer_train": {
-                        "count": 1,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["trainer_train"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "train",
-                                "shuffle_seed": 7,
-                                "selection": {"start": 0, "stop": 1},
-                                "count": 1,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["trainer_train"]
-                                ),
-                            }
-                        },
-                    },
-                    "trainer_validation": {
-                        "count": 1,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["trainer_validation"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "train",
-                                "shuffle_seed": 7,
-                                "selection": {"start": 1, "stop": 2},
-                                "count": 1,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["trainer_validation"]
-                                ),
-                            }
-                        },
-                    },
-                    "final_evaluation": {
-                        "count": 1,
-                        "question_ids": question_id_fingerprint(
-                            ids_by_role["final_evaluation"]
-                        ),
-                        "datasets": {
-                            "toy": {
-                                "source_split": "dev",
-                                "shuffle_seed": 107,
-                                "selection": {"start": 0, "stop": 1},
-                                "count": 1,
-                                "question_ids": question_id_fingerprint(
-                                    ids_by_role["final_evaluation"]
-                                ),
-                            }
-                        },
-                    },
-                },
-            }
+            split_contract = synthetic_split_contract(request, ids_by_role)
+            support_title_coverage = synthetic_support_title_coverage(
+                root, split_contract
+            )
             atomic_write_json(
                 data_dir / ".hard-rq0-data-manifest.json",
                 {
                     "schema": DATA_PREP_SCHEMA,
                     "request": request,
                     "split_contract": split_contract,
+                    "support_title_coverage": support_title_coverage,
                     "artifacts": artifact_records(
                         root,
                         paths,
@@ -2396,12 +2653,18 @@ class HardRQ0Tests(unittest.TestCase):
             config = {
                 "seed": manifest_config["seed"],
                 "data": manifest_config["data"],
-                "assets": {"root": str(asset_dir)},
+                "assets": {
+                    "root": str(asset_dir),
+                    "corpus_path": manifest_config["assets"]["corpus_path"],
+                },
                 "retrieval": {
                     "e5_model": "e5",
                     "e5_model_revision": "immutable-e5-revision",
                 },
-                "agent": {"max_search_turns": 4, "result_snippet_chars": 700},
+                "agent": {
+                    "max_search_turns": 4,
+                    "observation_token_budget": 500,
+                },
                 "llm": {"temperature": 0.0, "max_tokens": 512},
             }
             retriever_identities = {

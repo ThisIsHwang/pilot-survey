@@ -32,6 +32,16 @@ def normalize(row: dict) -> dict:
     first_miss = turn1 < 1.0
     row.update(
         {
+            "retrieved_support_title_recall": (
+                float(turns[-1].get("retrieved_support_title_recall", turn1))
+                if turns
+                else 0.0
+            ),
+            "observed_support_title_recall": (
+                float(turns[-1].get("observed_support_title_recall", turn1))
+                if turns
+                else 0.0
+            ),
             "turn1_support_recall": turn1,
             "turn2_support_recall": turn2,
             "turn3_support_recall": turn3,

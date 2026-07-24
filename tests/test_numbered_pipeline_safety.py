@@ -16,12 +16,18 @@ from stackpilot.numbered_experiment_report import (
 )
 
 
-def write_completed_run(root: Path, *, profile: str = "pilot") -> Path:
-    run = root / "EXP-003__seed-013__profile-pilot__variant-blind"
+def write_completed_run(
+    root: Path,
+    *,
+    profile: str = "pilot",
+    seed: int = 13,
+    question_id: str = "q1",
+) -> Path:
+    run = root / f"EXP-003__seed-{seed:03d}__profile-pilot__variant-blind"
     run.mkdir(parents=True)
     evaluation_context = {
         "schema": RESULT_SCHEMA,
-        "question_ids": ["q1"],
+        "question_ids": [question_id],
         "backends": ["bm25"],
         "topks": [3],
         "protocol": {
@@ -39,9 +45,9 @@ def write_completed_run(root: Path, *, profile: str = "pilot") -> Path:
         "profile": profile,
         "variant": "blind",
         "policy_tag": "mixed-blind",
-        "seed": 13,
+        "seed": seed,
         "backend_id_injected": False,
-        "question_id": "q1",
+        "question_id": question_id,
         "question": "Question?",
         "answers": ["answer"],
         "support_titles": ["Evidence"],
@@ -56,6 +62,8 @@ def write_completed_run(root: Path, *, profile: str = "pilot") -> Path:
         "raw_text_f1": 1.0,
         "protocol_failure": 0,
         "invalid_action_count": 0,
+        "retrieved_support_title_recall": 0.0,
+        "observed_support_title_recall": 0.0,
         "support_recall": 0.0,
         "turn1_support_recall": 0.0,
         "turn2_support_recall": 0.0,
@@ -84,7 +92,7 @@ def write_completed_run(root: Path, *, profile: str = "pilot") -> Path:
         "profile": profile,
         "variant": "blind",
         "policy_tag": "mixed-blind",
-        "seed": 13,
+        "seed": seed,
         "questions": 1,
         "episodes": 1,
         "backends": ["bm25"],
@@ -158,6 +166,16 @@ class NumberedPipelineSafetyTests(unittest.TestCase):
             completed = write_completed_run(root)
             rewrite_episode(completed, {"backend": "e5"})
             with self.assertRaisesRegex(RuntimeError, "Episode key coverage"):
+                load_completed_numbered_results(
+                    root, profile="pilot", experiment_id="EXP-003"
+                )
+
+    def test_report_rejects_different_declared_grids_across_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            write_completed_run(root, seed=13, question_id="q1")
+            write_completed_run(root, seed=42, question_id="q2")
+            with self.assertRaisesRegex(RuntimeError, "different evaluation grids"):
                 load_completed_numbered_results(
                     root, profile="pilot", experiment_id="EXP-003"
                 )

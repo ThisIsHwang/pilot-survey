@@ -293,6 +293,8 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
   --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
   --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
+  --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   --search-r1-root "$SEARCH_R1"
 if [[ "$SEARCH_R1_REWARD_MODE" == evidence ]]; then
@@ -366,10 +368,12 @@ TRAIN_SIGNATURE=$("$SEARCH_R1_PYTHON" - \
   "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
   "$ROOT/hard_rq0/patch_searchr1_validation.py" \
   "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+  "$ROOT/hard_rq0/patch_searchr1_observation_geometry.py" \
   "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
   "$ROOT/hard_rq0/patch_searchr1_evidence_reward.py" \
   "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   "$ROOT/stackpilot/action_protocol.py" \
+  "$ROOT/stackpilot/observation_geometry.py" \
   "$ROOT/hard_rq0/sitecustomize.py" \
   "$ROOT/hard_rq0/train_specialist.sh" "$ASSET_MANIFEST" "$DATA_MANIFEST" \
   "$CORPUS_PATH" "$INDEX_PATH" <<'PY'
@@ -428,10 +432,12 @@ from pathlib import Path
     worker_cuda_patch,
     validation_patch,
     action_protocol_patch,
+    observation_geometry_patch,
     reward_protocol_patch,
     evidence_reward_patch,
     experiment_env_patch,
     action_protocol,
+    observation_geometry,
     sitecustomize,
     training_wrapper,
     asset_manifest,
@@ -540,10 +546,12 @@ payload = {
     "worker_cuda_patch_sha256": digest(worker_cuda_patch),
     "validation_patch_sha256": digest(validation_patch),
     "action_protocol_patch_sha256": digest(action_protocol_patch),
+    "observation_geometry_patch_sha256": digest(observation_geometry_patch),
     "reward_protocol_patch_sha256": digest(reward_protocol_patch),
     "evidence_reward_patch_sha256": digest(evidence_reward_patch),
     "experiment_env_patch_sha256": digest(experiment_env_patch),
     "action_protocol_sha256": digest(action_protocol),
+    "observation_geometry_sha256": digest(observation_geometry),
     "sitecustomize_sha256": digest(sitecustomize),
     "training_wrapper_sha256": digest(training_wrapper),
 }
@@ -671,6 +679,9 @@ export CUDA_VISIBLE_DEVICES=$TRAIN_GPUS
 export VLLM_ATTENTION_BACKEND=$ATTENTION_BACKEND
 export TOKENIZERS_PARALLELISM=false
 export RQ0_SEED=$SEED
+export STACKPILOT_EXPERIMENT_MODE=1
+export STACKPILOT_WORKER_ROLE=driver
+export STACKPILOT_GLOBAL_RANK=0
 export PYTHONHASHSEED=$SEED
 export PYTHONPATH="$ROOT:$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
