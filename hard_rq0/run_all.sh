@@ -209,7 +209,7 @@ else
 fi
 
 "$ROOT/.venv-pilot/bin/python" - \
-  "$RUN_COMPLETE_MARKER" \
+  "$RUN_COMPLETE_MARKER" "$ROOT/work/hard_rq0" \
   "$PROFILE" "$RESULT_SET" "$BASE_MODEL" "$SEEDS" "$RUN_REPORT" \
   "$LIMIT" "$BACKENDS" "$TOPKS" <<'PY'
 import hashlib
@@ -219,14 +219,31 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-marker, profile, result_set, model, seeds, report, limit, backends, topks = sys.argv[1:]
+from stackpilot.exp002_completion import (
+    RUN_COMPLETION_SCHEMA,
+    current_input_provenance,
+)
+
+(
+    marker,
+    hard_root,
+    profile,
+    result_set,
+    model,
+    seeds,
+    report,
+    limit,
+    backends,
+    topks,
+) = sys.argv[1:]
 path = Path(marker)
 path.parent.mkdir(parents=True, exist_ok=True)
+seed_values = [int(value) for value in seeds.split()]
 policy_dir = path.parent / "results" / "policies"
 expected_names = ["base-qwen-seed0.jsonl"] + [
     f"{tag}-seed{seed}.jsonl"
     for tag in ("bm25-specialist", "e5-specialist")
-    for seed in seeds.split()
+    for seed in seed_values
 ]
 policy_files = [policy_dir / name for name in expected_names]
 if any(not item.is_file() or not item.stat().st_size for item in policy_files):
@@ -254,16 +271,19 @@ report_marker = path.parent / "results" / "report" / ".complete.json"
 if report == "1" and (not report_marker.is_file() or not report_marker.stat().st_size):
     raise SystemExit(f"Missing report completion marker: {report_marker}")
 payload = {
-    "schema": 2,
+    "schema": RUN_COMPLETION_SCHEMA,
     "completed_at": datetime.now(timezone.utc).isoformat(),
     "profile": profile,
     "result_set": result_set,
     "base_model": str(Path(model).resolve()),
-    "seeds": [int(value) for value in seeds.split()],
+    "seeds": seed_values,
     "limit": int(limit) if limit else None,
     "backends": backends.split(),
     "topks": [int(value) for value in topks.split()],
     "evaluation_signature": next(iter(evaluation_signatures)),
+    "input_provenance": current_input_provenance(
+        Path(hard_root), profile, seed_values
+    ),
     "policy_files": {item.name: digest(item) for item in policy_files},
     "report_generated": report == "1",
     "report_marker_sha256": digest(report_marker) if report == "1" else None,

@@ -60,7 +60,7 @@ class Node2QueueTests(unittest.TestCase):
         self.assertIn("RUN_EXP006=0 RUN_REPORT=0", self.queue)
         self.assertIn("Refusing to mix node-local and external", self.queue)
         self.assertIn("KEEP_VLLM=1 is unsafe", self.queue)
-        self.assertIn('payload.get("schema") != 2', self.watcher)
+        self.assertIn("validate_run_completion", self.watcher)
         self.assertIn(
             "hard-rq0-{backend}-seed{seed}-{profile}", self.watcher
         )

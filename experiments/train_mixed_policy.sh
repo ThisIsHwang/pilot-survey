@@ -30,6 +30,10 @@ MAX_START_LENGTH=2048
 MAX_OBS_LENGTH=500
 MAX_TURNS=4
 LEARNING_RATE=${LEARNING_RATE:-1e-6}
+ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}
+ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-false}
+ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-false}
+REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-false}
 
 case "$EXPERIMENT_ID" in
   EXP-003) MIXED_MODE=blind; VARIANT=blind ;;
@@ -70,14 +74,40 @@ if [[ ! "$SEED" =~ ^[1-9][0-9]*$ ]]; then
   echo "SEED must be a positive integer" >&2
   exit 2
 fi
-if [[ ! "$N_AGENT" =~ ^[1-9][0-9]*$ || $((N_AGENT % 2)) -ne 0 ]]; then
-  echo "N_AGENT must be an even positive integer so every group is BM25/E5 balanced" >&2
+if [[ ! "$N_AGENT" =~ ^[1-9][0-9]*$ ]]; then
+  echo "N_AGENT must be a positive integer" >&2
   exit 2
 fi
 for value in TRAIN_BATCH VAL_BATCH MINI_BATCH MICRO_BATCH TOTAL_UPDATES TOPK; do
   number=${!value}
   [[ "$number" =~ ^[1-9][0-9]*$ ]] || { echo "$value must be a positive integer" >&2; exit 2; }
 done
+for boolean_name in ACTOR_PARAM_OFFLOAD ACTOR_GRAD_OFFLOAD \
+  ACTOR_OPTIMIZER_OFFLOAD REF_PARAM_OFFLOAD; do
+  boolean_value=${!boolean_name}
+  if [[ "$boolean_value" != true && "$boolean_value" != false ]]; then
+    echo "$boolean_name must be true or false; got '$boolean_value'." >&2
+    exit 2
+  fi
+done
+if (( TRAIN_BATCH % N_GPUS != 0 || VAL_BATCH % N_GPUS != 0 || \
+      MINI_BATCH % N_GPUS != 0 || MICRO_BATCH % N_GPUS != 0 )); then
+  echo "TRAIN_BATCH, VAL_BATCH, MINI_BATCH, and MICRO_BATCH must be divisible by N_GPUS=$N_GPUS" >&2
+  exit 2
+fi
+if (( MINI_BATCH / N_GPUS < MICRO_BATCH / N_GPUS || \
+      (MINI_BATCH / N_GPUS) % (MICRO_BATCH / N_GPUS) != 0 )); then
+  echo "Per-GPU MINI_BATCH must be a positive multiple of per-GPU MICRO_BATCH" >&2
+  exit 2
+fi
+if (( (TRAIN_BATCH * N_AGENT) % MINI_BATCH != 0 )); then
+  echo "TRAIN_BATCH*N_AGENT must be divisible by MINI_BATCH" >&2
+  exit 2
+fi
+if [[ "$MIXED_MODE" == blind ]] && (( TRAIN_BATCH % 2 != 0 )); then
+  echo "Blind mixed training requires an even TRAIN_BATCH for group-level 50:50 routing" >&2
+  exit 2
+fi
 
 RUN_ID=$(
   "$PILOT_PYTHON" -m stackpilot.experiment_registry run-id "$EXPERIMENT_ID" \
@@ -95,18 +125,18 @@ SOURCE_VAL=$ROOT/work/hard_rq0/searchr1/test.parquet
 for path in "$SOURCE_TRAIN" "$SOURCE_VAL"; do
   [[ -s "$path" ]] || { echo "Missing hard-RQ0 data: $path" >&2; exit 1; }
 done
+"$PILOT_PYTHON" -m stackpilot.prepare_hard_rq0 \
+  --config "$ROOT/configs/hard_rq0.yaml" --check
 if [[ "$MIXED_MODE" == oracle ]]; then
   DATA_DIR=$EXPERIMENT_ROOT/data/seed-${SEED}
   TRAIN_DATA=$DATA_DIR/train.parquet
   VAL_DATA=$DATA_DIR/test.parquet
-  if [[ ! -s "$TRAIN_DATA" ]]; then
-    "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
-      --input "$SOURCE_TRAIN" --output "$TRAIN_DATA" --seed "$SEED"
-  fi
-  if [[ ! -s "$VAL_DATA" ]]; then
-    "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
-      --input "$SOURCE_VAL" --output "$VAL_DATA" --seed "$SEED"
-  fi
+  "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
+    --input "$SOURCE_TRAIN" --output "$TRAIN_DATA" --seed "$SEED" \
+    --mode backend-id
+  "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
+    --input "$SOURCE_VAL" --output "$VAL_DATA" --seed "$SEED" \
+    --mode backend-id
 else
   TRAIN_DATA=$SOURCE_TRAIN
   VAL_DATA=$SOURCE_VAL
@@ -116,6 +146,8 @@ if [[ ${NUMBERED_SETUP_READY:-0} != 1 ]]; then
   bash "$ROOT/scripts/bootstrap_searchr1.sh"
 fi
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_mixed.py" --search-r1-root "$SEARCH_R1"
 
 BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
@@ -133,9 +165,14 @@ TRAIN_SIGNATURE=$(
     "$N_AGENT" "$TOPK" "$N_GPUS" "$TRAIN_GPUS" "$MAX_PROMPT_LENGTH" \
     "$MAX_RESPONSE_LENGTH" "$MAX_START_LENGTH" "$MAX_OBS_LENGTH" "$MAX_TURNS" \
     "$LEARNING_RATE" "$ROLLOUT_GPU_MEMORY" "$LOG_PROB_MICRO_BATCH" \
+    "$ACTOR_PARAM_OFFLOAD" "$ACTOR_GRAD_OFFLOAD" "$ACTOR_OPTIMIZER_OFFLOAD" "$REF_PARAM_OFFLOAD" \
     "$ROOT/hard_rq0/patch_searchr1_mixed.py" \
     "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
     "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+    "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+    "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+    "$ROOT/hard_rq0/sitecustomize.py" \
+    "$ROOT/stackpilot/prepare_mixed_data.py" \
     "$ROOT/stackpilot/mixed_retriever_server.py" \
     "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
 import hashlib, json, subprocess, sys
@@ -144,8 +181,10 @@ from pathlib import Path
     train, val, model, search_r1, experiment_id, run_id, mode, seed, profile,
     updates, train_batch, val_batch, mini_batch, micro_batch, n_agent, topk,
     n_gpus, train_gpus, max_prompt, max_response, max_start, max_obs, max_turns,
-    learning_rate, rollout_memory, log_batch, mixed_patch, env_patch, seed_patch,
-    mixed_router, wrapper,
+    learning_rate, rollout_memory, log_batch, actor_param_offload,
+    actor_grad_offload, actor_optimizer_offload, ref_param_offload,
+    mixed_patch, env_patch, seed_patch, worker_cuda_patch, validation_patch,
+    sitecustomize, mixed_preparer, mixed_router, wrapper,
 ) = sys.argv[1:]
 def digest(path):
     h = hashlib.sha256()
@@ -201,6 +240,10 @@ payload = {
     'learning_rate': learning_rate,
     'rollout_memory': float(rollout_memory),
     'log_batch': int(log_batch),
+    'actor_param_offload': actor_param_offload == 'true',
+    'actor_grad_offload': actor_grad_offload == 'true',
+    'actor_optimizer_offload': actor_optimizer_offload == 'true',
+    'ref_param_offload': ref_param_offload == 'true',
     'train_sha256': digest(train),
     'val_sha256': digest(val),
     'model': model_identity(model),
@@ -209,6 +252,10 @@ payload = {
         'mixed': digest(mixed_patch),
         'environment': digest(env_patch),
         'seed': digest(seed_patch),
+        'worker_cuda': digest(worker_cuda_patch),
+        'validation': digest(validation_patch),
+        'sitecustomize': digest(sitecustomize),
+        'mixed_preparer': digest(mixed_preparer),
         'mixed_router': digest(mixed_router),
         'wrapper': digest(wrapper),
     },
@@ -326,8 +373,9 @@ if [[ -f "$COMPLETE_MARKER" && ${FORCE_TRAIN:-0} != 1 ]]; then
     mv -- "$CHECKPOINT_DIR" "$corrupt_backup"
     echo "Archived corrupt completed run before retraining: $corrupt_backup" >&2
   else
-    echo "Completion marker exists but does not match this configuration: $COMPLETE_MARKER" >&2
-    exit 1
+    stale_backup="${CHECKPOINT_DIR}.stale.$(date +%Y%m%d-%H%M%S).$$"
+    mv -- "$CHECKPOINT_DIR" "$stale_backup"
+    echo "Archived protocol-incompatible completed run before retraining: $stale_backup" >&2
   fi
 fi
 if [[ -e "$CHECKPOINT_DIR" ]]; then
@@ -370,6 +418,10 @@ export SEARCH_R1_N_AGENT=$N_AGENT
 export PYTHONPATH="$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
+export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
 export SEARCH_R1_RETRIEVER_TIMEOUT=${SEARCH_R1_RETRIEVER_TIMEOUT:-180}
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -403,15 +455,15 @@ echo "Training $RUN_ID mode=$MIXED_MODE seed=$SEED updates=$TOTAL_UPDATES"
   actor_rollout_ref.actor.use_kl_loss=true actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.ppo_mini_batch_size="$MINI_BATCH" \
   actor_rollout_ref.actor.ppo_micro_batch_size="$MICRO_BATCH" \
-  actor_rollout_ref.actor.fsdp_config.param_offload=true \
-  actor_rollout_ref.actor.fsdp_config.grad_offload=true \
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+  actor_rollout_ref.actor.fsdp_config.param_offload="$ACTOR_PARAM_OFFLOAD" \
+  actor_rollout_ref.actor.fsdp_config.grad_offload="$ACTOR_GRAD_OFFLOAD" \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload="$ACTOR_OPTIMIZER_OFFLOAD" \
   actor_rollout_ref.rollout.log_prob_micro_batch_size="$LOG_PROB_MICRO_BATCH" \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 actor_rollout_ref.rollout.name=vllm \
   actor_rollout_ref.rollout.gpu_memory_utilization="$ROLLOUT_GPU_MEMORY" \
   actor_rollout_ref.rollout.n_agent="$N_AGENT" actor_rollout_ref.rollout.temperature=1 \
   actor_rollout_ref.ref.log_prob_micro_batch_size="$LOG_PROB_MICRO_BATCH" \
-  actor_rollout_ref.ref.fsdp_config.param_offload=true actor_rollout_ref.actor.state_masking=true \
+  actor_rollout_ref.ref.fsdp_config.param_offload="$REF_PARAM_OFFLOAD" actor_rollout_ref.actor.state_masking=true \
   algorithm.no_think_rl=false trainer.logger="$LOGGER" \
   +trainer.val_only=false +trainer.val_before_train=true \
   trainer.n_gpus_per_node="$N_GPUS" trainer.nnodes=1 \

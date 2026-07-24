@@ -83,7 +83,14 @@ fi
   echo "Missing .venv-searchr1; run bash scripts/bootstrap_searchr1.sh." >&2
   exit 1
 }
+bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
 "$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --search-r1-root "$ROOT/upstream/Search-R1"
+"$ROOT/.venv-searchr1/bin/python" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --search-r1-root "$ROOT/upstream/Search-R1"
 
 bash "$ROOT/scripts/preflight.sh"

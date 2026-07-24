@@ -32,6 +32,9 @@ data:
   revision: bcafb8dd07d453be3cbeeeb3f78be1841bddf92c
   datasets: [2wikimultihopqa, musique]
   train_examples_per_dataset: 5000
+  # 504 per dataset gives 1,008 trainer-validation rows, exactly divisible
+  # by both the smoke (28) and pilot/full (112) validation batch sizes.
+  validation_examples_per_dataset: 504
   eval_examples_per_dataset: 500
   split_train: train
   split_eval: dev

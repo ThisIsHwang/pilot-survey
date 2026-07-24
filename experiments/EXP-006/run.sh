@@ -34,29 +34,30 @@ fi
 
 if [[ "$REQUIRE_ALL" == 1 ]]; then
   .venv-pilot/bin/python - \
-    "$EXP002_COMPLETE_MARKER" "$EXP002_ROOT" "$PROFILE" "$SEEDS" <<'PY'
+    "$EXP002_COMPLETE_MARKER" "$EXP002_ROOT" "$EXP002_RESULT_SET" \
+    "$PROFILE" "$SEEDS" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-marker_path, exp002_root, profile, seeds_text = sys.argv[1:]
+from stackpilot.exp002_completion import validate_run_completion
+
+marker_path, exp002_root, result_set, profile, seeds_text = sys.argv[1:]
 marker = Path(marker_path)
 root = Path(exp002_root)
 try:
-    payload = json.loads(marker.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError) as exc:
-    raise SystemExit(
-        f"EXP-002 is not complete or has an invalid marker {marker}: {exc}"
-    ) from exc
-if payload.get("schema") != 2 or payload.get("profile") != profile:
-    raise SystemExit(
-        f"EXP-002 marker does not match profile={profile}: {marker}"
+    required_seeds = {int(value) for value in seeds_text.split()}
+    validate_run_completion(
+        root,
+        profile,
+        result_set,
+        required_seeds,
+        marker_path=marker,
     )
-required_seeds = {int(value) for value in seeds_text.split()}
-available_seeds = {int(value) for value in payload.get("seeds", [])}
-missing_seeds = sorted(required_seeds - available_seeds)
-if missing_seeds:
-    raise SystemExit(f"EXP-002 marker is missing specialist seeds: {missing_seeds}")
+except RuntimeError as exc:
+    raise SystemExit(
+        f"EXP-002 completion is absent, stale, or invalid at {marker}: {exc}"
+    ) from exc
 
 
 def validate_model(path: Path) -> None:

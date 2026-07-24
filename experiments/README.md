@@ -32,6 +32,21 @@ python -m stackpilot.experiment_registry list
 python -m stackpilot.experiment_registry run-id EXP-003 --seed 13 --profile pilot --variant blind
 ```
 
+EXP-003 assigns one hidden backend to an entire `n_agent` GRPO rollout group;
+BM25/E5 balance is enforced across prompt groups in each training batch. It
+never compares BM25 and E5 trajectories inside one advantage-normalization
+group. EXP-004 duplicates each source question into explicit BM25 and E5
+conditions, but gives the two rows backend-qualified GRPO UIDs while preserving
+their common `source_index`. Generated mixed-data parquet files carry a
+source/config/output digest sidecar and are rebuilt only when that identity
+changes.
+
+Trainer validation and the final reported evaluation use disjoint pinned rows.
+Validation consumes all rows (`drop_last=false`) and uses hidden row-level
+routing for EXP-003. These protocol identities are included in checkpoint
+signatures; older incompatible completion directories are archived with a
+`.stale.<timestamp>` suffix and retrained rather than silently reused.
+
 ## Scientific ordering
 
 1. Complete EXP-002 before interpreting EXP-003/004.

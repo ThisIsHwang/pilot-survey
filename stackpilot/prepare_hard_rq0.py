@@ -14,7 +14,7 @@ from typing import Any
 from stackpilot.common import ensure_dir, load_config, write_jsonl
 
 DATA_MANIFEST_NAME = ".hard-rq0-data-manifest.json"
-DATA_PREP_SCHEMA = 3
+DATA_PREP_SCHEMA = 4
 PINNED_REVISION_RE = re.compile(r"[0-9a-fA-F]{40}")
 
 PROMPT = (
@@ -166,6 +166,22 @@ def to_query(row: dict[str, Any], dataset_name: str, split: str) -> dict[str, An
 
 
 def to_searchr1_row(item: dict[str, Any]) -> dict[str, Any]:
+    extra_info = {
+        "split": item["split"],
+        # Search-R1 copies this field to GRPO's uid. It must be globally
+        # unique across every concatenated source dataset so unrelated
+        # questions are never normalized as one rollout group.
+        "index": item["id"],
+        "question_id": item["id"],
+        "support_titles": item["support_titles"],
+    }
+    routing_backend = str(item.get("routing_backend", "")).strip().lower()
+    if routing_backend:
+        if routing_backend not in {"bm25", "e5"}:
+            raise ValueError(
+                f"Unsupported hidden validation routing backend: {routing_backend!r}"
+            )
+        extra_info["routing_backend"] = routing_backend
     return {
         "data_source": item["dataset"],
         "prompt": [
@@ -179,15 +195,7 @@ def to_searchr1_row(item: dict[str, Any]) -> dict[str, Any]:
             "style": "rule",
             "ground_truth": {"target": item["answers"]},
         },
-        "extra_info": {
-            "split": item["split"],
-            # Search-R1 copies this field to GRPO's uid. It must be globally
-            # unique across every concatenated source dataset so unrelated
-            # questions are never normalized as one rollout group.
-            "index": item["id"],
-            "question_id": item["id"],
-            "support_titles": item["support_titles"],
-        },
+        "extra_info": extra_info,
     }
 
 
@@ -217,10 +225,15 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Unsafe dataset names: {invalid_names}")
     train_count = int(data_cfg["train_examples_per_dataset"])
     eval_count = int(data_cfg["eval_examples_per_dataset"])
-    if train_count < 1 or eval_count < 1:
+    # Older configs used the final evaluation rows for trainer validation as
+    # well. Preserve config compatibility while assigning the two purposes
+    # disjoint source rows under the new manifest schema.
+    validation_count = int(data_cfg.get("validation_examples_per_dataset", eval_count))
+    if train_count < 1 or validation_count < 1 or eval_count < 1:
         raise ValueError(
-            "Hard-RQ0 train/eval example counts must be positive; "
-            f"got train={train_count}, eval={eval_count}"
+            "Hard-RQ0 train/validation/eval example counts must be positive; "
+            f"got train={train_count}, validation={validation_count}, "
+            f"eval={eval_count}"
         )
     return {
         "schema": DATA_PREP_SCHEMA,
@@ -228,6 +241,7 @@ def prepare_request(cfg: dict[str, Any]) -> dict[str, Any]:
         "revision": revision,
         "datasets": datasets,
         "train_examples_per_dataset": train_count,
+        "validation_examples_per_dataset": validation_count,
         "eval_examples_per_dataset": eval_count,
         "split_train": str(data_cfg["split_train"]),
         "split_eval": str(data_cfg["split_eval"]),
@@ -248,6 +262,7 @@ def expected_artifacts(request: dict[str, Any]) -> list[str]:
         paths.extend(
             (
                 f"data/{dataset_name}/train.jsonl",
+                f"data/{dataset_name}/validation.jsonl",
                 f"data/{dataset_name}/eval.jsonl",
             )
         )
@@ -316,6 +331,47 @@ def validate_unique_rows(rows: list[dict[str, Any]], label: str) -> None:
         raise RuntimeError(f"{label} contains duplicate question IDs")
 
 
+def validate_disjoint_rows(
+    left: list[dict[str, Any]],
+    right: list[dict[str, Any]],
+    left_label: str,
+    right_label: str,
+) -> None:
+    left_ids = {str(row.get("id", "")).strip() for row in left}
+    right_ids = {str(row.get("id", "")).strip() for row in right}
+    overlap = sorted(left_ids & right_ids)
+    if overlap:
+        raise RuntimeError(
+            f"{left_label} and {right_label} question IDs overlap; "
+            f"examples={overlap[:10]}"
+        )
+
+
+def validate_support_titles(
+    rows: list[dict[str, Any]],
+    dataset_name: str,
+    purpose: str,
+    work_dir: Path,
+) -> None:
+    if purpose not in {"validation", "evaluation"}:
+        raise ValueError(f"Unsupported support-title validation purpose: {purpose!r}")
+    missing_rows = [row for row in rows if not row["support_titles"]]
+    diagnostic_path = (
+        work_dir / f"{dataset_name}_{purpose}_missing_support_examples.json"
+    )
+    if missing_rows:
+        atomic_write_json(
+            diagnostic_path,
+            {"count": len(missing_rows), "examples": missing_rows[:10]},
+        )
+        raise RuntimeError(
+            f"{dataset_name}: {len(missing_rows)}/{len(rows)} {purpose} "
+            "rows have no supporting-title metadata. "
+            f"Examples: {diagnostic_path}"
+        )
+    diagnostic_path.unlink(missing_ok=True)
+
+
 def prepare(config_path: str) -> None:
     from datasets import Dataset, concatenate_datasets, load_dataset
 
@@ -336,8 +392,9 @@ def prepare(config_path: str) -> None:
         staging_data_root = ensure_dir(staging_root / "data")
         staging_searchr1_root = ensure_dir(staging_root / "searchr1")
         train_datasets: list[Any] = []
-        eval_datasets: list[Any] = []
+        validation_datasets: list[Any] = []
         all_train_rows: list[dict[str, Any]] = []
+        all_validation_rows: list[dict[str, Any]] = []
         all_eval_rows: list[dict[str, Any]] = []
         summary_lines = [f"source_revision={revision}"]
 
@@ -360,67 +417,137 @@ def prepare(config_path: str) -> None:
                 )
             eval_split = dataset[eval_split_name]
 
-            train_count = min(request["train_examples_per_dataset"], len(train_split))
-            eval_count = min(request["eval_examples_per_dataset"], len(eval_split))
+            train_count = request["train_examples_per_dataset"]
+            validation_count = request["validation_examples_per_dataset"]
+            eval_count = request["eval_examples_per_dataset"]
+            if len(train_split) < train_count:
+                raise RuntimeError(
+                    f"{dataset_name}: requested {train_count} training rows from "
+                    f"{train_split_name!r}, but the pinned split has only "
+                    f"{len(train_split)}"
+                )
+            required_eval_rows = validation_count + eval_count
+            if len(eval_split) < required_eval_rows:
+                raise RuntimeError(
+                    f"{dataset_name}: trainer validation and final evaluation "
+                    "must use disjoint rows, requiring "
+                    f"{validation_count}+{eval_count}={required_eval_rows} rows "
+                    f"from {eval_split_name!r}; the pinned split has only "
+                    f"{len(eval_split)}"
+                )
             train_selected = train_split.shuffle(seed=request["seed"] + offset).select(
                 range(train_count)
             )
-            eval_selected = eval_split.shuffle(
-                seed=request["seed"] + 100 + offset
-            ).select(range(eval_count))
+            shuffled_eval = eval_split.shuffle(seed=request["seed"] + 100 + offset)
+            # Preserve the original Hard-RQ0 final benchmark exactly. Earlier
+            # schemas used the first eval_count rows of this pinned shuffle.
+            # Trainer validation is a new, disjoint slice after those rows.
+            eval_selected = shuffled_eval.select(range(eval_count))
+            validation_selected = shuffled_eval.select(
+                range(eval_count, eval_count + validation_count)
+            )
 
             train_rows = [
                 to_query(dict(row), dataset_name, "train") for row in train_selected
             ]
+            validation_rows = [
+                to_query(dict(row), dataset_name, "validation")
+                for row in validation_selected
+            ]
+            # Mixed-policy validation is not n_agent-expanded upstream. Store a
+            # hidden, deterministic route on each row so its environment is
+            # explicit without exposing the backend in the prompt.
+            for validation_index, validation_row in enumerate(validation_rows):
+                validation_row["routing_backend"] = (
+                    "bm25" if validation_index % 2 == 0 else "e5"
+                )
             eval_rows = [
                 to_query(dict(row), dataset_name, "eval") for row in eval_selected
             ]
             validate_unique_rows(train_rows, f"{dataset_name} train")
+            validate_unique_rows(validation_rows, f"{dataset_name} validation")
             validate_unique_rows(eval_rows, f"{dataset_name} eval")
-            missing_rows = [row for row in eval_rows if not row["support_titles"]]
-            if missing_rows:
-                diagnostic_path = (
-                    work_dir / f"{dataset_name}_missing_support_examples.json"
-                )
-                atomic_write_json(
-                    diagnostic_path,
-                    {"count": len(missing_rows), "examples": missing_rows[:10]},
-                )
-                raise RuntimeError(
-                    f"{dataset_name}: {len(missing_rows)}/{len(eval_rows)} evaluation "
-                    "rows have no supporting-title metadata. "
-                    f"Examples: {diagnostic_path}"
-                )
-            (work_dir / f"{dataset_name}_missing_support_examples.json").unlink(
-                missing_ok=True
+            validate_disjoint_rows(
+                train_rows,
+                validation_rows,
+                f"{dataset_name} train",
+                f"{dataset_name} validation",
+            )
+            validate_disjoint_rows(
+                train_rows,
+                eval_rows,
+                f"{dataset_name} train",
+                f"{dataset_name} eval",
+            )
+            validate_disjoint_rows(
+                validation_rows,
+                eval_rows,
+                f"{dataset_name} validation",
+                f"{dataset_name} eval",
+            )
+            validate_support_titles(
+                validation_rows,
+                dataset_name,
+                "validation",
+                work_dir,
+            )
+            validate_support_titles(
+                eval_rows,
+                dataset_name,
+                "evaluation",
+                work_dir,
             )
 
             dataset_dir = ensure_dir(staging_data_root / dataset_name)
             write_jsonl(dataset_dir / "train.jsonl", train_rows)
+            write_jsonl(dataset_dir / "validation.jsonl", validation_rows)
             write_jsonl(dataset_dir / "eval.jsonl", eval_rows)
             all_train_rows.extend(train_rows)
+            all_validation_rows.extend(validation_rows)
             all_eval_rows.extend(eval_rows)
 
             train_datasets.append(
                 Dataset.from_list([to_searchr1_row(row) for row in train_rows])
             )
-            eval_datasets.append(
-                Dataset.from_list([to_searchr1_row(row) for row in eval_rows])
+            validation_datasets.append(
+                Dataset.from_list([to_searchr1_row(row) for row in validation_rows])
             )
             summary_lines.append(
-                f"{dataset_name}: train={len(train_rows)}, eval={len(eval_rows)}, "
+                f"{dataset_name}: train={len(train_rows)}, "
+                f"validation={len(validation_rows)}, eval={len(eval_rows)}, "
                 f"eval_split={eval_split_name}, "
                 "mean_support_titles="
                 f"{sum(len(x['support_titles']) for x in eval_rows) / len(eval_rows):.2f}"
             )
 
         validate_unique_rows(all_train_rows, "combined hard-RQ0 train")
+        validate_unique_rows(all_validation_rows, "combined hard-RQ0 validation")
         validate_unique_rows(all_eval_rows, "combined hard-RQ0 eval")
+        validate_disjoint_rows(
+            all_train_rows,
+            all_validation_rows,
+            "combined hard-RQ0 train",
+            "combined hard-RQ0 validation",
+        )
+        validate_disjoint_rows(
+            all_train_rows,
+            all_eval_rows,
+            "combined hard-RQ0 train",
+            "combined hard-RQ0 eval",
+        )
+        validate_disjoint_rows(
+            all_validation_rows,
+            all_eval_rows,
+            "combined hard-RQ0 validation",
+            "combined hard-RQ0 eval",
+        )
         write_jsonl(staging_data_root / "eval_all.jsonl", all_eval_rows)
         concatenate_datasets(train_datasets).shuffle(seed=request["seed"]).to_parquet(
             str(staging_searchr1_root / "train.parquet")
         )
-        concatenate_datasets(eval_datasets).to_parquet(
+        # Keep the historical filename because every training wrapper consumes
+        # it, but it now contains trainer-validation rows only.
+        concatenate_datasets(validation_datasets).to_parquet(
             str(staging_searchr1_root / "test.parquet")
         )
         (staging_data_root / "SUMMARY.txt").write_text(

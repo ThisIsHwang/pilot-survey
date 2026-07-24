@@ -97,6 +97,15 @@ mkdir -p "$ROOT/logs"
   echo "Missing $SEARCH_R1; run bash scripts/bootstrap.sh first" >&2
   exit 1
 }
+bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+  --search-r1-root "$SEARCH_R1"
 for data_file in "$TRAIN_FILE" "$VAL_FILE"; do
   [[ -s "$data_file" ]] || {
     echo "Missing Search-R1 data: $data_file" >&2
@@ -405,6 +414,10 @@ export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
 export PYTHONUNBUFFERED=1
 export TOKENIZERS_PARALLELISM=false
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
+export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
 export SEARCH_R1_RETRIEVER_TIMEOUT=${SEARCH_R1_RETRIEVER_TIMEOUT:-120}
 # Retriever models may still need to populate their own Hugging Face cache.
 # Apply local-only flags later, after the selected retriever has started.

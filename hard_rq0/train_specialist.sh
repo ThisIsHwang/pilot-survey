@@ -114,6 +114,10 @@ TEST_FREQ=${TEST_FREQ:-$DEFAULT_TEST_FREQ}
 LOG_PROB_MICRO_BATCH=${LOG_PROB_MICRO_BATCH:-14}
 ROLLOUT_GPU_MEMORY=${ROLLOUT_GPU_MEMORY:-0.55}
 ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-XFORMERS}
+ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}
+ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-false}
+ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-false}
+REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-false}
 
 EXP=${EXP:-hard-rq0-${BACKEND}-seed${SEED}-${PROFILE}}
 if [[ ! "$EXP" =~ ^[A-Za-z0-9._-]+$ ]]; then
@@ -216,6 +220,14 @@ if [[ "$VAL_BEFORE_TRAIN" != true && "$VAL_BEFORE_TRAIN" != false ]]; then
   echo "VAL_BEFORE_TRAIN must be true or false; got '$VAL_BEFORE_TRAIN'." >&2
   exit 2
 fi
+for boolean_name in ACTOR_PARAM_OFFLOAD ACTOR_GRAD_OFFLOAD \
+  ACTOR_OPTIMIZER_OFFLOAD REF_PARAM_OFFLOAD; do
+  boolean_value=${!boolean_name}
+  if [[ "$boolean_value" != true && "$boolean_value" != false ]]; then
+    echo "$boolean_name must be true or false; got '$boolean_value'." >&2
+    exit 2
+  fi
+done
 if (( TRAIN_BATCH % 7 != 0 || VAL_BATCH % 7 != 0 || MINI_BATCH % 7 != 0 || \
       MICRO_BATCH % 7 != 0 || LOG_PROB_MICRO_BATCH % 7 != 0 )); then
   echo "TRAIN_BATCH, VAL_BATCH, MINI_BATCH, MICRO_BATCH, and LOG_PROB_MICRO_BATCH must be divisible by 7." >&2
@@ -243,6 +255,15 @@ if [[ ! "$TRAIN_MIN_DISK_GIB" =~ ^[1-9][0-9]*$ ]]; then
   echo "TRAIN_MIN_DISK_GIB must be a positive integer; got '$TRAIN_MIN_DISK_GIB'." >&2
   exit 2
 fi
+bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+  --search-r1-root "$SEARCH_R1"
 "$ROOT/.venv-searchr1/bin/ray" stop --force >/dev/null 2>&1 || true
 bash "$ROOT/scripts/stop_servers.sh" >/dev/null 2>&1 || true
 STAGE2_MIN_DISK_GIB=$TRAIN_MIN_DISK_GIB bash "$ROOT/scripts/preflight_searchr1.sh"
@@ -274,8 +295,6 @@ fi
 # and returns on >= total_training_steps. N actual updates therefore require N+1.
 TRAINER_STOP_STEP=$((TOTAL_UPDATES + 1))
 
-"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
-  --search-r1-root "$SEARCH_R1"
 BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
   bash "$ROOT/scripts/resolve_hf_model.sh" \
     "$BASE_MODEL" "$BASE_MODEL_REVISION" "$SEARCH_R1_PYTHON")
@@ -301,10 +320,14 @@ TRAIN_SIGNATURE=$("$SEARCH_R1_PYTHON" - \
   "$MAX_OBS_LENGTH" "$MAX_TURNS" \
   "$TOTAL_UPDATES" "$TRAINER_STOP_STEP" "$TOTAL_EPOCHS" \
   "$SAVE_FREQ" "$TEST_FREQ" "$VAL_BEFORE_TRAIN" "$ROLLOUT_GPU_MEMORY" "$ATTENTION_BACKEND" \
+  "$ACTOR_PARAM_OFFLOAD" "$ACTOR_GRAD_OFFLOAD" "$ACTOR_OPTIMIZER_OFFLOAD" "$REF_PARAM_OFFLOAD" \
   "$TRAIN_GPUS" "$N_GPUS" "$E5_GPU" "$PORT" "$SEARCH_R1_COMMIT" "$SEARCH_R1_DIRTY_SHA" \
   "$RETRIEVER_MODEL" "$E5_MODEL_REVISION" "$RETRIEVER_MODEL_REVISION" \
   "$ROOT/searchr1_stage2/searchr1-runtime.patch" \
   "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   "$ROOT/hard_rq0/sitecustomize.py" \
   "$ROOT/hard_rq0/train_specialist.sh" "$ASSET_MANIFEST" \
   "$CORPUS_PATH" "$INDEX_PATH" <<'PY'
@@ -341,6 +364,10 @@ from pathlib import Path
     val_before_train,
     rollout_gpu_memory,
     attention_backend,
+    actor_param_offload,
+    actor_grad_offload,
+    actor_optimizer_offload,
+    ref_param_offload,
     train_gpus,
     n_gpus,
     e5_gpu,
@@ -352,6 +379,9 @@ from pathlib import Path
     retriever_model_revision,
     runtime_patch,
     seed_patch,
+    worker_cuda_patch,
+    validation_patch,
+    experiment_env_patch,
     sitecustomize,
     training_wrapper,
     asset_manifest,
@@ -437,6 +467,10 @@ payload = {
         "val_before_train": val_before_train == "true",
         "rollout_gpu_memory": float(rollout_gpu_memory),
         "attention_backend": attention_backend,
+        "actor_param_offload": actor_param_offload == "true",
+        "actor_grad_offload": actor_grad_offload == "true",
+        "actor_optimizer_offload": actor_optimizer_offload == "true",
+        "ref_param_offload": ref_param_offload == "true",
         "train_gpus": train_gpus,
         "n_gpus": int(n_gpus),
         "e5_gpu": int(e5_gpu),
@@ -447,6 +481,9 @@ payload = {
     "search_r1_dirty_sha256": search_r1_dirty_sha,
     "runtime_patch_sha256": digest(runtime_patch),
     "seed_patch_sha256": digest(seed_patch),
+    "worker_cuda_patch_sha256": digest(worker_cuda_patch),
+    "validation_patch_sha256": digest(validation_patch),
+    "experiment_env_patch_sha256": digest(experiment_env_patch),
     "sitecustomize_sha256": digest(sitecustomize),
     "training_wrapper_sha256": digest(training_wrapper),
 }
@@ -578,6 +615,10 @@ export PYTHONHASHSEED=$SEED
 export PYTHONPATH="$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}
+export RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}
+export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
+export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
 export SEARCH_R1_RETRIEVER_TIMEOUT=${SEARCH_R1_RETRIEVER_TIMEOUT:-120}
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
@@ -606,9 +647,9 @@ cd "$SEARCH_R1"
   actor_rollout_ref.actor.kl_loss_coef=0.001 \
   actor_rollout_ref.actor.ppo_mini_batch_size="$MINI_BATCH" \
   actor_rollout_ref.actor.ppo_micro_batch_size="$MICRO_BATCH" \
-  actor_rollout_ref.actor.fsdp_config.param_offload=true \
-  actor_rollout_ref.actor.fsdp_config.grad_offload=true \
-  actor_rollout_ref.actor.fsdp_config.optimizer_offload=true \
+  actor_rollout_ref.actor.fsdp_config.param_offload="$ACTOR_PARAM_OFFLOAD" \
+  actor_rollout_ref.actor.fsdp_config.grad_offload="$ACTOR_GRAD_OFFLOAD" \
+  actor_rollout_ref.actor.fsdp_config.optimizer_offload="$ACTOR_OPTIMIZER_OFFLOAD" \
   actor_rollout_ref.rollout.log_prob_micro_batch_size="$LOG_PROB_MICRO_BATCH" \
   actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
   actor_rollout_ref.rollout.name=vllm \
@@ -616,7 +657,7 @@ cd "$SEARCH_R1"
   actor_rollout_ref.rollout.n_agent="$N_AGENT" \
   actor_rollout_ref.rollout.temperature=1 \
   actor_rollout_ref.ref.log_prob_micro_batch_size="$LOG_PROB_MICRO_BATCH" \
-  actor_rollout_ref.ref.fsdp_config.param_offload=true \
+  actor_rollout_ref.ref.fsdp_config.param_offload="$REF_PARAM_OFFLOAD" \
   actor_rollout_ref.actor.state_masking=true \
   algorithm.no_think_rl=false \
   trainer.logger="$LOGGER" \

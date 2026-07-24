@@ -236,6 +236,11 @@ LLM generation remains concurrent. Because GPU 7 is exclusive in hard-RQ0, the
 retriever also retains its CUDA allocator cache instead of synchronizing
 `empty_cache()` after every query batch. Launch and training preflights reject
 overlapping assignments, a CPU-only FAISS build, or a non-H100/MIG node.
+Each Ray FSDP worker is additionally required to see exactly one GPU before
+NCCL initialization; CPU RNG startup no longer touches CUDA before Ray applies
+its worker-specific visibility mask. The 3B H100 training layout defaults to
+no FSDP CPU offload, with explicit `ACTOR_*_OFFLOAD` and `REF_PARAM_OFFLOAD`
+overrides available when deliberately testing another memory layout.
 
 The main overrides are `DENSE_GPUS`, `COLBERT_GPU`, `E5_GPU`, `LLM_GPUS`, and
 `TP`. For data-parallel serving, `DP` and `HARD_EVAL_WORKERS` are also

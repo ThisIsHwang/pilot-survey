@@ -86,6 +86,12 @@ bash "$ROOT/scripts/apply_searchr1_runtime_patch.sh"
 # keeping the upstream dirty-tree fingerprint stable across full-pipeline reruns.
 "$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_seed.py" \
   --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --search-r1-root "$SEARCH_R1"
+"$PYTHON_BASE" "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
+  --search-r1-root "$SEARCH_R1"
 
 source "$ROOT/scripts/lib/bootstrap_uv.sh"
 ensure_uv "$ROOT"
@@ -99,6 +105,10 @@ CORE_SIGNATURE=$("$PYTHON_BASE" -m stackpilot.bootstrap_cache signature \
   --input "$SEARCH_R1/verl/version/version" \
   --input "$ROOT/scripts/bootstrap_searchr1.sh" \
   --input "$ROOT/scripts/apply_searchr1_runtime_patch.sh" \
+  --input "$ROOT/hard_rq0/patch_searchr1_seed.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+  --input "$ROOT/hard_rq0/patch_searchr1_experiment_env.py" \
   --input "$ROOT/scripts/lib/bootstrap_env.sh" \
   --input "$ROOT/scripts/lib/bootstrap_uv.sh" \
   --value "uv=0.11.30" --value "torch_backend=cu121" \

@@ -1,4 +1,4 @@
-"""Seed Python, NumPy, and PyTorch in Search-R1 driver and Ray workers."""
+"""Seed CPU RNGs without initializing CUDA before Ray assigns worker GPUs."""
 from __future__ import annotations
 
 import os
@@ -11,15 +11,16 @@ if seed_text is not None:
     random.seed(seed)
     try:
         import numpy as np
-
-        np.random.seed(seed)
-    except Exception:
+    except ImportError:
         pass
+    else:
+        np.random.seed(seed)
     try:
         import torch
-
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except Exception:
+    except ImportError:
         pass
+    else:
+        # torch.manual_seed() also queues a CUDA seed.  Keep this startup hook
+        # strictly CPU-only: Ray narrows CUDA_VISIBLE_DEVICES only after the
+        # worker interpreter (and therefore sitecustomize) has started.
+        torch.default_generator.manual_seed(seed)

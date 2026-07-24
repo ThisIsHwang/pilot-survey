@@ -11,6 +11,8 @@ The first RQ0 used a small HotpotQA context corpus, top-k 10, and usually one se
 - search budget: up to four searches, with turns 1, 2, and 3 analyzed separately
 - policies: deterministic base Qwen plus BM25 and E5 specialists from the same initialization
 - specialist seeds: 13, 42, and 87
+- trainer validation: 504 held-out rows per dataset (1,008 total)
+- final evaluation: a different 500 held-out rows per dataset (1,000 total)
 - primary analysis: gain over base Qwen and home-backend excess gain
 - diagnostic subset: questions that are difficult on both retrievers at base-Qwen turn 1 but recoverable by that same fixed base policy by turn 3
 
@@ -85,6 +87,15 @@ with vLLM batch invariance, and E5 GPU-FAISS calls are serialized around the
 single GPU resource. Override concurrency with `HARD_EVAL_WORKERS`; a custom
 serving layout must provide exactly `TP * DP` IDs in `LLM_GPUS`.
 
+The H100 profile keeps actor parameters, gradients, optimizer state, and the
+reference shard on GPU by default; the 3B model fits this layout and avoids
+CPU/GPU transfer stalls. `ACTOR_PARAM_OFFLOAD`, `ACTOR_GRAD_OFFLOAD`,
+`ACTOR_OPTIMIZER_OFFLOAD`, and `REF_PARAM_OFFLOAD` remain explicit boolean
+escape hatches. Training also fails immediately unless every Ray FSDP worker
+sees exactly one assigned GPU. This prevents Python startup hooks from fixing
+CUDA visibility before Ray narrows `CUDA_VISIBLE_DEVICES`, which otherwise
+appears later as a ten-minute NCCL/FSDP broadcast timeout.
+
 ### Search-R1 rollout limits
 
 Specialist training uses the retrieval-context geometry from the pinned
@@ -140,6 +151,10 @@ cat work/hard_rq0/data/SUMMARY.txt
 ```
 
 No new human annotation is created. The script uses existing answers and supporting-document metadata. It stops with diagnostic examples if a dataset revision does not expose supporting titles in a recognized format.
+Trainer validation and final policy evaluation are drawn without overlap from
+the pinned development split. The historical
+`work/hard_rq0/searchr1/test.parquet` name now denotes trainer validation only;
+`work/hard_rq0/data/eval_all.jsonl` remains the final evaluation set.
 
 ### 4. Start full-wiki retrieval servers
 

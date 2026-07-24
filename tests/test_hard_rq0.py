@@ -5,12 +5,13 @@ import hashlib
 import io
 import json
 import os
+import random
 import subprocess
 import sys
 import tarfile
 import tempfile
-import threading
 import textwrap
+import threading
 import types
 import unittest
 from concurrent.futures import ThreadPoolExecutor
@@ -20,26 +21,48 @@ from unittest.mock import Mock, patch
 import numpy as np
 import pandas as pd
 
+from hard_rq0.patch_searchr1_validation import (
+    NEW as SEARCH_R1_EXHAUSTIVE_VALIDATION_BLOCK,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_SEARCH_GENERATION as SEARCH_R1_PADDED_VALIDATION_GENERATION,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_SEARCH_START as SEARCH_R1_PADDED_VALIDATION_START,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD as SEARCH_R1_DROPPED_VALIDATION_BLOCK,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_SEARCH_GENERATION as SEARCH_R1_UNPADDED_VALIDATION_GENERATION,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_SEARCH_START as SEARCH_R1_UNPADDED_VALIDATION_START,
+)
+from hard_rq0.patch_searchr1_validation import (
+    patch as patch_searchr1_validation,
+)
+from stackpilot.faiss_gpu import paged_flat_gpu_loader
 from stackpilot.hard_assets import (
     CORPUS_TAR_MEMBER,
     E5_INDEX_SIZE,
     E5_PARTS,
     EXPECTED_DOCUMENTS,
-    check as check_hard_assets,
     count_jsonl_file,
     decompress_corpus,
     decompress_gzip_counted,
-    download as download_hard_assets,
     download_bm25,
     ensure_bm25_link,
     repair_e5_assembly_prefix,
     required_free_gib,
     source_identity,
 )
-
-from stackpilot.faiss_gpu import paged_flat_gpu_loader
-from stackpilot.hard_query_analysis import main as query_analysis_main
-from stackpilot.hard_query_report import main as query_report_main
+from stackpilot.hard_assets import (
+    check as check_hard_assets,
+)
+from stackpilot.hard_assets import (
+    download as download_hard_assets,
+)
 from stackpilot.hard_policy_eval import (
     atomic_write_jsonl,
     balanced_limit,
@@ -50,16 +73,18 @@ from stackpilot.hard_policy_eval import (
     recall_at,
     run_signature,
 )
+from stackpilot.hard_query_analysis import main as query_analysis_main
+from stackpilot.hard_query_report import main as query_report_main
+from stackpilot.hard_rq0_contract import (
+    RESULT_SCHEMA,
+    validate_policy_seed,
+    validate_policy_selection,
+)
 from stackpilot.hard_rq0_report import (
     crossed_cluster_bootstrap,
     gain_over_base,
     home_excess,
     matched_hard_question_ids,
-)
-from stackpilot.hard_rq0_contract import (
-    RESULT_SCHEMA,
-    validate_policy_seed,
-    validate_policy_selection,
 )
 from stackpilot.normalize_hard_results import normalize
 from stackpilot.prepare_hard_rq0 import (
@@ -68,9 +93,12 @@ from stackpilot.prepare_hard_rq0 import (
     atomic_write_json,
     expected_artifacts,
     extract_support_titles,
+    prepare,
     prepare_request,
     prepared_cache_valid,
     to_searchr1_row,
+    validate_disjoint_rows,
+    validate_support_titles,
 )
 from stackpilot.retrieval_clients import normalize_document
 from stackpilot.retrieval_concurrency import batch_search
@@ -104,9 +132,7 @@ class HardRQ0Tests(unittest.TestCase):
             return job * 2
 
         completed = dict(
-            parallel_job_results(
-                range(12), worker, max_workers=4, max_in_flight=4
-            )
+            parallel_job_results(range(12), worker, max_workers=4, max_in_flight=4)
         )
 
         self.assertEqual(completed, {job: job * 2 for job in range(12)})
@@ -141,10 +167,11 @@ class HardRQ0Tests(unittest.TestCase):
 
         completed = []
         with self.assertRaisesRegex(RuntimeError, "failed job"):
-            for item in parallel_job_results(
-                [0, 1], worker, max_workers=2, max_in_flight=2
-            ):
-                completed.append(item)
+            completed.extend(
+                parallel_job_results(
+                    [0, 1], worker, max_workers=2, max_in_flight=2
+                )
+            )
         self.assertEqual(completed, [(0, 0)])
 
     def test_parallel_evaluation_does_not_start_queued_jobs_after_error(
@@ -159,11 +186,7 @@ class HardRQ0Tests(unittest.TestCase):
             return job
 
         with self.assertRaisesRegex(RuntimeError, "failed first job"):
-            list(
-                parallel_job_results(
-                    range(8), worker, max_workers=1, max_in_flight=4
-                )
-            )
+            list(parallel_job_results(range(8), worker, max_workers=1, max_in_flight=4))
         self.assertEqual(started, [0])
 
     def test_parallel_evaluation_aborts_blocked_daemon_workers_in_subprocess(
@@ -297,9 +320,7 @@ class HardRQ0Tests(unittest.TestCase):
             return batch_search(retriever, ["q"], 3, search_lock)
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            first = executor.submit(
-                batch_search, retriever, ["q"], 3, search_lock
-            )
+            first = executor.submit(batch_search, retriever, ["q"], 3, search_lock)
             self.assertTrue(entered.wait(timeout=2))
             second = executor.submit(second_search)
             self.assertTrue(second_started.wait(timeout=2))
@@ -365,9 +386,7 @@ class HardRQ0Tests(unittest.TestCase):
         clone_options = types.SimpleNamespace(useFloat16=True, shard=True)
 
         with paged_flat_gpu_loader(faiss, temp_memory_mib=512) as state:
-            result = faiss.index_cpu_to_all_gpus(
-                FakeCpuIndex(), co=clone_options
-            )
+            result = faiss.index_cpu_to_all_gpus(FakeCpuIndex(), co=clone_options)
 
         self.assertIs(faiss.index_cpu_to_all_gpus, original_loader)
         self.assertIsInstance(result, FakeGpuIndex)
@@ -386,28 +405,22 @@ class HardRQ0Tests(unittest.TestCase):
     def test_h100_evaluation_and_prefetch_defaults_are_wired(self) -> None:
         root = Path(__file__).resolve().parents[1]
         evaluator = (root / "hard_rq0" / "eval_policy.sh").read_text("utf-8")
-        launcher = (root / "scripts" / "lib" / "vllm_launch.sh").read_text(
+        launcher = (root / "scripts" / "lib" / "vllm_launch.sh").read_text("utf-8")
+        pipeline = (root / "scripts" / "run_full_pipeline.sh").read_text("utf-8")
+        retriever_launcher = (root / "hard_rq0" / "launch_retrievers.sh").read_text(
             "utf-8"
         )
-        pipeline = (root / "scripts" / "run_full_pipeline.sh").read_text(
+        retriever_ensure = (root / "hard_rq0" / "ensure_retrievers.sh").read_text(
             "utf-8"
         )
-        retriever_launcher = (
-            root / "hard_rq0" / "launch_retrievers.sh"
-        ).read_text("utf-8")
-        retriever_ensure = (
-            root / "hard_rq0" / "ensure_retrievers.sh"
-        ).read_text("utf-8")
         specialist_runner = (
             root / "hard_rq0" / "run_three_seed_specialists.sh"
         ).read_text("utf-8")
         hard_runner = (root / "hard_rq0" / "run_all.sh").read_text("utf-8")
-        faiss_preflight = (
-            root / "hard_rq0" / "preflight_faiss_gpu.sh"
-        ).read_text("utf-8")
-        resume = (root / "scripts" / "resume_after_stage0.sh").read_text(
+        faiss_preflight = (root / "hard_rq0" / "preflight_faiss_gpu.sh").read_text(
             "utf-8"
         )
+        resume = (root / "scripts" / "resume_after_stage0.sh").read_text("utf-8")
 
         self.assertIn("LLM_GPUS=${LLM_GPUS:-0,1,2,3,4,5,6}", evaluator)
         self.assertIn("TP=${TP:-1}", evaluator)
@@ -416,16 +429,14 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}", evaluator)
         self.assertIn('--data-parallel-size "$DP"', launcher)
         self.assertIn('--api-server-count "$VLLM_API_SERVER_COUNT"', launcher)
-        self.assertIn(
-            '--attention-backend "$VLLM_ATTENTION_BACKEND"', launcher
-        )
+        self.assertIn('--attention-backend "$VLLM_ATTENTION_BACKEND"', launcher)
         self.assertIn(
             "VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}",
             evaluator,
         )
         self.assertIn("--faiss-gpu-paged-load", retriever_launcher)
         self.assertIn(
-            'E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}',
+            "E5_FAISS_TEMP_MEMORY_MIB=${E5_FAISS_TEMP_MEMORY_MIB:-512}",
             retriever_launcher,
         )
         self.assertIn("preflight_faiss_gpu.sh", retriever_launcher)
@@ -433,9 +444,7 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("/retrieve", retriever_ensure)
         self.assertIn("process_id", retriever_ensure)
         self.assertIn("hard_rq0/ensure_retrievers.sh", specialist_runner)
-        self.assertIn(
-            "BASE_MODEL_REVISION=$BASE_MODEL_REVISION", specialist_runner
-        )
+        self.assertIn("BASE_MODEL_REVISION=$BASE_MODEL_REVISION", specialist_runner)
         self.assertIn('"MODEL_REVISION=$BASE_MODEL_REVISION"', hard_runner)
         self.assertIn('"BASE_MODEL_REVISION=$BASE_MODEL_REVISION"', hard_runner)
         self.assertIn("KEEP_VLLM=1 is unsafe", hard_runner)
@@ -444,9 +453,7 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn("export RUN_STAGE0=0", resume)
         self.assertIn('exec bash "$ROOT/scripts/run_full_pipeline.sh"', resume)
         self.assertLess(
-            pipeline.index(
-                'bash "$ROOT/scripts/prefetch_future_models.sh" --stage2'
-            ),
+            pipeline.index('bash "$ROOT/scripts/prefetch_future_models.sh" --stage2'),
             pipeline.index('if [[ "$RUN_STAGE0" == 1 ]]'),
         )
         stage2_boundary = pipeline.index(
@@ -471,9 +478,7 @@ class HardRQ0Tests(unittest.TestCase):
 
     def test_specialist_rollout_uses_pinned_searchr1_retrieval_budget(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        script = (root / "hard_rq0" / "train_specialist.sh").read_text(
-            encoding="utf-8"
-        )
+        script = (root / "hard_rq0" / "train_specialist.sh").read_text(encoding="utf-8")
         expected_constants = (
             "readonly MAX_PROMPT_LENGTH=4096",
             "readonly MAX_RESPONSE_LENGTH=500",
@@ -499,10 +504,15 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertNotIn("data.max_obs_length=700", script)
         self.assertIn('"max_obs_length": int(max_obs_length)', script)
         self.assertIn('"schema": 2,', script)
+        self.assertIn("patch_searchr1_worker_cuda.py", script)
+        self.assertIn("patch_searchr1_validation.py", script)
+        self.assertIn("patch_searchr1_experiment_env.py", script)
+        self.assertIn("ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}", script)
+        self.assertIn("REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-false}", script)
+        self.assertNotIn("fsdp_config.param_offload=true", script)
+        self.assertIn("RAY_DEDUP_LOGS=${RAY_DEDUP_LOGS:-0}", script)
 
-        merger = (root / "hard_rq0" / "merge_specialist.sh").read_text(
-            encoding="utf-8"
-        )
+        merger = (root / "hard_rq0" / "merge_specialist.sh").read_text(encoding="utf-8")
         self.assertIn('if payload.get("schema") != 2:', merger)
         self.assertIn('"max_obs_length": 500', merger)
         self.assertIn(
@@ -510,12 +520,32 @@ class HardRQ0Tests(unittest.TestCase):
             merger,
         )
 
+    def test_stage2_entrypoints_apply_all_searchr1_safety_patches(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        entrypoints = (
+            root / "searchr1_stage2" / "run_all.sh",
+            root / "searchr1_stage2" / "run_single_stack_grpo.sh",
+        )
+        required_patches = (
+            "apply_searchr1_runtime_patch.sh",
+            "patch_searchr1_seed.py",
+            "patch_searchr1_worker_cuda.py",
+            "patch_searchr1_validation.py",
+            "patch_searchr1_experiment_env.py",
+        )
+        for entrypoint in entrypoints:
+            script = entrypoint.read_text(encoding="utf-8")
+            for patch_name in required_patches:
+                self.assertIn(patch_name, script, f"{entrypoint} omits {patch_name}")
+
     def test_hard_asset_contract_is_pinned_and_never_adopts_legacy_files(self) -> None:
         self.assertEqual(E5_INDEX_SIZE, sum(part[1] for part in E5_PARTS))
         self.assertEqual(source_identity()["corpus"]["documents"], EXPECTED_DOCUMENTS)
-        with tempfile.TemporaryDirectory() as temporary:
-            with self.assertRaisesRegex(RuntimeError, "manifest is missing"):
-                check_hard_assets(Path(temporary), adopt_legacy=True)
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            self.assertRaisesRegex(RuntimeError, "manifest is missing"),
+        ):
+            check_hard_assets(Path(temporary), adopt_legacy=True)
 
     def test_interrupted_e5_part_keeps_the_verified_prefix(self) -> None:
         parts = (
@@ -526,9 +556,7 @@ class HardRQ0Tests(unittest.TestCase):
             path = Path(temporary) / ".assembling"
             path.write_bytes(b"aaaabbb")
 
-            completed, prefix = repair_e5_assembly_prefix(
-                path, ["part_a"], parts
-            )
+            completed, prefix = repair_e5_assembly_prefix(path, ["part_a"], parts)
 
             self.assertEqual(completed, ["part_a"])
             self.assertEqual(prefix, 4)
@@ -644,10 +672,7 @@ class HardRQ0Tests(unittest.TestCase):
             self.assertTrue(archive.exists())
 
     def test_corpus_recovery_preserves_unexpected_tar_staging(self) -> None:
-        payload = (
-            json.dumps({"id": 0, "contents": "a" * 1000}).encode("utf-8")
-            + b"\n"
-        )
+        payload = json.dumps({"id": 0, "contents": "a" * 1000}).encode("utf-8") + b"\n"
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             staging = root / ".wiki-18.jsonl.decompressing"
@@ -873,9 +898,7 @@ class HardRQ0Tests(unittest.TestCase):
             patch("stackpilot.hard_policy_eval.requests.get", return_value=response),
             self.assertRaisesRegex(RuntimeError, "memory-safe paged"),
         ):
-            check_retriever(
-                "e5", 8102, Path("/idx/e5"), Path("/data/wiki-18.jsonl")
-            )
+            check_retriever("e5", 8102, Path("/idx/e5"), Path("/data/wiki-18.jsonl"))
 
     def test_evaluation_limit_is_balanced_across_datasets(self) -> None:
         rows = [{"id": f"a:{index}", "dataset": "a"} for index in range(5)] + [
@@ -1125,6 +1148,7 @@ class HardRQ0Tests(unittest.TestCase):
             },
         }
         request = prepare_request(config)
+        self.assertEqual(request["validation_examples_per_dataset"], 1)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = expected_artifacts(request)
@@ -1142,8 +1166,287 @@ class HardRQ0Tests(unittest.TestCase):
                 },
             )
             self.assertTrue(prepared_cache_valid(manifest_path, root, request))
+            stale_manifest = json.loads(manifest_path.read_text("utf-8"))
+            stale_manifest["schema"] = DATA_PREP_SCHEMA - 1
+            atomic_write_json(manifest_path, stale_manifest)
+            self.assertFalse(prepared_cache_valid(manifest_path, root, request))
+            stale_manifest["schema"] = DATA_PREP_SCHEMA
+            atomic_write_json(manifest_path, stale_manifest)
+            self.assertTrue(prepared_cache_valid(manifest_path, root, request))
             (root / paths[0]).write_text("changed\n", encoding="utf-8")
             self.assertFalse(prepared_cache_valid(manifest_path, root, request))
+
+    def test_hard_data_uses_disjoint_deterministic_validation_and_final_rows(
+        self,
+    ) -> None:
+        class FakeDataset:
+            def __init__(self, rows: list[dict]) -> None:
+                self.rows = [dict(row) for row in rows]
+
+            @classmethod
+            def from_list(cls, rows: list[dict]) -> FakeDataset:
+                return cls(rows)
+
+            def __len__(self) -> int:
+                return len(self.rows)
+
+            def __iter__(self):
+                return iter(self.rows)
+
+            def shuffle(self, seed: int) -> FakeDataset:
+                rows = list(self.rows)
+                random.Random(seed).shuffle(rows)
+                return FakeDataset(rows)
+
+            def select(self, indices) -> FakeDataset:
+                return FakeDataset([self.rows[index] for index in indices])
+
+            def to_parquet(self, path: str) -> None:
+                Path(path).write_text(
+                    json.dumps(self.rows, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+        train = FakeDataset(
+            [
+                {
+                    "id": f"train-{index}",
+                    "question": f"Train question {index}?",
+                    "golden_answers": [f"train-{index}"],
+                    "metadata": {},
+                }
+                for index in range(3)
+            ]
+        )
+        dev = FakeDataset(
+            [
+                {
+                    "id": f"dev-{index}",
+                    "question": f"Dev question {index}?",
+                    "golden_answers": [f"dev-{index}"],
+                    "metadata": {"supporting_titles": [f"Title {index}"]},
+                }
+                for index in range(6)
+            ]
+        )
+        datasets_module = types.ModuleType("datasets")
+        datasets_module.Dataset = FakeDataset
+        datasets_module.concatenate_datasets = lambda values: FakeDataset(
+            [row for value in values for row in value.rows]
+        )
+        datasets_module.load_dataset = lambda *args, **kwargs: {
+            "train": train,
+            "dev": dev,
+        }
+        legacy_eval_ids = {
+            f"toy:{row['id']}"
+            for row in dev.shuffle(seed=42 + 100).select(range(2))
+        }
+        expected_validation_ids = {
+            f"toy:{row['id']}"
+            for row in dev.shuffle(seed=42 + 100).select(range(2, 4))
+        }
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            work_dir = root / "work"
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "seed": 42,
+                        "work_dir": str(work_dir),
+                        "data": {
+                            "repo_id": "example/data",
+                            "revision": "a" * 40,
+                            "datasets": ["toy"],
+                            "train_examples_per_dataset": 2,
+                            "validation_examples_per_dataset": 2,
+                            "eval_examples_per_dataset": 2,
+                            "split_train": "train",
+                            "split_eval": "dev",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(sys.modules, {"datasets": datasets_module}):
+                prepare(str(config_path))
+
+            validation_rows = [
+                json.loads(line)
+                for line in (work_dir / "data" / "toy" / "validation.jsonl")
+                .read_text("utf-8")
+                .splitlines()
+            ]
+            eval_rows = [
+                json.loads(line)
+                for line in (work_dir / "data" / "eval_all.jsonl")
+                .read_text("utf-8")
+                .splitlines()
+            ]
+            validation_ids = {row["id"] for row in validation_rows}
+            eval_ids = {row["id"] for row in eval_rows}
+            self.assertEqual(len(validation_ids), 2)
+            self.assertEqual(len(eval_ids), 2)
+            self.assertTrue(validation_ids.isdisjoint(eval_ids))
+            self.assertEqual(
+                eval_ids,
+                legacy_eval_ids,
+                "the final benchmark must retain the pre-validation row selection",
+            )
+            self.assertEqual(validation_ids, expected_validation_ids)
+
+            trainer_rows = json.loads(
+                (work_dir / "searchr1" / "test.parquet").read_text("utf-8")
+            )
+            self.assertEqual(
+                {row["extra_info"]["index"] for row in trainer_rows},
+                validation_ids,
+            )
+            self.assertEqual(
+                sorted(row["extra_info"]["routing_backend"] for row in trainer_rows),
+                ["bm25", "e5"],
+            )
+            self.assertTrue(
+                all(
+                    "<retrieval_environment>" not in row["prompt"][0]["content"]
+                    for row in trainer_rows
+                )
+            )
+            manifest = json.loads(
+                (work_dir / "data" / ".hard-rq0-data-manifest.json").read_text("utf-8")
+            )
+            self.assertEqual(manifest["schema"], DATA_PREP_SCHEMA)
+            self.assertIn(
+                "data/toy/validation.jsonl",
+                manifest["artifacts"],
+            )
+
+            second_work_dir = root / "second-work"
+            second_config = json.loads(config_path.read_text("utf-8"))
+            second_config["work_dir"] = str(second_work_dir)
+            second_config_path = root / "second-config.json"
+            second_config_path.write_text(
+                json.dumps(second_config),
+                encoding="utf-8",
+            )
+            with patch.dict(sys.modules, {"datasets": datasets_module}):
+                prepare(str(second_config_path))
+            self.assertEqual(
+                (work_dir / "data" / "toy" / "validation.jsonl").read_bytes(),
+                (second_work_dir / "data" / "toy" / "validation.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                (work_dir / "data" / "eval_all.jsonl").read_bytes(),
+                (second_work_dir / "data" / "eval_all.jsonl").read_bytes(),
+            )
+
+    def test_hard_data_requires_enough_rows_for_disjoint_holdouts(self) -> None:
+        class ShortDataset:
+            def __len__(self) -> int:
+                return 3
+
+            def __iter__(self):
+                return iter(())
+
+        datasets_module = types.ModuleType("datasets")
+        datasets_module.Dataset = Mock()
+        datasets_module.concatenate_datasets = Mock()
+        datasets_module.load_dataset = lambda *args, **kwargs: {
+            "train": ShortDataset(),
+            "dev": ShortDataset(),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "seed": 42,
+                        "work_dir": str(root / "work"),
+                        "data": {
+                            "repo_id": "example/data",
+                            "revision": "a" * 40,
+                            "datasets": ["toy"],
+                            "train_examples_per_dataset": 2,
+                            "validation_examples_per_dataset": 2,
+                            "eval_examples_per_dataset": 2,
+                            "split_train": "train",
+                            "split_eval": "dev",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(sys.modules, {"datasets": datasets_module}),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    r"requiring 2\+2=4 rows.*only 3",
+                ),
+            ):
+                prepare(str(config_path))
+
+    def test_disjoint_row_validator_rejects_question_overlap(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "question IDs overlap"):
+            validate_disjoint_rows(
+                [{"id": "q1"}],
+                [{"id": "q1"}],
+                "validation",
+                "final evaluation",
+            )
+
+    def test_validation_support_titles_are_required_with_separate_diagnostic(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "validation rows have no supporting-title metadata",
+            ):
+                validate_support_titles(
+                    [{"id": "toy:q1", "support_titles": []}],
+                    "toy",
+                    "validation",
+                    root,
+                )
+            diagnostic = root / "toy_validation_missing_support_examples.json"
+            self.assertTrue(diagnostic.is_file())
+            self.assertEqual(
+                json.loads(diagnostic.read_text("utf-8"))["examples"][0]["id"],
+                "toy:q1",
+            )
+            self.assertFalse(
+                (root / "toy_evaluation_missing_support_examples.json").exists()
+            )
+
+    def test_searchr1_validation_patch_is_idempotent_and_exhaustive(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            trainer = root / "verl" / "trainer" / "ppo" / "ray_trainer.py"
+            trainer.parent.mkdir(parents=True)
+            trainer.write_text(
+                (
+                    "prefix\n"
+                    + SEARCH_R1_DROPPED_VALIDATION_BLOCK
+                    + SEARCH_R1_UNPADDED_VALIDATION_START
+                    + SEARCH_R1_UNPADDED_VALIDATION_GENERATION
+                    + "suffix\n"
+                ),
+                encoding="utf-8",
+            )
+            self.assertEqual(patch_searchr1_validation(root), trainer)
+            first = trainer.read_text("utf-8")
+            self.assertIn(SEARCH_R1_EXHAUSTIVE_VALIDATION_BLOCK, first)
+            self.assertIn(SEARCH_R1_PADDED_VALIDATION_START, first)
+            self.assertIn(SEARCH_R1_PADDED_VALIDATION_GENERATION, first)
+            self.assertNotIn(SEARCH_R1_DROPPED_VALIDATION_BLOCK, first)
+            self.assertNotIn(SEARCH_R1_UNPADDED_VALIDATION_START, first)
+            self.assertNotIn(SEARCH_R1_UNPADDED_VALIDATION_GENERATION, first)
+            self.assertEqual(patch_searchr1_validation(root), trainer)
+            self.assertEqual(trainer.read_text("utf-8"), first)
 
     def test_prepare_request_requires_immutable_revision(self) -> None:
         config = {
@@ -1158,9 +1461,11 @@ class HardRQ0Tests(unittest.TestCase):
                 "split_eval": "dev",
             },
         }
-        with patch.dict(os.environ, {}, clear=True):
-            with self.assertRaisesRegex(ValueError, "immutable 40-character"):
-                prepare_request(config)
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            self.assertRaisesRegex(ValueError, "immutable 40-character"),
+        ):
+            prepare_request(config)
 
     def test_policy_selection_rejects_unsafe_or_ambiguous_inputs(self) -> None:
         with self.assertRaises(ValueError):

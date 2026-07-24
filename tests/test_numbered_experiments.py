@@ -321,6 +321,9 @@ class Manager:
             self.assertIn("STACKPILOT_MIXED_ROUTING_V1", first)
             self.assertIn('payload["backend_ids"] = backend_ids', first)
             self.assertIn("STACKPILOT_EXPERIMENT_ENV_V1", first_main)
+            self.assertIn("STACKPILOT_EXPERIMENT_ENV_V2", first_main)
+            self.assertIn("STACKPILOT_RAY_TMP_DIR", first_main)
+            self.assertIn("os.environ.get('NCCL_DEBUG', 'WARN')", first_main)
             compile(first, str(target), "exec")
             compile(first_main, str(main_ppo), "exec")
 

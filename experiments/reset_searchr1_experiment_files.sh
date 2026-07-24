@@ -13,6 +13,8 @@ fi
 known=(
   search_r1/llm_agent/generation.py
   verl/trainer/main_ppo.py
+  verl/trainer/ppo/ray_trainer.py
+  verl/workers/fsdp_workers.py
   verl/workers/sharding_manager/fsdp_vllm.py
 )
 declare -A allowed=()

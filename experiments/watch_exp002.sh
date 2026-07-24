@@ -70,24 +70,17 @@ inputs_ready() {
 completion_ready() {
   "$PILOT_PYTHON" - \
     "$EXP002_ROOT" "$PROFILE" "$RESULT_SET" "$SEEDS" <<'PY'
-import json
 import sys
 from pathlib import Path
+
+from stackpilot.exp002_completion import validate_run_completion
 
 root, profile, result_set, raw_seeds = sys.argv[1:]
 root = Path(root)
 seeds = [int(value) for value in raw_seeds.split()]
-marker = root / "runs" / result_set / ".complete.json"
 try:
-    payload = json.loads(marker.read_text(encoding="utf-8"))
-except (OSError, json.JSONDecodeError):
-    raise SystemExit(1)
-if (
-    payload.get("schema") != 2
-    or payload.get("profile") != profile
-    or payload.get("result_set") != result_set
-    or not set(seeds).issubset(set(payload.get("seeds", [])))
-):
+    validate_run_completion(root, profile, result_set, seeds)
+except RuntimeError:
     raise SystemExit(1)
 for seed in seeds:
     for backend in ("bm25", "e5"):
