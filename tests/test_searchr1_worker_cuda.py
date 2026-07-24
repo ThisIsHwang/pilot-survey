@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from hard_rq0.patch_searchr1_worker_cuda import MARKER, NEW, OLD
+from hard_rq0.patch_searchr1_worker_cuda import LEGACY, LEGACY_MARKER, MARKER, NEW, OLD
 from hard_rq0.patch_searchr1_worker_cuda import patch as patch_worker_cuda
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,6 +133,16 @@ class WorkerCudaPatchTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "found 0"):
             patch_worker_cuda(broken_root)
 
+    def test_upgrades_legacy_strict_initialization_guard(self) -> None:
+        temporary, root = self.make_checkout(LEGACY)
+        self.addCleanup(temporary.cleanup)
+
+        target = patch_worker_cuda(root)
+        patched = target.read_text(encoding="utf-8")
+        self.assertEqual(patched, NEW)
+        self.assertNotIn(LEGACY_MARKER, patched)
+        self.assertEqual(patched.count(MARKER), 1)
+
     def test_patch_applies_to_the_pinned_searchr1_worker(self) -> None:
         source = (
             ROOT
@@ -225,7 +235,6 @@ class ActorRolloutRefWorker(Worker):
         self.assertEqual(
             events,
             [
-                "cuda.is_initialized",
                 "torch._C._cuda_getDeviceCount",
                 "cuda.device_count",
                 ("cuda.set_device", 0),
@@ -235,23 +244,35 @@ class ActorRolloutRefWorker(Worker):
             ],
         )
 
-    def test_fails_before_distributed_init_if_cuda_was_initialized_early(self) -> None:
+    def test_accepts_cuda_initialized_after_ray_applied_single_gpu_mask(self) -> None:
         events, error_type = self.execute_patched_worker(initialized=True)
-        self.assertIs(error_type, RuntimeError)
-        self.assertEqual(events, ["cuda.is_initialized"])
+        self.assertIs(error_type, type(None))
+        self.assertEqual(
+            events,
+            [
+                "torch._C._cuda_getDeviceCount",
+                "cuda.device_count",
+                ("cuda.set_device", 0),
+                ("cuda.manual_seed_all", 15),
+                "dist.is_initialized",
+                ("dist.init_process_group", "nccl"),
+            ],
+        )
 
     def test_rejects_more_than_one_ray_visible_gpu(self) -> None:
         events, error_type = self.execute_patched_worker(visible_devices="0,1")
         self.assertIs(error_type, RuntimeError)
-        self.assertEqual(events, ["cuda.is_initialized"])
+        self.assertEqual(events, [])
 
-    def test_rejects_cached_device_count_that_ignores_ray_mask(self) -> None:
-        events, error_type = self.execute_patched_worker(runtime_count=7)
+    def test_rejects_pre_ray_cuda_context_that_ignores_ray_mask(self) -> None:
+        events, error_type = self.execute_patched_worker(
+            initialized=True,
+            runtime_count=7,
+        )
         self.assertIs(error_type, RuntimeError)
         self.assertEqual(
             events,
             [
-                "cuda.is_initialized",
                 "torch._C._cuda_getDeviceCount",
                 "cuda.device_count",
             ],
