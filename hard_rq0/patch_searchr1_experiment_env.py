@@ -13,6 +13,7 @@ LEGACY_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
             'SEARCH_R1_MIXED_MODE',
             'SEARCH_R1_N_AGENT',
             'SEARCH_R1_RETRIEVER_TIMEOUT',
+            'SEARCH_R1_REWARD_MODE',
             'ANSWER_REWARD_WEIGHT',
             'EVIDENCE_REWARD_WEIGHT',
             'SEARCH_COST_WEIGHT',
@@ -32,6 +33,7 @@ NEW_RAY_INIT = '''        # STACKPILOT_EXPERIMENT_ENV_V1
             'SEARCH_R1_MIXED_MODE',
             'SEARCH_R1_N_AGENT',
             'SEARCH_R1_RETRIEVER_TIMEOUT',
+            'SEARCH_R1_REWARD_MODE',
             'ANSWER_REWARD_WEIGHT',
             'EVIDENCE_REWARD_WEIGHT',
             'SEARCH_COST_WEIGHT',
@@ -54,6 +56,21 @@ def patch(search_r1_root: Path) -> None:
     target = search_r1_root / "verl" / "trainer" / "main_ppo.py"
     text = target.read_text(encoding="utf-8")
     if MARKER in text:
+        reward_mode_entry = "            'SEARCH_R1_REWARD_MODE',\n"
+        if reward_mode_entry not in text:
+            anchor = "            'SEARCH_R1_RETRIEVER_TIMEOUT',\n"
+            if text.count(anchor) != 1:
+                raise RuntimeError(
+                    f"Could not migrate reward-mode propagation in {target}"
+                )
+            text = text.replace(
+                anchor,
+                anchor + reward_mode_entry,
+                1,
+            )
+            target.write_text(text, encoding="utf-8")
+            print(f"Updated numbered-experiment Ray env patch: {target}")
+            return
         print(f"Experiment-env patch already present: {target}")
         return
     if "import os\n" not in text:

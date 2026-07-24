@@ -23,6 +23,7 @@ fi
 export ANSWER_REWARD_WEIGHT=${ANSWER_REWARD_WEIGHT:-1.0}
 export EVIDENCE_REWARD_WEIGHT=${EVIDENCE_REWARD_WEIGHT:-0.5}
 export SEARCH_COST_WEIGHT=${SEARCH_COST_WEIGHT:-0.02}
+export SEARCH_R1_REWARD_MODE=evidence
 
 if [[ ${NUMBERED_SETUP_READY:-0} != 1 ]]; then
   bash scripts/bootstrap.sh
@@ -51,8 +52,6 @@ for backend in $BACKEND_LIST; do
     # bounded retrieval request. NUMBERED_SETUP_READY skips the full bootstrap,
     # so restore this small idempotent runtime patch after every reset.
     bash scripts/apply_searchr1_runtime_patch.sh
-    .venv-searchr1/bin/python hard_rq0/patch_searchr1_evidence_reward.py \
-      --search-r1-root "${SEARCH_R1_ROOT:-upstream/Search-R1}"
     variant="${backend}-evidence-${reward_suffix}"
     run_id=$(
       .venv-pilot/bin/python -m stackpilot.experiment_registry run-id EXP-005 \

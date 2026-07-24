@@ -11,8 +11,10 @@ The first RQ0 used a small HotpotQA context corpus, top-k 10, and usually one se
 - search budget: up to four searches, with turns 1, 2, and 3 analyzed separately
 - policies: deterministic base Qwen plus BM25 and E5 specialists from the same initialization
 - specialist seeds: 13, 42, and 87
-- trainer validation: 504 held-out rows per dataset (1,008 total)
-- final evaluation: a different 500 held-out rows per dataset (1,000 total)
+- trainer development: 500 rows per dataset held out from the source training
+  split after the 5,000 training rows (1,000 total)
+- final evaluation: 500 rows per dataset from the official pinned development
+  split, reserved exclusively for reporting (1,000 total)
 - primary analysis: gain over base Qwen and home-backend excess gain
 - diagnostic subset: questions that are difficult on both retrievers at base-Qwen turn 1 but recoverable by that same fixed base policy by turn 3
 
@@ -112,6 +114,44 @@ limit merely to silence the warning would change the paper-aligned protocol.
 The separate Stage-2 transfer pilot intentionally retains its historical
 top-k-10, three-turn protocol.
 
+### Action and reward protocol
+
+Training and evaluation use the same strict action parser. A model turn may
+contain optional complete `<think>...</think>` blocks and exactly one nonempty
+`<search>...</search>` or `<answer>...</answer>` action; additional text,
+multiple or nested actions, and incomplete tags are invalid. Search-R1
+preserves the complete generated turn before parsing, so an output is not made
+valid by truncating it at the first closing action tag.
+
+If the forced final evaluation turn is malformed, `prediction` is empty,
+`protocol_failure=1`, and primary EM/F1 are zero. The former permissive
+raw-text score is retained only in `raw_text_prediction`, `raw_text_em`, and
+`raw_text_f1` as a robustness diagnostic. `invalid_action_count` separately
+records recoverable malformed turns.
+
+Every rollout exports its protocol-valid terminal answer as structured
+per-example metadata. The trainer scores that answer directly, so malformed
+trajectories cannot earn EM by leaving a plausible `<answer>` somewhere in the
+prompt-plus-response string. Training EM uses the same normalization as final
+evaluation. `train_specialist.sh` defaults to
+`SEARCH_R1_REWARD_MODE=answer`; only EXP-005 sets the mode to `evidence`, after
+first restoring the canonical answer-only trainer. The mode, all three reward
+weights, and both reward patch hashes are bound into the checkpoint signature,
+so an evidence-patched shared Search-R1 tree cannot contaminate a later
+answer-only run. EXP-005 also consumes the retriever's structured
+executed-search count and retrieved titles. Prompt examples and model-authored
+fake control blocks therefore cannot add a search or evidence hit. A malformed
+terminal action receives no answer/evidence bonus (while costs from searches
+that actually ran still apply), and an empty response fails immediately instead
+of writing reward at index `-1`. If the accumulated trajectory was truncated
+before PPO scoring, both answer-only and evidence modes assign exactly zero
+reward because the credited action sequence is no longer fully represented.
+
+These rules are included in training and evaluation signatures. Existing
+checkpoints or result rows made under the older parser, reward, or data
+protocol are not reused; resumable runners archive incompatible completion
+state and recompute it.
+
 ## Manual execution
 
 The remaining sections are for inspecting individual phases. They are not
@@ -151,10 +191,15 @@ cat work/hard_rq0/data/SUMMARY.txt
 ```
 
 No new human annotation is created. The script uses existing answers and supporting-document metadata. It stops with diagnostic examples if a dataset revision does not expose supporting titles in a recognized format.
-Trainer validation and final policy evaluation are drawn without overlap from
-the pinned development split. The historical
-`work/hard_rq0/searchr1/test.parquet` name now denotes trainer validation only;
-`work/hard_rq0/data/eval_all.jsonl` remains the final evaluation set.
+Training and trainer development rows are disjoint deterministic slices of the
+pinned source training split. The official pinned development split is never
+passed to the trainer and is reserved for final reporting. The canonical files
+are `work/hard_rq0/searchr1/train.parquet`,
+`work/hard_rq0/searchr1/dev.parquet`, and
+`work/hard_rq0/data/final_eval.jsonl`. Their manifest records each artifact's
+role, source split, question-ID hash, and file SHA-256. Training and evaluation
+entry points fail closed if an input has the wrong manifested role; changing a
+manifest also invalidates the matching checkpoint signature.
 
 ### 4. Start full-wiki retrieval servers
 

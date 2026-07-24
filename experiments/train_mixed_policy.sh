@@ -34,6 +34,9 @@ ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}
 ACTOR_GRAD_OFFLOAD=${ACTOR_GRAD_OFFLOAD:-false}
 ACTOR_OPTIMIZER_OFFLOAD=${ACTOR_OPTIMIZER_OFFLOAD:-false}
 REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-false}
+# EXP-003/004 isolate retriever routing while retaining the answer-only reward.
+unset ANSWER_REWARD_WEIGHT EVIDENCE_REWARD_WEIGHT SEARCH_COST_WEIGHT
+export SEARCH_R1_REWARD_MODE=answer
 
 case "$EXPERIMENT_ID" in
   EXP-003) MIXED_MODE=blind; VARIANT=blind ;;
@@ -121,8 +124,9 @@ COMPLETE_MARKER=$CHECKPOINT_DIR/.complete.json
 mkdir -p "$LOG_DIR"
 
 SOURCE_TRAIN=$ROOT/work/hard_rq0/searchr1/train.parquet
-SOURCE_VAL=$ROOT/work/hard_rq0/searchr1/test.parquet
-for path in "$SOURCE_TRAIN" "$SOURCE_VAL"; do
+SOURCE_DEV=$ROOT/work/hard_rq0/searchr1/dev.parquet
+DATA_MANIFEST=$ROOT/work/hard_rq0/data/.hard-rq0-data-manifest.json
+for path in "$SOURCE_TRAIN" "$SOURCE_DEV"; do
   [[ -s "$path" ]] || { echo "Missing hard-RQ0 data: $path" >&2; exit 1; }
 done
 "$PILOT_PYTHON" -m stackpilot.prepare_hard_rq0 \
@@ -130,17 +134,22 @@ done
 if [[ "$MIXED_MODE" == oracle ]]; then
   DATA_DIR=$EXPERIMENT_ROOT/data/seed-${SEED}
   TRAIN_DATA=$DATA_DIR/train.parquet
-  VAL_DATA=$DATA_DIR/test.parquet
+  VAL_DATA=$DATA_DIR/dev.parquet
   "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
     --input "$SOURCE_TRAIN" --output "$TRAIN_DATA" --seed "$SEED" \
     --mode backend-id
   "$PILOT_PYTHON" -m stackpilot.prepare_mixed_data \
-    --input "$SOURCE_VAL" --output "$VAL_DATA" --seed "$SEED" \
+    --input "$SOURCE_DEV" --output "$VAL_DATA" --seed "$SEED" \
     --mode backend-id
 else
   TRAIN_DATA=$SOURCE_TRAIN
-  VAL_DATA=$SOURCE_VAL
+  VAL_DATA=$SOURCE_DEV
 fi
+"$PILOT_PYTHON" -m stackpilot.prepare_hard_rq0 \
+  --config "$ROOT/configs/hard_rq0.yaml" \
+  --validate-training-inputs \
+  --train-file "$TRAIN_DATA" \
+  --val-file "$VAL_DATA"
 
 if [[ ${NUMBERED_SETUP_READY:-0} != 1 ]]; then
   bash "$ROOT/scripts/bootstrap_searchr1.sh"
@@ -148,6 +157,8 @@ fi
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_seed.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_validation.py" --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" --search-r1-root "$SEARCH_R1"
+"$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" "$ROOT/hard_rq0/patch_searchr1_mixed.py" --search-r1-root "$SEARCH_R1"
 
 BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
@@ -171,9 +182,12 @@ TRAIN_SIGNATURE=$(
     "$ROOT/hard_rq0/patch_searchr1_seed.py" \
     "$ROOT/hard_rq0/patch_searchr1_worker_cuda.py" \
     "$ROOT/hard_rq0/patch_searchr1_validation.py" \
+    "$ROOT/hard_rq0/patch_searchr1_action_protocol.py" \
+    "$ROOT/hard_rq0/patch_searchr1_reward_protocol.py" \
     "$ROOT/hard_rq0/sitecustomize.py" \
+    "$ROOT/stackpilot/action_protocol.py" \
     "$ROOT/stackpilot/prepare_mixed_data.py" \
-    "$ROOT/stackpilot/mixed_retriever_server.py" \
+    "$ROOT/stackpilot/mixed_retriever_server.py" "$DATA_MANIFEST" \
     "$ROOT/experiments/train_mixed_policy.sh" <<'PY'
 import hashlib, json, subprocess, sys
 from pathlib import Path
@@ -184,7 +198,9 @@ from pathlib import Path
     learning_rate, rollout_memory, log_batch, actor_param_offload,
     actor_grad_offload, actor_optimizer_offload, ref_param_offload,
     mixed_patch, env_patch, seed_patch, worker_cuda_patch, validation_patch,
-    sitecustomize, mixed_preparer, mixed_router, wrapper,
+    action_protocol_patch, reward_protocol_patch, sitecustomize,
+    action_protocol, mixed_preparer,
+    mixed_router, data_manifest, wrapper,
 ) = sys.argv[1:]
 def digest(path):
     h = hashlib.sha256()
@@ -217,7 +233,7 @@ diff = subprocess.run(
     stdout=subprocess.PIPE,
 ).stdout
 payload = {
-    'schema': 2,
+    'schema': 3,
     'experiment_id': experiment_id,
     'run_id': run_id,
     'mode': mode,
@@ -246,6 +262,7 @@ payload = {
     'ref_param_offload': ref_param_offload == 'true',
     'train_sha256': digest(train),
     'val_sha256': digest(val),
+    'data_manifest_sha256': digest(data_manifest),
     'model': model_identity(model),
     'search_r1_diff_sha256': hashlib.sha256(diff).hexdigest(),
     'patches': {
@@ -254,7 +271,10 @@ payload = {
         'seed': digest(seed_patch),
         'worker_cuda': digest(worker_cuda_patch),
         'validation': digest(validation_patch),
+        'action_protocol_patch': digest(action_protocol_patch),
+        'reward_protocol_patch': digest(reward_protocol_patch),
         'sitecustomize': digest(sitecustomize),
+        'action_protocol': digest(action_protocol),
         'mixed_preparer': digest(mixed_preparer),
         'mixed_router': digest(mixed_router),
         'wrapper': digest(wrapper),
@@ -415,7 +435,7 @@ export RQ0_SEED=$SEED
 export PYTHONHASHSEED=$SEED
 export SEARCH_R1_MIXED_MODE=$MIXED_MODE
 export SEARCH_R1_N_AGENT=$N_AGENT
-export PYTHONPATH="$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
+export PYTHONPATH="$ROOT:$ROOT/hard_rq0:$SEARCH_R1:${PYTHONPATH:-}"
 export PYTHONUNBUFFERED=1
 export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 export HYDRA_FULL_ERROR=${HYDRA_FULL_ERROR:-1}

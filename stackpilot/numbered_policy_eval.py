@@ -22,13 +22,16 @@ from stackpilot.hard_policy_eval import (
     balanced_limit,
     best_answer_scores,
     check_retriever,
+    episode_matches_source,
     evaluation_context,
+    expected_answer_strings,
     parallel_job_results,
     run_episode,
     validate_data_rows,
 )
 from stackpilot.hard_rq0_contract import (
     METRICS,
+    NUMBERED_EVALUATION_MANIFEST_SCHEMA,
     RESULT_SCHEMA,
     episode_validation_error,
     finite_number,
@@ -116,10 +119,6 @@ def result_key(row: dict[str, Any]) -> tuple[str, str, int] | None:
         return None
 
 
-def expected_answer_strings(item: dict[str, Any]) -> list[str]:
-    return [str(value) for value in (item.get("answers") or [item["answer"]])]
-
-
 def valid_cached_episode(
     row: dict[str, Any],
     *,
@@ -165,9 +164,7 @@ def valid_cached_episode(
         or row.get("variant") != variant
         or row.get("backend_id_injected") is not inject_backend_id
         or row.get("served_model") != served_model
-        or str(row.get("dataset", "")) != str(item["dataset"])
-        or str(row.get("question", "")) != str(item["question"])
-        or row.get("answers") != expected_answer_strings(item)
+        or not episode_matches_source(row, item)
         or not isinstance(row.get("prediction"), str)
         or not bounded_metrics
         or not valid_search_count
@@ -181,6 +178,49 @@ def valid_cached_episode(
         abs(float(row["em"]) - expected_em) <= 1e-9
         and abs(float(row["f1"]) - expected_f1) <= 1e-9
     )
+
+
+def require_valid_numbered_episode(
+    row: dict[str, Any],
+    *,
+    label: str,
+    key: tuple[str, str, int] | None,
+    expected_keys: set[tuple[str, str, int]],
+    item_by_id: dict[str, dict[str, Any]],
+    experiment_id: str,
+    external_run_id: str,
+    run_signature: str,
+    evaluation_signature: str,
+    tag: str,
+    seed: int,
+    profile: str,
+    variant: str,
+    inject_backend_id: bool,
+    served_model: str,
+    max_search_turns: int,
+) -> None:
+    """Fail closed before a numbered episode is persisted or completed."""
+    if valid_cached_episode(
+        row,
+        key=key,
+        expected_keys=expected_keys,
+        item_by_id=item_by_id,
+        experiment_id=experiment_id,
+        external_run_id=external_run_id,
+        run_signature=run_signature,
+        evaluation_signature=evaluation_signature,
+        tag=tag,
+        seed=seed,
+        profile=profile,
+        variant=variant,
+        inject_backend_id=inject_backend_id,
+        served_model=served_model,
+        max_search_turns=max_search_turns,
+    ):
+        return
+    protocol_problem = episode_validation_error(row, max_search_turns)
+    detail = protocol_problem or "provenance, source row, or metric contract mismatch"
+    raise RuntimeError(f"{label} is invalid for key {key}: {detail}")
 
 
 def prepare_result_cache(
@@ -624,6 +664,7 @@ def main() -> None:
     ]
     expected_keys = set(expected_order)
     item_by_id = {str(item["id"]): item for item in rows}
+    max_search_turns = int(cfg["agent"]["max_search_turns"])
     existing_rows, _ = load_cached_rows(output_path)
     current = prepare_result_cache(
         output_path,
@@ -640,7 +681,7 @@ def main() -> None:
         variant=args.variant,
         inject_backend_id=args.inject_backend_id,
         served_model=args.model,
-        max_search_turns=int(cfg["agent"]["max_search_turns"]),
+        max_search_turns=max_search_turns,
     )
 
     urls = {
@@ -729,6 +770,24 @@ def main() -> None:
                     "served_model": args.model,
                 }
             )
+            require_valid_numbered_episode(
+                episode,
+                label="newly generated numbered episode",
+                key=key,
+                expected_keys=expected_keys,
+                item_by_id=item_by_id,
+                experiment_id=args.experiment_id,
+                external_run_id=args.run_id,
+                run_signature=run_signature,
+                evaluation_signature=evaluation_id,
+                tag=args.tag,
+                seed=args.seed,
+                profile=args.profile,
+                variant=args.variant,
+                inject_backend_id=args.inject_backend_id,
+                served_model=args.model,
+                max_search_turns=max_search_turns,
+            )
             current[key] = episode
             checkpoint_rows.append(episode)
             if len(checkpoint_rows) >= checkpoint_size:
@@ -766,11 +825,31 @@ def main() -> None:
             f"Numbered evaluation is incomplete; missing={missing}, extra={extra}"
         )
     final_rows = [current[key] for key in expected_order]
+    for key, episode in zip(expected_order, final_rows, strict=True):
+        require_valid_numbered_episode(
+            episode,
+            label="numbered completion episode",
+            key=key,
+            expected_keys=expected_keys,
+            item_by_id=item_by_id,
+            experiment_id=args.experiment_id,
+            external_run_id=args.run_id,
+            run_signature=run_signature,
+            evaluation_signature=evaluation_id,
+            tag=args.tag,
+            seed=args.seed,
+            profile=args.profile,
+            variant=args.variant,
+            inject_backend_id=args.inject_backend_id,
+            served_model=args.model,
+            max_search_turns=max_search_turns,
+        )
     atomic_write_jsonl(output_path, final_rows)
     summary = summarize(final_rows)
     summary.to_csv(summary_path, index=False)
     manifest = {
-        "schema": RESULT_SCHEMA,
+        "schema": NUMBERED_EVALUATION_MANIFEST_SCHEMA,
+        "result_schema": RESULT_SCHEMA,
         "status": "complete",
         "experiment_id": args.experiment_id,
         "run_id": args.run_id,

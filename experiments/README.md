@@ -41,11 +41,29 @@ their common `source_index`. Generated mixed-data parquet files carry a
 source/config/output digest sidecar and are rebuilt only when that identity
 changes.
 
-Trainer validation and the final reported evaluation use disjoint pinned rows.
-Validation consumes all rows (`drop_last=false`) and uses hidden row-level
-routing for EXP-003. These protocol identities are included in checkpoint
-signatures; older incompatible completion directories are archived with a
-`.stale.<timestamp>` suffix and retrained rather than silently reused.
+Trainer validation uses `searchr1/dev.parquet`, held out from the source
+training split, while final reporting alone uses `data/final_eval.jsonl` from
+the official pinned development split. Validation consumes all rows
+(`drop_last=false`) and uses hidden row-level routing for EXP-003. Manifested
+roles are checked before training/evaluation, and the data-manifest SHA is part
+of every checkpoint signature. Older incompatible completion directories are
+archived with a `.stale.<timestamp>` suffix and retrained rather than silently
+reused.
+
+All policy training and evaluation paths share one strict action parser:
+optional complete `<think>` blocks plus exactly one `<search>` or `<answer>`
+action. Malformed final output has an empty primary prediction and cannot earn
+primary EM/F1; its legacy raw-text score is emitted only as a separately named
+robustness metric. Training reward reads the rollout's structured terminal
+answer rather than reparsing the prompt-plus-response string. EXP-005 likewise
+uses structured executed-search counts and retriever-returned titles, so prompt
+examples or model-authored control blocks cannot inflate evidence or search
+counts. Parser, reward, and result-schema identities are part of the relevant
+signatures, forcing incompatible cached work to rerun. Specialist training
+defaults to explicit `answer` reward mode; EXP-005 alone selects `evidence`.
+Each run first restores the answer-only implementation, then applies the
+evidence extension when requested, preventing shared-checkout contamination.
+Truncated trajectories receive exactly zero reward in either mode.
 
 ## Scientific ordering
 

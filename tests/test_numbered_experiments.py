@@ -1,16 +1,36 @@
 from __future__ import annotations
 
+import os
+import re
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from runpy import run_path
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from hard_rq0.patch_searchr1_evidence_reward import patch as patch_evidence_reward
+from hard_rq0.patch_searchr1_evidence_reward import (
+    MARKER as EVIDENCE_REWARD_MARKER,
+)
+from hard_rq0.patch_searchr1_evidence_reward import (
+    patch as patch_evidence_reward,
+)
 from hard_rq0.patch_searchr1_mixed import patch as patch_mixed_routing
+from hard_rq0.patch_searchr1_reward_protocol import (
+    ANSWER_HELPER,
+)
+from hard_rq0.patch_searchr1_reward_protocol import (
+    MARKER as TERMINAL_REWARD_MARKER,
+)
+from hard_rq0.patch_searchr1_reward_protocol import (
+    patch as patch_terminal_reward,
+)
+from stackpilot.common import answer_em
 from stackpilot.hybrid_rrf_server import create_app as create_hybrid_app
 from stackpilot.hybrid_rrf_server import fuse
 from stackpilot.mixed_retriever_server import create_app
@@ -25,7 +45,7 @@ from stackpilot.prepare_mixed_data import add_marker, duplicate_row
 def write_main_ppo(root: Path, *, reward_block: bool) -> Path:
     reward = ""
     if reward_block:
-        reward = '''
+        reward = """
 class RewardManager():
     def score(self, data_item, sequences_str, ground_truth, reward_tensor, i, valid_response_length):
         compute_score_fn = lambda **kwargs: 1.0
@@ -33,8 +53,8 @@ class RewardManager():
             score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
 
             reward_tensor[i, valid_response_length - 1] = score
-'''
-    source = f'''import re
+"""
+    source = f"""import re
 import numpy as np
 {reward}
 import ray
@@ -42,11 +62,45 @@ import ray
 def main(config):
     if not ray.is_initialized():
         ray.init(runtime_env={{'env_vars': {{'TOKENIZERS_PARALLELISM': 'true', 'NCCL_DEBUG': 'WARN'}}}})
-'''
+"""
     target = root / "verl" / "trainer" / "main_ppo.py"
     target.parent.mkdir(parents=True)
     target.write_text(source, encoding="utf-8")
     return target
+
+
+def run_patched_reward(
+    source: str,
+    *,
+    trajectory_truncated: int,
+    evidence: bool,
+) -> float:
+    namespace: dict[str, object] = {}
+    exec(source.split("\nimport ray\n", 1)[0], namespace)
+    manager = namespace["RewardManager"]()
+    non_tensors: dict[str, object] = {
+        "stackpilot_terminal_answer": "William Shakespeare",
+        "stackpilot_protocol_failure": 0,
+        "stackpilot_trajectory_truncated": trajectory_truncated,
+    }
+    if evidence:
+        non_tensors.update(
+            {
+                "extra_info": {"support_titles": ["William Shakespeare"]},
+                "stackpilot_retrieved_titles": ["William Shakespeare"],
+                "stackpilot_search_count": 2,
+            }
+        )
+    reward_tensor = np.zeros((1, 3), dtype=np.float32)
+    manager.score(
+        SimpleNamespace(non_tensor_batch=non_tensors),
+        "unused",
+        {"target": ["William Shakespeare"]},
+        reward_tensor,
+        0,
+        2,
+    )
+    return float(reward_tensor[0, 1])
 
 
 class NumberedExperimentTests(unittest.TestCase):
@@ -90,7 +144,9 @@ class NumberedExperimentTests(unittest.TestCase):
             timeout=1.0,
             assignment_log=None,
         )
-        with patch("stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post):
+        with patch(
+            "stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post
+        ):
             client = TestClient(app)
             missing = client.post("/retrieve", json={"queries": ["a"]})
             self.assertEqual(missing.status_code, 422)
@@ -122,7 +178,9 @@ class NumberedExperimentTests(unittest.TestCase):
             timeout=1.0,
             assignment_log=None,
         )
-        with patch("stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post):
+        with patch(
+            "stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post
+        ):
             response = TestClient(app).post(
                 "/retrieve",
                 json={
@@ -146,7 +204,9 @@ class NumberedExperimentTests(unittest.TestCase):
             timeout=1.0,
             assignment_log=None,
         )
-        with patch("stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post):
+        with patch(
+            "stackpilot.mixed_retriever_server.post_batch", side_effect=fake_post
+        ):
             response = TestClient(app).post(
                 "/retrieve",
                 json={
@@ -172,7 +232,9 @@ class NumberedExperimentTests(unittest.TestCase):
         self.assertEqual(result[0]["sources"], ["bm25", "e5"])
         self.assertEqual(len(result), 2)
 
-    def test_hybrid_router_calls_upstreams_concurrently_and_reports_config(self) -> None:
+    def test_hybrid_router_calls_upstreams_concurrently_and_reports_config(
+        self,
+    ) -> None:
         rendezvous = threading.Barrier(2)
         seen_topk: list[int] = []
         seen_lock = threading.Lock()
@@ -331,16 +393,201 @@ class Manager:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             target = write_main_ppo(root, reward_block=True)
-            patch_evidence_reward(root)
-            first = target.read_text(encoding="utf-8")
-            patch_evidence_reward(root)
-            second = target.read_text(encoding="utf-8")
+            with patch.dict(
+                os.environ,
+                {"SEARCH_R1_REWARD_MODE": "evidence"},
+            ):
+                patch_evidence_reward(root)
+                first = target.read_text(encoding="utf-8")
+                patch_evidence_reward(root)
+                second = target.read_text(encoding="utf-8")
             self.assertEqual(first, second)
-            self.assertIn("STACKPILOT_EVIDENCE_REWARD_V1", first)
+            self.assertIn(EVIDENCE_REWARD_MARKER, first)
             self.assertIn("STACKPILOT_EXPERIMENT_ENV_V1", first)
+            self.assertIn(TERMINAL_REWARD_MARKER, first)
             self.assertIn("EVIDENCE_REWARD_WEIGHT", first)
-            self.assertIn(r"Doc\s+\d+\(Title:", first)
+            self.assertIn(
+                "_stackpilot_answer_em(terminal_answer, targets)",
+                first,
+            )
+            self.assertIn("'stackpilot_trajectory_truncated'", first)
+            self.assertIn("if trajectory_truncated:", first)
+            self.assertIn(
+                "_support_recall_from_titles(",
+                first,
+            )
+            self.assertIn("'stackpilot_retrieved_titles'", first)
+            self.assertIn("'stackpilot_search_count'", first)
+            self.assertNotIn("solution_str=response_str", first)
+            self.assertNotIn("solution_str=sequences_str", first)
             compile(first, str(target), "exec")
+
+    def test_terminal_reward_patch_is_idempotent_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = write_main_ppo(root, reward_block=True)
+            patch_terminal_reward(root)
+            first = target.read_text(encoding="utf-8")
+            patch_terminal_reward(root)
+            second = target.read_text(encoding="utf-8")
+
+            self.assertEqual(first, second)
+            self.assertIn(TERMINAL_REWARD_MARKER, first)
+            self.assertIn("'stackpilot_terminal_answer'", first)
+            self.assertIn("'stackpilot_protocol_failure'", first)
+            self.assertIn(
+                "_stackpilot_answer_em(terminal_answer, targets)",
+                first,
+            )
+            self.assertIn("'stackpilot_trajectory_truncated'", first)
+            self.assertIn("answer_score = 0.0", first)
+            self.assertNotIn("solution_str=sequences_str", first)
+            compile(first, str(target), "exec")
+
+    def test_terminal_reward_bypasses_the_broken_single_tag_extractor(self) -> None:
+        qa_em = run_path(
+            "upstream/Search-R1/verl/utils/reward_score/qa_em.py"
+        )
+        ground_truth = {"target": ["William Shakespeare"]}
+        clean_response = "<answer>William Shakespeare</answer>"
+        self.assertEqual(
+            qa_em["compute_score_em"](clean_response, ground_truth),
+            0,
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = write_main_ppo(root, reward_block=True)
+            patch_terminal_reward(root)
+            patched = target.read_text(encoding="utf-8")
+        self.assertIn(
+            "_stackpilot_answer_em(terminal_answer, targets)",
+            patched,
+        )
+        self.assertNotIn("compute_score_fn(solution_str=", patched)
+
+    def test_training_answer_em_matches_final_evaluation_normalization(self) -> None:
+        helper_source = ANSWER_HELPER.split(
+            "\n\nclass RewardManager():",
+            1,
+        )[0]
+        namespace = {"re": re}
+        exec(helper_source, namespace)
+        training_em = namespace["_stackpilot_answer_em"]
+        examples = (
+            ("NewYork", ["New-York"]),
+            ("Jean Luc Picard", ["Jean-Luc Picard"]),
+            ("The Beatles", ["Beatles"]),
+            ("wrong", ["first", "right"]),
+        )
+        for prediction, aliases in examples:
+            expected = max(answer_em(prediction, alias) for alias in aliases)
+            self.assertEqual(training_em(prediction, aliases), expected)
+
+    def test_terminal_reward_migrates_legacy_evidence_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = write_main_ppo(root, reward_block=True)
+            legacy = target.read_text(encoding="utf-8")
+            legacy = legacy.replace(
+                "\nclass RewardManager():\n",
+                """
+# STACKPILOT_EVIDENCE_REWARD_V2
+def _normalize_evidence_title(value):
+    return str(value)
+
+
+class RewardManager():
+""",
+                1,
+            )
+            legacy = legacy.replace(
+                """            score = compute_score_fn(solution_str=sequences_str, ground_truth=ground_truth, format_score=self.format_score)
+
+            reward_tensor[i, valid_response_length - 1] = score
+""",
+                """            if int(valid_response_length) <= 0:
+                raise RuntimeError("evidence reward received an empty response")
+            response_str = "legacy"
+            answer_score = compute_score_fn(
+                solution_str=response_str,
+                ground_truth=ground_truth,
+                format_score=self.format_score,
+            )
+            score = float(answer_score)
+
+            reward_tensor[i, valid_response_length - 1] = score
+""",
+                1,
+            )
+            target.write_text(legacy, encoding="utf-8")
+
+            patch_terminal_reward(root)
+            migrated = target.read_text(encoding="utf-8")
+
+            self.assertIn(TERMINAL_REWARD_MARKER, migrated)
+            self.assertNotIn("STACKPILOT_EVIDENCE_REWARD_V2", migrated)
+            self.assertNotIn("evidence reward received an empty response", migrated)
+            compile(migrated, str(target), "exec")
+
+    def test_answer_mode_removes_a_preexisting_evidence_patch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = write_main_ppo(root, reward_block=True)
+            with patch.dict(
+                os.environ,
+                {"SEARCH_R1_REWARD_MODE": "evidence"},
+            ):
+                patch_evidence_reward(root)
+            evidence = target.read_text(encoding="utf-8")
+            self.assertIn(EVIDENCE_REWARD_MARKER, evidence)
+
+            patch_terminal_reward(root)
+            answer_only = target.read_text(encoding="utf-8")
+
+            self.assertIn(TERMINAL_REWARD_MARKER, answer_only)
+            self.assertNotIn(EVIDENCE_REWARD_MARKER, answer_only)
+            self.assertNotIn("_support_recall_from_titles(", answer_only)
+            self.assertNotIn("import unicodedata", answer_only)
+            self.assertIn("score = float(answer_score)", answer_only)
+            compile(answer_only, str(target), "exec")
+
+    def test_truncated_trajectory_gets_zero_in_both_reward_modes(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = write_main_ppo(root, reward_block=True)
+            patch_terminal_reward(root)
+            answer_only = target.read_text(encoding="utf-8")
+            self.assertEqual(
+                run_patched_reward(
+                    answer_only,
+                    trajectory_truncated=0,
+                    evidence=False,
+                ),
+                1.0,
+            )
+            self.assertEqual(
+                run_patched_reward(
+                    answer_only,
+                    trajectory_truncated=1,
+                    evidence=False,
+                ),
+                0.0,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"SEARCH_R1_REWARD_MODE": "evidence"},
+            ):
+                patch_evidence_reward(root)
+            evidence_source = target.read_text(encoding="utf-8")
+            self.assertEqual(
+                run_patched_reward(
+                    evidence_source,
+                    trajectory_truncated=1,
+                    evidence=True,
+                ),
+                0.0,
+            )
 
     @staticmethod
     def result_frame(tag: str, seed: int, bm25: float, e5: float) -> pd.DataFrame:
@@ -386,15 +633,25 @@ class Manager:
 
     def test_run_scripts_bind_numbers_to_variants(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        exp003 = (root / "experiments" / "EXP-003" / "run.sh").read_text(encoding="utf-8")
-        exp004 = (root / "experiments" / "EXP-004" / "run.sh").read_text(encoding="utf-8")
-        exp005 = (root / "experiments" / "EXP-005" / "run.sh").read_text(encoding="utf-8")
-        exp006 = (root / "experiments" / "EXP-006" / "run.sh").read_text(encoding="utf-8")
+        exp003 = (root / "experiments" / "EXP-003" / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        exp004 = (root / "experiments" / "EXP-004" / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        exp005 = (root / "experiments" / "EXP-005" / "run.sh").read_text(
+            encoding="utf-8"
+        )
+        exp006 = (root / "experiments" / "EXP-006" / "run.sh").read_text(
+            encoding="utf-8"
+        )
         self.assertIn("EXPERIMENT_ID=EXP-003", exp003)
         self.assertIn("VARIANT=blind", exp003)
         self.assertIn("INJECT_BACKEND_ID=1", exp004)
-        self.assertIn("patch_searchr1_evidence_reward.py", exp005)
+        self.assertIn("SEARCH_R1_REWARD_MODE=evidence", exp005)
+        self.assertNotIn("patch_searchr1_evidence_reward.py", exp005)
         self.assertIn('BACKENDS="hybrid"', exp006)
+
 
 if __name__ == "__main__":
     unittest.main()

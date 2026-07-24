@@ -252,6 +252,14 @@ def _last_nonempty_line(path: Path) -> bytes:
     return b""
 
 
+def _first_nonempty_line(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        for line in handle:
+            if line.strip():
+                return line
+    return b""
+
+
 def _validate_corpus_row(raw: bytes, label: str, path: Path) -> None:
     try:
         row = json.loads(raw.decode("utf-8"))
@@ -269,10 +277,9 @@ def validate_corpus(path: Path) -> dict[str, Any]:
     """Perform a fast reuse check without rescanning all 21 million rows."""
     if not path.is_file() or path.stat().st_size <= CORPUS_ARCHIVE_SIZE:
         raise RuntimeError(f"wiki-18 corpus is missing or truncated: {path}")
-    with path.open("rb") as handle:
-        first = handle.readline()
-    if not first.endswith(b"\n"):
-        raise RuntimeError(f"wiki-18 corpus has an incomplete first row: {path}")
+    first = _first_nonempty_line(path)
+    if not first:
+        raise RuntimeError(f"wiki-18 corpus has no readable first row: {path}")
     last = _last_nonempty_line(path)
     if not last:
         raise RuntimeError(f"wiki-18 corpus has no readable final row: {path}")
@@ -672,20 +679,27 @@ def assemble_e5(root: Path, *, keep_sources: bool) -> dict[str, Any]:
 def _count_jsonl_stream(
     source: BinaryIO, target: BinaryIO | None = None
 ) -> tuple[int, int]:
-    """Count JSONL bytes/rows, accepting a valid final row without a newline."""
+    """Count non-empty JSONL rows, including an unterminated final row."""
     copied = 0
     rows = 0
-    final_byte = b""
+    pending_nonempty = False
     while chunk := source.read(HASH_CHUNK_SIZE):
         if target is not None:
             target.write(chunk)
         copied += len(chunk)
-        rows += chunk.count(b"\n")
-        final_byte = chunk[-1:]
+        segments = chunk.split(b"\n")
+        for segment in segments[:-1]:
+            if pending_nonempty or segment.strip():
+                rows += 1
+            pending_nonempty = False
+        if segments[-1].strip():
+            pending_nonempty = True
     if copied == 0:
         raise RuntimeError("JSONL corpus is empty")
-    if final_byte != b"\n":
+    if pending_nonempty:
         rows += 1
+    if rows == 0:
+        raise RuntimeError("JSONL corpus has no non-empty rows")
     return copied, rows
 
 

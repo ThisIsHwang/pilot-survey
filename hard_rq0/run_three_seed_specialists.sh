@@ -55,6 +55,7 @@ for backend in bm25 e5; do
     echo "=== train ${backend} specialist, seed ${seed}, profile ${PROFILE} ==="
     BACKEND=$backend PORT=$port SEED=$seed PROFILE=$PROFILE \
       BASE_MODEL=$BASE_MODEL BASE_MODEL_REVISION=$BASE_MODEL_REVISION \
+      SEARCH_R1_REWARD_MODE=answer \
       bash "$ROOT/hard_rq0/train_specialist.sh"
 
     BACKEND=$backend SEED=$seed PROFILE=$PROFILE \

@@ -17,8 +17,14 @@ from stackpilot.common import (
     read_jsonl,
     read_jsonl_tolerant,
 )
+from stackpilot.prepare_hotpot import (
+    pilot_data_configuration,
+    validate_pilot_data_manifest,
+)
 from stackpilot.react_agent_eval import (
     RESULT_SCHEMA,
+    episode_matches_source,
+    episode_validation_error,
     file_digest,
     run_episode,
     run_identity,
@@ -60,15 +66,23 @@ def main() -> None:
     if len(set(args.variants)) != len(args.variants):
         raise ValueError(f"Duplicate variants are not allowed: {args.variants}")
     cfg = load_config(args.config)
+    work_dir = Path(cfg["work_dir"]).resolve()
+    data_manifest = validate_pilot_data_manifest(
+        work_dir / "data",
+        expected_configuration=pilot_data_configuration(cfg),
+    )
+    final_eval = data_manifest["outputs"]["eval"]
+    if final_eval.get("role") != "final_evaluation":
+        raise RuntimeError("Policy evaluation requires the final_evaluation artifact")
     check_retrievers(cfg, args.backends)
     check_vllm(cfg)
 
-    work_dir = Path(cfg["work_dir"]).resolve()
     out_dir = ensure_dir(work_dir / "results" / "policies")
     output_path = out_dir / f"{args.tag}.jsonl"
     summary_path = out_dir / f"{args.tag}_summary.csv"
 
-    queries = read_jsonl(work_dir / "data" / "queries_eval.jsonl")
+    queries_eval_path = work_dir / "data" / final_eval["path"]
+    queries = read_jsonl(queries_eval_path)
     limit = int(cfg["agent"]["eval_examples"]) if args.limit is None else args.limit
     if limit < 1:
         raise ValueError(f"Evaluation limit must be positive; got {limit}")
@@ -80,7 +94,11 @@ def main() -> None:
         raise RuntimeError("Policy-evaluation question IDs must be unique")
     evaluation_context = {
         "schema": 1,
-        "queries_eval_sha256": file_digest(work_dir / "data" / "queries_eval.jsonl"),
+        "queries_eval_sha256": file_digest(queries_eval_path),
+        "queries_eval_role": final_eval["role"],
+        "queries_eval_source_split": final_eval["source_split"],
+        "queries_eval_question_ids_sha256": final_eval["question_ids_sha256"],
+        "data_manifest_schema": data_manifest["schema"],
         "corpus_sha256": file_digest(work_dir / "data" / "corpus.jsonl"),
         "data_manifest_sha256": file_digest(work_dir / "data" / ".pilot-manifest.json"),
         "index_manifests": {
@@ -92,6 +110,7 @@ def main() -> None:
         "evaluator_files": {
             name: file_digest(Path(__file__).with_name(name))
             for name in (
+                "action_protocol.py",
                 "common.py",
                 "policy_eval.py",
                 "react_agent_eval.py",
@@ -140,6 +159,7 @@ def main() -> None:
     )
     model = effective_model_name(cfg)
     selected_ids = {str(item["id"]) for item in queries}
+    item_by_id = {str(item["id"]): item for item in queries}
     existing = read_jsonl_tolerant(output_path)
     row_by_key = {
         (
@@ -155,6 +175,13 @@ def main() -> None:
         and str(row.get("question_id")) in selected_ids
         and str(row.get("backend")) in args.backends
         and str(row.get("variant")) in args.variants
+        and episode_matches_source(
+            row, item_by_id[str(row.get("question_id"))]
+        )
+        and episode_validation_error(
+            row, int(cfg["agent"]["max_search_turns"])
+        )
+        is None
     }
 
     total = len(queries) * len(args.backends) * len(args.variants)
@@ -182,6 +209,14 @@ def main() -> None:
                             "served_model": model,
                         }
                     )
+                    problem = episode_validation_error(
+                        row, int(cfg["agent"]["max_search_turns"])
+                    )
+                    if problem is not None or not episode_matches_source(row, item):
+                        raise RuntimeError(
+                            f"New policy-evaluation row {key} is invalid: "
+                            f"{problem or 'source row mismatch'}"
+                        )
                     append_jsonl(output_path, [row])
                     row_by_key[key] = row
                 progress.update(1)
@@ -196,7 +231,16 @@ def main() -> None:
     frame = pd.DataFrame(rows)
     summary = (
         frame.groupby(["backend", "variant"])[
-            ["em", "f1", "support_recall", "search_count"]
+            [
+                "em",
+                "f1",
+                "raw_text_em",
+                "raw_text_f1",
+                "protocol_failure",
+                "invalid_action_count",
+                "support_recall",
+                "search_count",
+            ]
         ]
         .mean()
         .reset_index()

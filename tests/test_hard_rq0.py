@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import gzip
 import hashlib
 import io
@@ -22,22 +23,67 @@ import numpy as np
 import pandas as pd
 
 from hard_rq0.patch_searchr1_validation import (
+    GENERATION_META_MARKER as SEARCH_R1_VALIDATION_META_MARKER,
+)
+from hard_rq0.patch_searchr1_validation import (
     NEW as SEARCH_R1_EXHAUSTIVE_VALIDATION_BLOCK,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_ACTIVE_ROLLOUT as SEARCH_R1_VALIDATION_ACTIVE_ROLLOUT,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_HELPER as SEARCH_R1_VALIDATION_HELPER,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_IMPORT as SEARCH_R1_VALIDATION_IMPORT,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_NONSEARCH_PAD as SEARCH_R1_PADDED_NONSEARCH_VALIDATION,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_PADDED_ACTIVE_ROLLOUT as SEARCH_R1_VALIDATION_PADDED_ACTIVE_ROLLOUT,
 )
 from hard_rq0.patch_searchr1_validation import (
     NEW_SEARCH_GENERATION as SEARCH_R1_PADDED_VALIDATION_GENERATION,
 )
 from hard_rq0.patch_searchr1_validation import (
+    NEW_SEARCH_LOOP_START as SEARCH_R1_SEARCH_COVERAGE,
+)
+from hard_rq0.patch_searchr1_validation import (
     NEW_SEARCH_START as SEARCH_R1_PADDED_VALIDATION_START,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_VALIDATION_COVERAGE as SEARCH_R1_VALIDATION_COVERAGE,
+)
+from hard_rq0.patch_searchr1_validation import (
+    NEW_VALIDATION_START as SEARCH_R1_NONSEARCH_COVERAGE,
 )
 from hard_rq0.patch_searchr1_validation import (
     OLD as SEARCH_R1_DROPPED_VALIDATION_BLOCK,
 )
 from hard_rq0.patch_searchr1_validation import (
+    OLD_HELPER_ANCHOR as SEARCH_R1_VALIDATION_HELPER_ANCHOR,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_IMPORT as SEARCH_R1_OLD_VALIDATION_IMPORT,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_NONSEARCH_PAD as SEARCH_R1_UNPADDED_NONSEARCH_VALIDATION,
+)
+from hard_rq0.patch_searchr1_validation import (
     OLD_SEARCH_GENERATION as SEARCH_R1_UNPADDED_VALIDATION_GENERATION,
 )
 from hard_rq0.patch_searchr1_validation import (
+    OLD_SEARCH_LOOP_START as SEARCH_R1_OLD_SEARCH_COVERAGE,
+)
+from hard_rq0.patch_searchr1_validation import (
     OLD_SEARCH_START as SEARCH_R1_UNPADDED_VALIDATION_START,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_VALIDATION_COVERAGE as SEARCH_R1_OLD_VALIDATION_COVERAGE,
+)
+from hard_rq0.patch_searchr1_validation import (
+    OLD_VALIDATION_START as SEARCH_R1_OLD_NONSEARCH_COVERAGE,
 )
 from hard_rq0.patch_searchr1_validation import (
     patch as patch_searchr1_validation,
@@ -91,15 +137,27 @@ from stackpilot.prepare_hard_rq0 import (
     DATA_PREP_SCHEMA,
     artifact_records,
     atomic_write_json,
+    expected_artifact_metadata,
     expected_artifacts,
     extract_support_titles,
     prepare,
     prepare_request,
     prepared_cache_valid,
+    question_id_fingerprint,
     to_searchr1_row,
     validate_disjoint_rows,
+    validate_manifest_artifact,
     validate_support_titles,
+    validate_training_inputs,
 )
+from stackpilot.prepare_mixed_data import (
+    MIXED_DATA_SCHEMA,
+    preparation_request,
+)
+from stackpilot.prepare_mixed_data import (
+    file_sha256 as mixed_file_sha256,
+)
+from stackpilot.prepare_mixed_data import manifest_path as mixed_manifest_path
 from stackpilot.retrieval_clients import normalize_document
 from stackpilot.retrieval_concurrency import batch_search
 from stackpilot.validate_hard_results import validate_frame
@@ -168,9 +226,7 @@ class HardRQ0Tests(unittest.TestCase):
         completed = []
         with self.assertRaisesRegex(RuntimeError, "failed job"):
             completed.extend(
-                parallel_job_results(
-                    [0, 1], worker, max_workers=2, max_in_flight=2
-                )
+                parallel_job_results([0, 1], worker, max_workers=2, max_in_flight=2)
             )
         self.assertEqual(completed, [(0, 0)])
 
@@ -506,6 +562,8 @@ class HardRQ0Tests(unittest.TestCase):
         self.assertIn('"schema": 2,', script)
         self.assertIn("patch_searchr1_worker_cuda.py", script)
         self.assertIn("patch_searchr1_validation.py", script)
+        self.assertIn("patch_searchr1_action_protocol.py", script)
+        self.assertIn("patch_searchr1_reward_protocol.py", script)
         self.assertIn("patch_searchr1_experiment_env.py", script)
         self.assertIn("ACTOR_PARAM_OFFLOAD=${ACTOR_PARAM_OFFLOAD:-false}", script)
         self.assertIn("REF_PARAM_OFFLOAD=${REF_PARAM_OFFLOAD:-false}", script)
@@ -531,6 +589,8 @@ class HardRQ0Tests(unittest.TestCase):
             "patch_searchr1_seed.py",
             "patch_searchr1_worker_cuda.py",
             "patch_searchr1_validation.py",
+            "patch_searchr1_action_protocol.py",
+            "patch_searchr1_reward_protocol.py",
             "patch_searchr1_experiment_env.py",
         )
         for entrypoint in entrypoints:
@@ -570,6 +630,18 @@ class HardRQ0Tests(unittest.TestCase):
             source = root / "sample.jsonl.gz"
             target = root / "sample.jsonl"
             payload = b'{"id": 1}\n{"id": 2}'
+            with gzip.open(source, "wb") as handle:
+                handle.write(payload)
+            copied, rows = decompress_gzip_counted(source, target)
+            self.assertEqual((copied, rows), (len(payload), 2))
+            self.assertEqual(target.read_bytes(), payload)
+
+    def test_counted_corpus_decompression_ignores_blank_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "sample.jsonl.gz"
+            target = root / "sample.jsonl"
+            payload = b'\n{"id": 1}\n \t\n{"id": 2}'
             with gzip.open(source, "wb") as handle:
                 handle.write(payload)
             copied, rows = decompress_gzip_counted(source, target)
@@ -958,8 +1030,14 @@ class HardRQ0Tests(unittest.TestCase):
                         "dataset": "toy",
                         "backend": backend,
                         "topk": 3,
-                        "em": 0.0,
-                        "f1": 0.25,
+                        "prediction": "toy",
+                        "raw_text_prediction": "toy",
+                        "em": 1.0,
+                        "f1": 1.0,
+                        "raw_text_em": 1.0,
+                        "raw_text_f1": 1.0,
+                        "protocol_failure": 0,
+                        "invalid_action_count": 0,
                         "support_recall": 0.5,
                         "turn1_support_recall": 0.0,
                         "turn2_support_recall": 0.5,
@@ -973,6 +1051,7 @@ class HardRQ0Tests(unittest.TestCase):
                         "search_count": 2.0,
                         "question": "Toy question?",
                         "answers": ["toy"],
+                        "support_titles": ["Toy", "Other"],
                         "queries": ["first query", "second query"],
                         "turns": [
                             {
@@ -1148,21 +1227,97 @@ class HardRQ0Tests(unittest.TestCase):
             },
         }
         request = prepare_request(config)
-        self.assertEqual(request["validation_examples_per_dataset"], 1)
+        self.assertEqual(request["trainer_dev_examples_per_dataset"], 1)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             paths = expected_artifacts(request)
-            for index, relative_path in enumerate(paths):
+            metadata = expected_artifact_metadata(request)
+            canonical_payloads: dict[str, str] = {}
+            for relative_path in paths:
+                canonical = metadata[relative_path].get("alias_of", relative_path)
+                canonical_payloads.setdefault(canonical, f"{canonical}\n")
                 path = root / relative_path
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(f"artifact-{index}\n", encoding="utf-8")
+                path.write_text(canonical_payloads[canonical], encoding="utf-8")
+            ids_by_role = {
+                "trainer_train": ["toy:train-0", "toy:train-1"],
+                "trainer_validation": ["toy:train-2"],
+                "final_evaluation": ["toy:dev-0"],
+            }
+            artifact_question_ids = {
+                relative_path: ids_by_role[record["role"]]
+                for relative_path, record in metadata.items()
+                if record["role"] != "metadata"
+            }
+            split_contract = {
+                "schema": 1,
+                "roles": {
+                    "trainer_train": {
+                        "count": 2,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["trainer_train"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "train",
+                                "shuffle_seed": 42,
+                                "selection": {"start": 0, "stop": 2},
+                                "count": 2,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["trainer_train"]
+                                ),
+                            }
+                        },
+                    },
+                    "trainer_validation": {
+                        "count": 1,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["trainer_validation"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "train",
+                                "shuffle_seed": 42,
+                                "selection": {"start": 2, "stop": 3},
+                                "count": 1,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["trainer_validation"]
+                                ),
+                            }
+                        },
+                    },
+                    "final_evaluation": {
+                        "count": 1,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["final_evaluation"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "dev",
+                                "shuffle_seed": 142,
+                                "selection": {"start": 0, "stop": 1},
+                                "count": 1,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["final_evaluation"]
+                                ),
+                            }
+                        },
+                    },
+                },
+            }
             manifest_path = root / "data" / ".hard-rq0-data-manifest.json"
             atomic_write_json(
                 manifest_path,
                 {
                     "schema": DATA_PREP_SCHEMA,
                     "request": request,
-                    "artifacts": artifact_records(root, paths),
+                    "split_contract": split_contract,
+                    "artifacts": artifact_records(
+                        root,
+                        paths,
+                        metadata=metadata,
+                        question_ids=artifact_question_ids,
+                    ),
                 },
             )
             self.assertTrue(prepared_cache_valid(manifest_path, root, request))
@@ -1176,7 +1331,7 @@ class HardRQ0Tests(unittest.TestCase):
             (root / paths[0]).write_text("changed\n", encoding="utf-8")
             self.assertFalse(prepared_cache_valid(manifest_path, root, request))
 
-    def test_hard_data_uses_disjoint_deterministic_validation_and_final_rows(
+    def test_hard_data_uses_train_for_dev_and_preserves_official_final_rows(
         self,
     ) -> None:
         class FakeDataset:
@@ -1213,9 +1368,9 @@ class HardRQ0Tests(unittest.TestCase):
                     "id": f"train-{index}",
                     "question": f"Train question {index}?",
                     "golden_answers": [f"train-{index}"],
-                    "metadata": {},
+                    "metadata": {"supporting_titles": [f"Train Title {index}"]},
                 }
-                for index in range(3)
+                for index in range(6)
             ]
         )
         dev = FakeDataset(
@@ -1239,12 +1394,14 @@ class HardRQ0Tests(unittest.TestCase):
             "dev": dev,
         }
         legacy_eval_ids = {
-            f"toy:{row['id']}"
-            for row in dev.shuffle(seed=42 + 100).select(range(2))
+            f"toy:{row['id']}" for row in dev.shuffle(seed=42 + 100).select(range(2))
         }
-        expected_validation_ids = {
-            f"toy:{row['id']}"
-            for row in dev.shuffle(seed=42 + 100).select(range(2, 4))
+        shuffled_source_train = train.shuffle(seed=42)
+        expected_train_ids = {
+            f"toy:{row['id']}" for row in shuffled_source_train.select(range(2))
+        }
+        expected_trainer_dev_ids = {
+            f"toy:{row['id']}" for row in shuffled_source_train.select(range(2, 4))
         }
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -1261,7 +1418,7 @@ class HardRQ0Tests(unittest.TestCase):
                             "revision": "a" * 40,
                             "datasets": ["toy"],
                             "train_examples_per_dataset": 2,
-                            "validation_examples_per_dataset": 2,
+                            "trainer_dev_examples_per_dataset": 2,
                             "eval_examples_per_dataset": 2,
                             "split_train": "train",
                             "split_eval": "dev",
@@ -1273,36 +1430,44 @@ class HardRQ0Tests(unittest.TestCase):
             with patch.dict(sys.modules, {"datasets": datasets_module}):
                 prepare(str(config_path))
 
-            validation_rows = [
+            train_rows = [
                 json.loads(line)
-                for line in (work_dir / "data" / "toy" / "validation.jsonl")
+                for line in (work_dir / "data" / "toy" / "train.jsonl")
                 .read_text("utf-8")
                 .splitlines()
             ]
-            eval_rows = [
+            trainer_dev_rows = [
                 json.loads(line)
-                for line in (work_dir / "data" / "eval_all.jsonl")
+                for line in (work_dir / "data" / "toy" / "dev.jsonl")
                 .read_text("utf-8")
                 .splitlines()
             ]
-            validation_ids = {row["id"] for row in validation_rows}
-            eval_ids = {row["id"] for row in eval_rows}
-            self.assertEqual(len(validation_ids), 2)
-            self.assertEqual(len(eval_ids), 2)
-            self.assertTrue(validation_ids.isdisjoint(eval_ids))
+            final_rows = [
+                json.loads(line)
+                for line in (work_dir / "data" / "final_eval.jsonl")
+                .read_text("utf-8")
+                .splitlines()
+            ]
+            train_ids = {row["id"] for row in train_rows}
+            trainer_dev_ids = {row["id"] for row in trainer_dev_rows}
+            final_ids = {row["id"] for row in final_rows}
+            self.assertEqual(train_ids, expected_train_ids)
+            self.assertEqual(trainer_dev_ids, expected_trainer_dev_ids)
+            self.assertTrue(train_ids.isdisjoint(trainer_dev_ids))
+            self.assertTrue(train_ids.isdisjoint(final_ids))
+            self.assertTrue(trainer_dev_ids.isdisjoint(final_ids))
             self.assertEqual(
-                eval_ids,
+                final_ids,
                 legacy_eval_ids,
-                "the final benchmark must retain the pre-validation row selection",
+                "the final benchmark must retain the legacy official-dev selection",
             )
-            self.assertEqual(validation_ids, expected_validation_ids)
 
             trainer_rows = json.loads(
-                (work_dir / "searchr1" / "test.parquet").read_text("utf-8")
+                (work_dir / "searchr1" / "dev.parquet").read_text("utf-8")
             )
             self.assertEqual(
                 {row["extra_info"]["index"] for row in trainer_rows},
-                validation_ids,
+                trainer_dev_ids,
             )
             self.assertEqual(
                 sorted(row["extra_info"]["routing_backend"] for row in trainer_rows),
@@ -1318,10 +1483,270 @@ class HardRQ0Tests(unittest.TestCase):
                 (work_dir / "data" / ".hard-rq0-data-manifest.json").read_text("utf-8")
             )
             self.assertEqual(manifest["schema"], DATA_PREP_SCHEMA)
-            self.assertIn(
-                "data/toy/validation.jsonl",
-                manifest["artifacts"],
+            roles = manifest["split_contract"]["roles"]
+            self.assertEqual(
+                set(roles),
+                {
+                    "trainer_train",
+                    "trainer_validation",
+                    "final_evaluation",
+                },
             )
+            train_contract = roles["trainer_train"]["datasets"]["toy"]
+            dev_contract = roles["trainer_validation"]["datasets"]["toy"]
+            final_contract = roles["final_evaluation"]["datasets"]["toy"]
+            self.assertEqual(train_contract["source_split"], "train")
+            self.assertEqual(train_contract["shuffle_seed"], 42)
+            self.assertEqual(train_contract["selection"], {"start": 0, "stop": 2})
+            self.assertEqual(dev_contract["source_split"], "train")
+            self.assertEqual(dev_contract["shuffle_seed"], 42)
+            self.assertEqual(dev_contract["selection"], {"start": 2, "stop": 4})
+            self.assertEqual(final_contract["source_split"], "dev")
+            self.assertEqual(final_contract["shuffle_seed"], 142)
+            self.assertEqual(final_contract["selection"], {"start": 0, "stop": 2})
+            self.assertEqual(roles["trainer_train"]["count"], 2)
+            self.assertEqual(roles["trainer_validation"]["count"], 2)
+            self.assertEqual(roles["final_evaluation"]["count"], 2)
+            for role in roles.values():
+                self.assertEqual(role["question_ids"]["count"], role["count"])
+                self.assertEqual(
+                    role["question_ids"]["algorithm"],
+                    "sha256-json-string-list-v1",
+                )
+                self.assertRegex(
+                    role["question_ids"]["ordered_sha256"],
+                    r"^[0-9a-f]{64}$",
+                )
+                self.assertRegex(
+                    role["question_ids"]["set_sha256"],
+                    r"^[0-9a-f]{64}$",
+                )
+
+            artifacts = manifest["artifacts"]
+            self.assertEqual(
+                artifacts["searchr1/train.parquet"]["role"],
+                "trainer_train",
+            )
+            self.assertEqual(
+                artifacts["searchr1/dev.parquet"]["role"],
+                "trainer_validation",
+            )
+            self.assertEqual(
+                artifacts["data/final_eval.jsonl"]["role"],
+                "final_evaluation",
+            )
+            self.assertEqual(
+                artifacts["searchr1/test.parquet"]["alias_of"],
+                "searchr1/dev.parquet",
+            )
+            self.assertEqual(
+                artifacts["data/eval_all.jsonl"]["alias_of"],
+                "data/final_eval.jsonl",
+            )
+            for relative_path, role in (
+                ("searchr1/train.parquet", "trainer_train"),
+                ("searchr1/dev.parquet", "trainer_validation"),
+                ("data/final_eval.jsonl", "final_evaluation"),
+            ):
+                self.assertEqual(
+                    artifacts[relative_path]["question_ids"],
+                    roles[role]["question_ids"],
+                )
+                self.assertRegex(artifacts[relative_path]["sha256"], r"^[0-9a-f]{64}$")
+
+            self.assertEqual(
+                (work_dir / "searchr1" / "dev.parquet").read_bytes(),
+                (work_dir / "searchr1" / "test.parquet").read_bytes(),
+            )
+            self.assertEqual(
+                (work_dir / "data" / "final_eval.jsonl").read_bytes(),
+                (work_dir / "data" / "eval_all.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                (work_dir / "data" / "toy" / "dev.jsonl").read_bytes(),
+                (work_dir / "data" / "toy" / "validation.jsonl").read_bytes(),
+            )
+            self.assertEqual(
+                (work_dir / "data" / "toy" / "final_eval.jsonl").read_bytes(),
+                (work_dir / "data" / "toy" / "eval.jsonl").read_bytes(),
+            )
+
+            manifest_path = work_dir / "data" / ".hard-rq0-data-manifest.json"
+            validate_manifest_artifact(
+                manifest_path,
+                work_dir / "searchr1" / "train.parquet",
+                "trainer_train",
+            )
+            validate_manifest_artifact(
+                manifest_path,
+                work_dir / "searchr1" / "dev.parquet",
+                "trainer_validation",
+            )
+            validate_manifest_artifact(
+                manifest_path,
+                work_dir / "searchr1" / "test.parquet",
+                "trainer_validation",
+            )
+
+            def fake_parquet_metadata(path: Path) -> list[dict[str, str]]:
+                rows = json.loads(Path(path).read_text(encoding="utf-8"))
+                return [
+                    {
+                        "question_id": str(row["extra_info"]["question_id"]),
+                        "index": str(row["extra_info"]["index"]),
+                        "source_index": str(
+                            row["extra_info"].get("source_index") or ""
+                        ),
+                        "routing_backend": str(
+                            row["extra_info"].get("routing_backend") or ""
+                        ).lower(),
+                    }
+                    for row in rows
+                ]
+
+            with patch(
+                "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                side_effect=fake_parquet_metadata,
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    work_dir / "searchr1" / "train.parquet",
+                    work_dir / "searchr1" / "dev.parquet",
+                )
+                validate_training_inputs(
+                    str(config_path),
+                    work_dir / "searchr1" / "train.parquet",
+                    work_dir / "searchr1" / "test.parquet",
+                )
+            with (
+                patch(
+                    "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                    side_effect=fake_parquet_metadata,
+                ),
+                self.assertRaisesRegex(RuntimeError, "trainer_validation"),
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    work_dir / "searchr1" / "train.parquet",
+                    work_dir / "data" / "final_eval.jsonl",
+                )
+
+            oracle_root = work_dir / "oracle"
+            oracle_root.mkdir()
+
+            def write_derived(source: Path, output: Path) -> None:
+                output.write_bytes(b"derived:" + source.read_bytes())
+                atomic_write_json(
+                    mixed_manifest_path(output),
+                    {
+                        "schema": MIXED_DATA_SCHEMA,
+                        "request": preparation_request(
+                            source,
+                            seed=13,
+                            mode="backend-id",
+                        ),
+                        "output": {
+                            "size": output.stat().st_size,
+                            "sha256": mixed_file_sha256(output),
+                        },
+                    },
+                )
+
+            oracle_train = oracle_root / "train.parquet"
+            oracle_dev = oracle_root / "dev.parquet"
+            oracle_final = oracle_root / "final.parquet"
+            repacked_final = oracle_root / "repacked-final.parquet"
+            repacked_final.write_bytes(
+                (work_dir / "data" / "final_eval.jsonl").read_bytes()
+            )
+            write_derived(
+                work_dir / "searchr1" / "train.parquet",
+                oracle_train,
+            )
+            write_derived(
+                work_dir / "searchr1" / "dev.parquet",
+                oracle_dev,
+            )
+            write_derived(
+                work_dir / "data" / "final_eval.jsonl",
+                oracle_final,
+            )
+
+            def paired_metadata(source: Path) -> list[dict[str, str]]:
+                result = []
+                for row in fake_parquet_metadata(source):
+                    for backend in ("bm25", "e5"):
+                        question_id = row["question_id"]
+                        result.append(
+                            {
+                                "question_id": question_id,
+                                "index": (
+                                    f"{question_id}::retrieval_backend={backend}"
+                                ),
+                                "source_index": question_id,
+                                "routing_backend": backend,
+                            }
+                        )
+                return result
+
+            derived_metadata = {
+                oracle_train.resolve(): paired_metadata(
+                    work_dir / "searchr1" / "train.parquet"
+                ),
+                oracle_dev.resolve(): paired_metadata(
+                    work_dir / "searchr1" / "dev.parquet"
+                ),
+            }
+
+            with patch(
+                "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                side_effect=lambda path: derived_metadata[Path(path).resolve()],
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    oracle_train,
+                    oracle_dev,
+                )
+            with (
+                patch(
+                    "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                    side_effect=lambda path: derived_metadata[Path(path).resolve()],
+                ),
+                self.assertRaisesRegex(RuntimeError, "trainer_validation"),
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    oracle_train,
+                    oracle_final,
+                )
+            with (
+                patch(
+                    "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                    side_effect=lambda path: derived_metadata[Path(path).resolve()],
+                ),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "neither a registered trainer_validation",
+                ),
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    oracle_train,
+                    repacked_final,
+                )
+            oracle_dev.write_bytes(b"tampered")
+            with (
+                patch(
+                    "stackpilot.prepare_hard_rq0._parquet_training_metadata",
+                    side_effect=lambda path: derived_metadata[Path(path).resolve()],
+                ),
+                self.assertRaisesRegex(RuntimeError, "mixed-policy"),
+            ):
+                validate_training_inputs(
+                    str(config_path),
+                    oracle_train,
+                    oracle_dev,
+                )
 
             second_work_dir = root / "second-work"
             second_config = json.loads(config_path.read_text("utf-8"))
@@ -1334,15 +1759,15 @@ class HardRQ0Tests(unittest.TestCase):
             with patch.dict(sys.modules, {"datasets": datasets_module}):
                 prepare(str(second_config_path))
             self.assertEqual(
-                (work_dir / "data" / "toy" / "validation.jsonl").read_bytes(),
-                (second_work_dir / "data" / "toy" / "validation.jsonl").read_bytes(),
+                (work_dir / "data" / "toy" / "dev.jsonl").read_bytes(),
+                (second_work_dir / "data" / "toy" / "dev.jsonl").read_bytes(),
             )
             self.assertEqual(
-                (work_dir / "data" / "eval_all.jsonl").read_bytes(),
-                (second_work_dir / "data" / "eval_all.jsonl").read_bytes(),
+                (work_dir / "data" / "final_eval.jsonl").read_bytes(),
+                (second_work_dir / "data" / "final_eval.jsonl").read_bytes(),
             )
 
-    def test_hard_data_requires_enough_rows_for_disjoint_holdouts(self) -> None:
+    def test_hard_data_requires_train_plus_trainer_dev_rows(self) -> None:
         class ShortDataset:
             def __len__(self) -> int:
                 return 3
@@ -1370,7 +1795,7 @@ class HardRQ0Tests(unittest.TestCase):
                             "revision": "a" * 40,
                             "datasets": ["toy"],
                             "train_examples_per_dataset": 2,
-                            "validation_examples_per_dataset": 2,
+                            "trainer_dev_examples_per_dataset": 2,
                             "eval_examples_per_dataset": 2,
                             "split_train": "train",
                             "split_eval": "dev",
@@ -1383,7 +1808,104 @@ class HardRQ0Tests(unittest.TestCase):
                 patch.dict(sys.modules, {"datasets": datasets_module}),
                 self.assertRaisesRegex(
                     RuntimeError,
-                    r"requiring 2\+2=4 rows.*only 3",
+                    r"2\+2=4 rows.*only 3",
+                ),
+            ):
+                prepare(str(config_path))
+
+    def test_hard_data_requires_requested_official_dev_rows(self) -> None:
+        class SizedDataset:
+            def __init__(self, count: int) -> None:
+                self.count = count
+
+            def __len__(self) -> int:
+                return self.count
+
+            def __iter__(self):
+                return iter(())
+
+        datasets_module = types.ModuleType("datasets")
+        datasets_module.Dataset = Mock()
+        datasets_module.concatenate_datasets = Mock()
+        datasets_module.load_dataset = lambda *args, **kwargs: {
+            "train": SizedDataset(4),
+            "dev": SizedDataset(1),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "seed": 42,
+                        "work_dir": str(root / "work"),
+                        "data": {
+                            "repo_id": "example/data",
+                            "revision": "a" * 40,
+                            "datasets": ["toy"],
+                            "train_examples_per_dataset": 2,
+                            "trainer_dev_examples_per_dataset": 2,
+                            "eval_examples_per_dataset": 2,
+                            "split_train": "train",
+                            "split_eval": "dev",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(sys.modules, {"datasets": datasets_module}),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    r"2 final-evaluation rows.*only 1",
+                ),
+            ):
+                prepare(str(config_path))
+
+    def test_hard_data_does_not_substitute_an_unrequested_final_split(
+        self,
+    ) -> None:
+        class SizedDataset:
+            def __len__(self) -> int:
+                return 10
+
+            def __iter__(self):
+                return iter(())
+
+        datasets_module = types.ModuleType("datasets")
+        datasets_module.Dataset = Mock()
+        datasets_module.concatenate_datasets = Mock()
+        datasets_module.load_dataset = lambda *args, **kwargs: {
+            "train": SizedDataset(),
+            "test": SizedDataset(),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "seed": 42,
+                        "work_dir": str(root / "work"),
+                        "data": {
+                            "repo_id": "example/data",
+                            "revision": "a" * 40,
+                            "datasets": ["toy"],
+                            "train_examples_per_dataset": 2,
+                            "trainer_dev_examples_per_dataset": 2,
+                            "eval_examples_per_dataset": 2,
+                            "split_train": "train",
+                            "split_eval": "dev",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.dict(sys.modules, {"datasets": datasets_module}),
+                self.assertRaisesRegex(
+                    RuntimeError,
+                    "missing requested eval split 'dev'",
                 ),
             ):
                 prepare(str(config_path))
@@ -1427,26 +1949,95 @@ class HardRQ0Tests(unittest.TestCase):
             root = Path(temporary)
             trainer = root / "verl" / "trainer" / "ppo" / "ray_trainer.py"
             trainer.parent.mkdir(parents=True)
+            generation = root / "search_r1" / "llm_agent" / "generation.py"
+            generation.parent.mkdir(parents=True)
+            pinned_generation = (
+                Path(__file__).resolve().parents[1]
+                / "upstream"
+                / "Search-R1"
+                / "search_r1"
+                / "llm_agent"
+                / "generation.py"
+            )
+            generation.write_bytes(pinned_generation.read_bytes())
             trainer.write_text(
                 (
-                    "prefix\n"
+                    SEARCH_R1_OLD_VALIDATION_IMPORT
+                    + "\n"
+                    + SEARCH_R1_VALIDATION_HELPER_ANCHOR
                     + SEARCH_R1_DROPPED_VALIDATION_BLOCK
+                    + SEARCH_R1_UNPADDED_NONSEARCH_VALIDATION
+                    + SEARCH_R1_OLD_NONSEARCH_COVERAGE
+                    + SEARCH_R1_OLD_SEARCH_COVERAGE
                     + SEARCH_R1_UNPADDED_VALIDATION_START
                     + SEARCH_R1_UNPADDED_VALIDATION_GENERATION
-                    + "suffix\n"
+                    + SEARCH_R1_OLD_VALIDATION_COVERAGE
                 ),
                 encoding="utf-8",
             )
             self.assertEqual(patch_searchr1_validation(root), trainer)
             first = trainer.read_text("utf-8")
             self.assertIn(SEARCH_R1_EXHAUSTIVE_VALIDATION_BLOCK, first)
+            self.assertIn(SEARCH_R1_VALIDATION_IMPORT, first)
+            self.assertIn(SEARCH_R1_VALIDATION_HELPER, first)
+            self.assertIn(SEARCH_R1_PADDED_NONSEARCH_VALIDATION, first)
+            self.assertIn(SEARCH_R1_NONSEARCH_COVERAGE, first)
+            self.assertIn(SEARCH_R1_SEARCH_COVERAGE, first)
+            self.assertIn(SEARCH_R1_VALIDATION_COVERAGE, first)
             self.assertIn(SEARCH_R1_PADDED_VALIDATION_START, first)
             self.assertIn(SEARCH_R1_PADDED_VALIDATION_GENERATION, first)
             self.assertNotIn(SEARCH_R1_DROPPED_VALIDATION_BLOCK, first)
             self.assertNotIn(SEARCH_R1_UNPADDED_VALIDATION_START, first)
             self.assertNotIn(SEARCH_R1_UNPADDED_VALIDATION_GENERATION, first)
+            first_generation = generation.read_text("utf-8")
+            self.assertIn(SEARCH_R1_VALIDATION_META_MARKER, first_generation)
+            self.assertEqual(
+                first_generation.count(SEARCH_R1_VALIDATION_ACTIVE_ROLLOUT),
+                2,
+            )
+            self.assertIn(
+                SEARCH_R1_VALIDATION_PADDED_ACTIVE_ROLLOUT,
+                first_generation,
+            )
+            # A server may already have the exhaustive V3 trainer patch from
+            # an earlier checkout. Reapplying must still add the newer
+            # generation-metadata fix instead of returning early.
+            generation.write_bytes(pinned_generation.read_bytes())
             self.assertEqual(patch_searchr1_validation(root), trainer)
             self.assertEqual(trainer.read_text("utf-8"), first)
+            self.assertEqual(generation.read_text("utf-8"), first_generation)
+            self.assertEqual(patch_searchr1_validation(root), trainer)
+            self.assertEqual(generation.read_text("utf-8"), first_generation)
+
+    def test_searchr1_validation_padding_repeats_tiny_tail_exactly(self) -> None:
+        helper_source = SEARCH_R1_VALIDATION_HELPER.split("\n\nclass RayPPOTrainer", 1)[
+            0
+        ]
+
+        class FakeBatch:
+            def __init__(self, values):
+                self.values = list(values)
+
+            def __len__(self):
+                return len(self.values)
+
+            def __getitem__(self, index):
+                return FakeBatch(self.values[index])
+
+        class FakeDataProto:
+            @staticmethod
+            def concat(parts):
+                return FakeBatch(value for part in parts for value in part.values)
+
+        namespace = {"DataProto": FakeDataProto}
+        exec(helper_source, namespace)  # noqa: S102 - execute the generated patch
+        pad = namespace["_stackpilot_pad_validation_batch"]
+        for tail_size in (1, 2, 3, 6, 7, 8):
+            batch = FakeBatch(range(tail_size))
+            padded, pad_size = pad(batch, 7)
+            self.assertEqual(len(padded) % 7, 0)
+            self.assertEqual(pad_size, (-tail_size) % 7)
+            self.assertEqual(padded.values[:tail_size], list(range(tail_size)))
 
     def test_prepare_request_requires_immutable_revision(self) -> None:
         config = {
@@ -1512,7 +2103,7 @@ class HardRQ0Tests(unittest.TestCase):
 
         nonfinite = frame.copy()
         nonfinite.loc[nonfinite.index[-1], "f1"] = np.nan
-        with self.assertRaisesRegex(RuntimeError, "non-finite"):
+        with self.assertRaisesRegex(RuntimeError, "f1 is invalid"):
             validate_frame(
                 nonfinite,
                 expected_topks=(3,),
@@ -1526,6 +2117,15 @@ class HardRQ0Tests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "inconsistent"):
             validate_frame(
                 inconsistent_episode,
+                expected_topks=(3,),
+                expected_datasets=("toy",),
+            )
+
+        source_tamper = frame.copy(deep=True)
+        source_tamper.loc[source_tamper.index[-1], "question"] = "Different question?"
+        with self.assertRaisesRegex(RuntimeError, "multiple question values"):
+            validate_frame(
+                source_tamper,
                 expected_topks=(3,),
                 expected_datasets=("toy",),
             )
@@ -1584,6 +2184,8 @@ class HardRQ0Tests(unittest.TestCase):
         current = self.valid_result_frame().iloc[0].to_dict()
         current["question"] = "Question?"
         current["prediction"] = "answer"
+        current["em"] = 0.0
+        current["f1"] = 0.0
         stale = dict(current)
         stale["run_signature"] = "old-run"
         with tempfile.TemporaryDirectory() as temporary:
@@ -1598,6 +2200,15 @@ class HardRQ0Tests(unittest.TestCase):
                 "shared-evaluation",
                 "base-qwen",
                 0,
+                expected_items={
+                    "toy:q1": {
+                        "id": "toy:q1",
+                        "dataset": "toy",
+                        "question": "Question?",
+                        "answers": ["toy"],
+                        "support_titles": ["Toy", "Other"],
+                    }
+                },
             )
             self.assertEqual(set(cached), {("toy:q1", "bm25", 3)})
             compacted = [
@@ -1609,6 +2220,32 @@ class HardRQ0Tests(unittest.TestCase):
             archives = list((output.parent / "archive").glob("*.jsonl"))
             self.assertEqual(len(archives), 1)
             self.assertEqual(len(archives[0].read_text("utf-8").splitlines()), 2)
+
+    def test_result_cache_rejects_source_row_tampering(self) -> None:
+        current = self.valid_result_frame().iloc[0].to_dict()
+        expected_item = {
+            "id": "toy:q1",
+            "dataset": "toy",
+            "question": "Toy question?",
+            "answers": ["toy"],
+            "support_titles": ["Toy", "Other"],
+        }
+        tampered = dict(current, question="Different question?")
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "base-qwen-seed0.jsonl"
+            atomic_write_jsonl(output, [tampered])
+            cached = prepare_result_cache(
+                output,
+                [tampered],
+                {("toy:q1", "bm25", 3)},
+                {"toy:q1": "toy"},
+                "run-base-qwen-0",
+                "shared-evaluation",
+                "base-qwen",
+                0,
+                expected_items={"toy:q1": expected_item},
+            )
+            self.assertEqual(cached, {})
 
     def test_run_signature_tracks_local_model_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -1634,20 +2271,122 @@ class HardRQ0Tests(unittest.TestCase):
             asset_dir = root / "assets"
             data_dir.mkdir()
             asset_dir.mkdir()
-            data_file = data_dir / "eval_all.jsonl"
-            data_file.write_text('{"id":"q1"}\n', encoding="utf-8")
-
+            manifest_config = {
+                "seed": 7,
+                "work_dir": str(root),
+                "data": {
+                    "repo_id": "example/data",
+                    "revision": "b" * 40,
+                    "datasets": ["toy"],
+                    "train_examples_per_dataset": 1,
+                    "trainer_dev_examples_per_dataset": 1,
+                    "eval_examples_per_dataset": 1,
+                    "split_train": "train",
+                    "split_eval": "dev",
+                },
+            }
+            request = prepare_request(manifest_config)
+            metadata = expected_artifact_metadata(request)
+            paths = expected_artifacts(request)
+            ids_by_role = {
+                "trainer_train": ["toy:train-q"],
+                "trainer_validation": ["toy:dev-q"],
+                "final_evaluation": ["q1"],
+            }
+            canonical_payloads = {
+                "data/final_eval.jsonl": '{"id":"q1"}\n',
+            }
+            for relative_path in paths:
+                canonical = metadata[relative_path].get(
+                    "alias_of",
+                    relative_path,
+                )
+                payload = canonical_payloads.setdefault(
+                    canonical,
+                    f"{canonical}\n",
+                )
+                path = root / relative_path
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(payload, encoding="utf-8")
+            data_file = data_dir / "final_eval.jsonl"
+            legacy_alias = data_dir / "eval_all.jsonl"
+            repacked_final = data_dir / "repacked_final.jsonl"
+            repacked_final.write_bytes(data_file.read_bytes())
             data_hash = hashlib.sha256(data_file.read_bytes()).hexdigest()
+
+            artifact_question_ids = {
+                relative_path: ids_by_role[record["role"]]
+                for relative_path, record in metadata.items()
+                if record["role"] != "metadata"
+            }
+            split_contract = {
+                "schema": 1,
+                "roles": {
+                    "trainer_train": {
+                        "count": 1,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["trainer_train"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "train",
+                                "shuffle_seed": 7,
+                                "selection": {"start": 0, "stop": 1},
+                                "count": 1,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["trainer_train"]
+                                ),
+                            }
+                        },
+                    },
+                    "trainer_validation": {
+                        "count": 1,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["trainer_validation"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "train",
+                                "shuffle_seed": 7,
+                                "selection": {"start": 1, "stop": 2},
+                                "count": 1,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["trainer_validation"]
+                                ),
+                            }
+                        },
+                    },
+                    "final_evaluation": {
+                        "count": 1,
+                        "question_ids": question_id_fingerprint(
+                            ids_by_role["final_evaluation"]
+                        ),
+                        "datasets": {
+                            "toy": {
+                                "source_split": "dev",
+                                "shuffle_seed": 107,
+                                "selection": {"start": 0, "stop": 1},
+                                "count": 1,
+                                "question_ids": question_id_fingerprint(
+                                    ids_by_role["final_evaluation"]
+                                ),
+                            }
+                        },
+                    },
+                },
+            }
             atomic_write_json(
                 data_dir / ".hard-rq0-data-manifest.json",
                 {
                     "schema": DATA_PREP_SCHEMA,
-                    "artifacts": {
-                        "data/eval_all.jsonl": {
-                            "size": data_file.stat().st_size,
-                            "sha256": data_hash,
-                        }
-                    },
+                    "request": request,
+                    "split_contract": split_contract,
+                    "artifacts": artifact_records(
+                        root,
+                        paths,
+                        metadata=metadata,
+                        question_ids=artifact_question_ids,
+                    ),
                 },
             )
             atomic_write_json(
@@ -1655,6 +2394,8 @@ class HardRQ0Tests(unittest.TestCase):
                 {"schema": 1, "artifacts": {}},
             )
             config = {
+                "seed": manifest_config["seed"],
+                "data": manifest_config["data"],
                 "assets": {"root": str(asset_dir)},
                 "retrieval": {
                     "e5_model": "e5",
@@ -1695,6 +2436,41 @@ class HardRQ0Tests(unittest.TestCase):
                     retriever_identities,
                     112,
                 )
+                alias_context = evaluation_context(
+                    config,
+                    legacy_alias.resolve(),
+                    [{"id": "q1"}],
+                    ["e5", "bm25"],
+                    [10, 3],
+                    retriever_identities,
+                    112,
+                )
+                with self.assertRaisesRegex(RuntimeError, "not registered"):
+                    evaluation_context(
+                        config,
+                        repacked_final.resolve(),
+                        [{"id": "q1"}],
+                        ["e5", "bm25"],
+                        [10, 3],
+                        retriever_identities,
+                        112,
+                    )
+                mismatched_config = copy.deepcopy(config)
+                mismatched_config["data"]["revision"] = "c" * 40
+                with self.assertRaisesRegex(RuntimeError, "configured pinned"):
+                    evaluation_context(
+                        mismatched_config,
+                        data_file.resolve(),
+                        [{"id": "q1"}],
+                        ["e5", "bm25"],
+                        [10, 3],
+                        retriever_identities,
+                        112,
+                    )
+            self.assertEqual(
+                alias_context["data"]["sha256"],
+                context["data"]["sha256"],
+            )
             self.assertEqual(
                 context["protocol"]["serving"],
                 {

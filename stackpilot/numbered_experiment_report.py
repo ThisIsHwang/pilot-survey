@@ -11,6 +11,11 @@ from typing import Any
 import pandas as pd
 
 from stackpilot.common import ensure_dir, read_jsonl_tolerant
+from stackpilot.hard_rq0_contract import (
+    NUMBERED_EVALUATION_MANIFEST_SCHEMA,
+    RESULT_SCHEMA,
+    episode_validation_error,
+)
 from stackpilot.hard_rq0_report import markdown_table, matched_hard_question_ids
 
 REPORT_METRICS = [
@@ -66,6 +71,43 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def stable_signature(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def manifested_max_search_turns(
+    manifest: dict[str, Any], manifest_path: Path
+) -> tuple[dict[str, Any], int]:
+    context = manifest.get("evaluation_context")
+    if not isinstance(context, dict) or context.get("schema") != RESULT_SCHEMA:
+        raise RuntimeError(
+            f"Manifest has no schema-{RESULT_SCHEMA} evaluation context: "
+            f"{manifest_path}"
+        )
+    try:
+        max_search_turns = int(context["protocol"]["agent"]["max_search_turns"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(
+            f"Manifest has no valid max_search_turns: {manifest_path}"
+        ) from exc
+    if max_search_turns < 1:
+        raise RuntimeError(
+            f"Manifest max_search_turns must be positive: {manifest_path}"
+        )
+    expected_signature = str(manifest.get("evaluation_signature", ""))
+    if (
+        not expected_signature
+        or stable_signature(context) != expected_signature
+    ):
+        raise RuntimeError(
+            f"Manifest evaluation context signature mismatch: {manifest_path}"
+        )
+    return context, max_search_turns
+
+
 def load_completed_numbered_results(
     root: Path, *, profile: str, experiment_id: str
 ) -> pd.DataFrame:
@@ -84,12 +126,15 @@ def load_completed_numbered_results(
             continue
         matched_manifests += 1
         if (
-            manifest.get("schema") != 2
+            manifest.get("schema") != NUMBERED_EVALUATION_MANIFEST_SCHEMA
+            or manifest.get("result_schema") != RESULT_SCHEMA
             or manifest.get("status") != "complete"
             or manifest.get("experiment_id") != experiment_id
         ):
             raise RuntimeError(
-                f"Manifest {manifest_path} is not a completed schema-2 "
+                f"Manifest {manifest_path} is not a completed schema-"
+                f"{NUMBERED_EVALUATION_MANIFEST_SCHEMA}/result-schema-"
+                f"{RESULT_SCHEMA} "
                 f"{experiment_id} evaluation"
             )
         run_id = str(manifest.get("run_id", ""))
@@ -97,6 +142,19 @@ def load_completed_numbered_results(
         if not run_id or not run_signature or run_id in seen_runs:
             raise RuntimeError(f"Invalid or duplicate run identity in {manifest_path}")
         seen_runs.add(run_id)
+        context, max_search_turns = manifested_max_search_turns(
+            manifest, manifest_path
+        )
+        if (
+            not str(manifest.get("variant", "")).strip()
+            or not str(manifest.get("policy_tag", "")).strip()
+            or isinstance(manifest.get("seed"), bool)
+            or not isinstance(manifest.get("seed"), int)
+            or not isinstance(manifest.get("backend_id_injected"), bool)
+        ):
+            raise RuntimeError(
+                f"Manifest has invalid episode provenance: {manifest_path}"
+            )
         episodes_path = manifest_path.parent / "episodes.jsonl"
         if not episodes_path.is_file():
             raise RuntimeError(
@@ -109,22 +167,65 @@ def load_completed_numbered_results(
                 f"Completed evaluation digest mismatch: {episodes_path}"
             )
         episode_rows = read_jsonl_tolerant(episodes_path)
-        expected_episodes = int(manifest.get("episodes", -1))
-        questions = int(manifest.get("questions", -1))
-        backends = [str(value) for value in manifest.get("backends", [])]
-        topks = [int(value) for value in manifest.get("topks", [])]
+        if any(row.get("schema") != RESULT_SCHEMA for row in episode_rows):
+            raise RuntimeError(
+                f"Completed evaluation contains non-schema-{RESULT_SCHEMA} "
+                f"episodes: {episodes_path}"
+            )
+        try:
+            expected_episodes = int(manifest.get("episodes", -1))
+            questions = int(manifest.get("questions", -1))
+            backends = [str(value).strip() for value in manifest.get("backends", [])]
+            topks = [int(value) for value in manifest.get("topks", [])]
+            context_question_ids = [
+                str(value).strip() for value in context["question_ids"]
+            ]
+            context_backends = [str(value).strip() for value in context["backends"]]
+            context_topks = [int(value) for value in context["topks"]]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Completed evaluation has invalid declarations: {manifest_path}"
+            ) from exc
         if (
             expected_episodes < 1
             or questions < 1
             or not backends
             or not topks
+            or any(not value for value in backends)
+            or any(value < 1 for value in topks)
+            or len(set(backends)) != len(backends)
+            or len(set(topks)) != len(topks)
+            or len(context_question_ids) != questions
+            or any(not value for value in context_question_ids)
+            or len(set(context_question_ids)) != len(context_question_ids)
+            or sorted(context_backends) != sorted(backends)
+            or sorted(context_topks) != sorted(topks)
+            or context["protocol"].get("inject_backend_id")
+            is not manifest.get("backend_id_injected")
             or expected_episodes != questions * len(backends) * len(topks)
             or len(episode_rows) != expected_episodes
         ):
             raise RuntimeError(
                 f"Completed evaluation has inconsistent cardinality: {manifest_path}"
             )
+        expected_keys = {
+            (question_id, backend, topk)
+            for question_id in context_question_ids
+            for backend in backends
+            for topk in topks
+        }
         keys: set[tuple[str, str, int]] = set()
+        expected_provenance = {
+            "experiment_id": experiment_id,
+            "run_id": run_id,
+            "run_signature": run_signature,
+            "evaluation_signature": manifest.get("evaluation_signature"),
+            "profile": profile,
+            "variant": manifest.get("variant"),
+            "policy_tag": manifest.get("policy_tag"),
+            "seed": manifest.get("seed"),
+            "backend_id_injected": manifest.get("backend_id_injected"),
+        }
         for row in episode_rows:
             try:
                 key = (
@@ -137,16 +238,26 @@ def load_completed_numbered_results(
             if key in keys:
                 raise RuntimeError(f"Duplicate episode key {key} in {episodes_path}")
             keys.add(key)
-            expected = {
-                "experiment_id": experiment_id,
-                "run_id": run_id,
-                "run_signature": run_signature,
-                "profile": profile,
-            }
-            if any(row.get(name) != value for name, value in expected.items()):
+            if any(
+                row.get(name) != value
+                for name, value in expected_provenance.items()
+            ):
                 raise RuntimeError(
                     f"Episode provenance does not match {manifest_path}: {key}"
                 )
+            problem = episode_validation_error(row, max_search_turns)
+            if problem is not None:
+                raise RuntimeError(
+                    f"Episode contract does not match {manifest_path}: "
+                    f"{key}: {problem}"
+                )
+        if keys != expected_keys:
+            missing = sorted(expected_keys - keys)[:10]
+            extra = sorted(keys - expected_keys)[:10]
+            raise RuntimeError(
+                f"Episode key coverage does not match {manifest_path}: "
+                f"missing={missing}, extra={extra}"
+            )
         rows.extend(episode_rows)
     if not matched_manifests:
         raise RuntimeError(

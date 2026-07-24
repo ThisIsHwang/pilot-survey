@@ -113,18 +113,34 @@ def patch(search_r1_root: Path) -> None:
     patch_experiment_env(search_r1_root)
     target = search_r1_root / "search_r1" / "llm_agent" / "generation.py"
     text = target.read_text(encoding="utf-8")
-    helper_import = '''from patch_searchr1_mixed import (
+    legacy_helper_import = '''from patch_searchr1_mixed import (
+    assign_training_backend_ids as _stackpilot_assign_training_backend_ids,
+    validate_validation_backend_ids as _stackpilot_validate_validation_backend_ids,
+)
+'''
+    helper_import = '''from hard_rq0.patch_searchr1_mixed import (
     assign_training_backend_ids as _stackpilot_assign_training_backend_ids,
     validate_validation_backend_ids as _stackpilot_validate_validation_backend_ids,
 )
 '''
     import_anchor = "from typing import List, Dict, Any, Tuple\n"
-    if MARKER not in text and helper_import not in text:
+    if legacy_helper_import in text:
+        text = replace_once(
+            text,
+            legacy_helper_import,
+            helper_import,
+            "legacy mixed-routing helper import",
+        )
+    elif MARKER not in text and helper_import not in text:
         text = replace_once(
             text,
             import_anchor,
             import_anchor + helper_import,
             "mixed-routing helper import",
+        )
+    elif MARKER in text and helper_import not in text:
+        raise RuntimeError(
+            f"Mixed-routing marker has no package-qualified helper import in {target}"
         )
 
     loop_anchor = '''    def run_llm_loop(self, gen_batch, initial_input_ids: torch.Tensor) -> Tuple[Dict, Dict]:
@@ -330,6 +346,31 @@ def patch(search_r1_root: Path) -> None:
     replacement = '''    def batch_search(self, queries: List[str] = None, backend_ids=None) -> str:
         """Batchified search with optional episode-stable backend IDs."""
         results = self._batch_search(queries, backend_ids=backend_ids)['result']
+        self._stackpilot_last_search_titles = []
+        for result_index, retrieval_result in enumerate(results):
+            titles = []
+            for document_index, item in enumerate(retrieval_result):
+                if not isinstance(item, dict) or not isinstance(
+                    item.get('document'), dict
+                ):
+                    raise RuntimeError(
+                        "retriever result is missing document metadata at "
+                        f"result={result_index}, document={document_index}"
+                    )
+                contents = item['document'].get('contents')
+                if not isinstance(contents, str) or not contents.strip():
+                    raise RuntimeError(
+                        "retriever document has no contents at "
+                        f"result={result_index}, document={document_index}"
+                    )
+                title = contents.split("\\n", 1)[0].strip()
+                if not title:
+                    raise RuntimeError(
+                        "retriever document has an empty title at "
+                        f"result={result_index}, document={document_index}"
+                    )
+                titles.append(title)
+            self._stackpilot_last_search_titles.append(titles)
         return [self._passages2string(result) for result in results]
 
     def _batch_search(self, queries, backend_ids=None):
