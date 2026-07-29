@@ -15,6 +15,7 @@ dist/
 .venv-pilot/
 .venv-vllm/
 .venv-searchr1/
+.venv-trace/
 .bootstrap-tools/
 .env
 .env.*

@@ -1,0 +1,100 @@
+schema: 1
+work_dir: ./work/trace_go
+
+model:
+  base_model: Qwen/Qwen2.5-3B-Instruct
+  max_length: 768
+  trust_remote_code: false
+
+bank:
+  # Override with TRACE_INPUTS or --inputs. Files must be raw JSONL episodes
+  # containing `turns`, not aggregate CSV reports.
+  input_globs:
+    - ./work/hard_rq0/runs/*/results/policies/*.jsonl
+    - ./work/experiments/EXP-002/results/**/*.jsonl
+    - ./work/experiments/EXP-008/results/**/*.jsonl
+  policy_tags: []
+
+splits:
+  seed: 20260729
+  train_ratio: 0.65
+  calibration_ratio: 0.15
+
+recovery:
+  fail_threshold: 0.5
+  solve_threshold: 0.5
+  min_recovery: 0.25
+  search_cost: 0.01
+  epsilon: 1.0e-8
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+  minimum_paired_views: 2
+
+diagnostic:
+  # Signed query-only update approximates policy-gradient credit: evidence-gaining
+  # queries are reinforced, while zero-gain executed queries are discouraged.
+  negative_query_weight: 0.25
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  batch_size: 4
+  gradient_accumulation: 4
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 8
+  gradient_checkpointing: true
+
+profiles:
+  smoke:
+    seeds: [13]
+    a_cells_per_direction: 5
+    a_examples_per_cell: 12
+    a_steps: 4
+    bc_examples_per_variant: 16
+    bc_steps: 4
+    eval_examples_per_direction: 24
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    a_cells_per_direction: 8
+    a_examples_per_cell: 48
+    a_steps: 12
+    bc_examples_per_variant: 128
+    bc_steps: 24
+    eval_examples_per_direction: 192
+    bootstrap_samples: 2000
+  full:
+    seeds: [13, 42, 87]
+    a_cells_per_direction: 12
+    a_examples_per_cell: 96
+    a_steps: 24
+    bc_examples_per_variant: 256
+    bc_steps: 48
+    eval_examples_per_direction: 384
+    bootstrap_samples: 10000
+
+condition_a:
+  minimum_partial_r2: 0.01
+  minimum_standardized_coefficient: 0.05
+  ridge: 1.0e-5
+
+condition_b:
+  short_recovery_max_turn: 2
+  deep_unrecovered_min_turn: 3
+  minimum_nll_gain: 0.02
+
+condition_c:
+  minimum_nll_gain: 0.01
+  require_non_increasing_seed_std: true
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
