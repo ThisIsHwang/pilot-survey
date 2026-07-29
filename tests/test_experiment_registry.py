@@ -15,7 +15,17 @@ class ExperimentRegistryTest(unittest.TestCase):
         identifiers = [entry["id"] for entry in registry["experiments"]]
         self.assertEqual(
             identifiers,
-            ["EXP-001", "EXP-002", "EXP-003", "EXP-004", "EXP-005", "EXP-006"],
+            [
+                "EXP-001",
+                "EXP-002",
+                "EXP-003",
+                "EXP-004",
+                "EXP-005",
+                "EXP-006",
+                "EXP-009",
+                "EXP-010",
+                "EXP-011",
+            ],
         )
 
     def test_run_id_is_stable_and_seed_is_zero_padded(self) -> None:
@@ -28,6 +38,9 @@ class ExperimentRegistryTest(unittest.TestCase):
         registry = load_registry()
         self.assertEqual(experiment_by_id(registry, "EXP-003")["parent"], "EXP-002")
         self.assertEqual(experiment_by_id(registry, "EXP-006")["parent"], "EXP-003")
+        self.assertEqual(experiment_by_id(registry, "EXP-009")["parent"], "EXP-002")
+        self.assertEqual(experiment_by_id(registry, "EXP-010")["parent"], "EXP-009")
+        self.assertEqual(experiment_by_id(registry, "EXP-011")["parent"], "EXP-009")
 
     def test_unknown_experiment_is_rejected(self) -> None:
         with self.assertRaises(KeyError):
