@@ -10,6 +10,11 @@ TRACE_WORKERS=${TRACE_WORKERS:-8}
 TRACE_LAUNCH_STAGGER=${TRACE_LAUNCH_STAGGER:-2}
 JOBS=$ROOT/work/trace_go/plans/$PROFILE/jobs.jsonl
 [[ -s "$JOBS" ]] || { echo "Missing $JOBS; run trace_go/plan.sh." >&2; exit 1; }
+
+# Build the configured architecture on meta tensors and fail before occupying a
+# GPU unless every planned job uses one checkpoint in the declared 7B range.
+"$PYTHON" -m stackpilot.trace_model_contract --jobs "$JOBS"
+
 # shellcheck disable=SC2206
 GPU_ARGS=($TRACE_GPUS)
 "$PYTHON" -m stackpilot.trace_scheduler \
