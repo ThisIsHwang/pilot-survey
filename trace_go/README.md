@@ -9,7 +9,7 @@ TRACE/GRPO. It is designed for one Linux node with eight full NVIDIA H100 GPUs,
 CUDA 12.9, and Python 3.12.
 
 The suite **does not** claim final interactive-agent improvement. It performs
-small, equal-budget Qwen2.5-3B LoRA updates on query-reformulation examples and
+small, equal-budget Qwen2.5-7B LoRA updates on query-reformulation examples and
 measures held-out evidence-gaining query negative log-likelihood (NLL). This
 makes dozens of controlled training interventions feasible on one node. A
 positive NLL gain means that a curriculum made useful held-out reformulations
@@ -117,6 +117,17 @@ This creates `.venv-trace` and verifies:
 - PyTorch CUDA 12.9 wheel;
 - pinned Transformers, PEFT, and Accelerate versions.
 
+The default model is `Qwen/Qwen2.5-7B-Instruct`. Before any GPU worker starts,
+`trace_go/run_jobs.sh` reconstructs the configured architecture on meta tensors
+and requires an exact parameter count between 6 and 9 billion. A stale 3B plan,
+a mixed-model job list, or a config changed after planning fails before GPU
+allocation.
+
+The 7B defaults use BF16 LoRA with gradient checkpointing, microbatch 2,
+gradient accumulation 8, and evaluation batch 4. The effective training batch
+therefore remains 16, matching the original diagnostic design while retaining
+additional H100 memory headroom.
+
 ### 2. Build the paired trajectory bank
 
 ```bash
@@ -142,7 +153,7 @@ Use a local model snapshot when the cluster is offline:
 
 ```bash
 PROFILE=smoke \
-TRACE_BASE_MODEL=/absolute/path/to/Qwen2.5-3B-Instruct \
+TRACE_BASE_MODEL=/absolute/path/to/Qwen2.5-7B-Instruct \
   bash trace_go/plan.sh
 ```
 
@@ -155,11 +166,13 @@ Profiles:
 | full | stronger replication | 72 | 12 | 12 |
 
 The exact count follows the two predeclared transfer directions and profile
-seeds. Every job has a content signature and is resumable.
+seeds. Every job has a content signature and is resumable. Planning must be
+rerun after changing the model or configuration because those identities are
+part of each job signature.
 
 ### 4. Run the experiments
 
-All eight GPUs run independent one-GPU LoRA jobs in parallel:
+All eight GPUs run independent one-GPU Qwen2.5-7B LoRA jobs in parallel:
 
 ```bash
 PROFILE=smoke bash trace_go/run_a.sh
@@ -184,7 +197,9 @@ PROFILE=pilot bash trace_go/run_jobs.sh --experiment EXP-009
 
 Each process sees one physical GPU through `CUDA_VISIBLE_DEVICES`. No retriever
 server is needed during the LoRA phase because retrieval interactions are
-already frozen in the signed trajectory bank.
+already frozen in the signed trajectory bank. A successful launch writes the
+verified model identity and parameter count to
+`work/trace_go/plans/<profile>/model_contract.json`.
 
 The micro-update uses **query-only signed credit**. A reformulation that added
 new observed supporting evidence receives positive likelihood weight. An
@@ -218,7 +233,7 @@ TRACE_GO_REPORT.md
 
 ```bash
 TRACE_INPUTS='/absolute/path/to/exp008/raw/*.jsonl' \
-TRACE_BASE_MODEL=/absolute/path/to/Qwen2.5-3B-Instruct \
+TRACE_BASE_MODEL=/absolute/path/to/Qwen2.5-7B-Instruct \
 PROFILE=pilot \
   bash trace_go/run_all.sh
 ```
