@@ -2,9 +2,12 @@ schema: 1
 work_dir: ./work/trace_go
 
 model:
-  base_model: Qwen/Qwen2.5-3B-Instruct
+  base_model: Qwen/Qwen2.5-7B-Instruct
   max_length: 768
   trust_remote_code: false
+  # Fail closed if a stale 3B or an unexpectedly large checkpoint is planned.
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
 
 bank:
   # Override with TRACE_INPUTS or --inputs. Files must be raw JSONL episodes
@@ -45,11 +48,13 @@ lora:
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
   learning_rate: 2.0e-5
   weight_decay: 0.0
-  batch_size: 4
-  gradient_accumulation: 4
+  # 7B-safe microbatching. The effective batch remains 2 * 8 = 16, matching
+  # the original 3B diagnostic design while leaving extra H100 memory headroom.
+  batch_size: 2
+  gradient_accumulation: 8
   warmup_ratio: 0.05
   max_grad_norm: 1.0
-  eval_batch_size: 8
+  eval_batch_size: 4
   gradient_checkpointing: true
 
 profiles:
