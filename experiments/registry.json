@@ -74,6 +74,14 @@
       "question": "Does same-question cross-view pairing improve transfer over marginally matched global recovery selection?",
       "entrypoint": "experiments/EXP-011/run.sh",
       "parent": "EXP-009"
+    },
+    {
+      "id": "EXP-012",
+      "slug": "positive-recovery-depth-factorial",
+      "status": "planned",
+      "question": "Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?",
+      "entrypoint": "experiments/EXP-012/run.sh",
+      "parent": "EXP-010"
     }
   ]
 }

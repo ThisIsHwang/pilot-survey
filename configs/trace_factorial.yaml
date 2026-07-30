@@ -1,0 +1,73 @@
+schema: 1
+work_dir: ./work/trace_factorial
+bank_root: ./work/trace_go/bank
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+
+factorial:
+  short_max_turn: 2
+  deep_min_turn: 3
+  recovery_epsilon: 1.0e-8
+  difficulty_bins: 5
+  # Exact strata; continuous question difficulty and prompt/target length are
+  # matched greedily inside each stratum. Teacher policy and trajectory seed are
+  # exact controls so recovery is not confounded with who generated the query.
+  group_keys: [dataset, backend, topk, policy_tag, policy_seed]
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  batch_size: 2
+  gradient_accumulation: 8
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 4
+  gradient_checkpointing: true
+
+profiles:
+  smoke:
+    seeds: [13]
+    examples_per_variant: 8
+    steps: 4
+    eval_examples_per_direction: 24
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    examples_per_variant: 48
+    steps: 24
+    eval_examples_per_direction: 192
+    bootstrap_samples: 2000
+  full:
+    seeds: [13, 42, 87]
+    examples_per_variant: 96
+    steps: 48
+    eval_examples_per_direction: 384
+    bootstrap_samples: 10000
+
+analysis:
+  # Baseline NLL is computed before every adapter update on the exact same
+  # held-out examples; variants must agree up to floating-point noise.
+  baseline_tolerance: 1.0e-5
+
+gate:
+  minimum_recovery_effect: 0.02
+  minimum_recovered_mean_gain: 0.0
+  require_direction_nonnegative: true
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
