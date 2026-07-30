@@ -20,8 +20,9 @@ factorial:
   recovery_epsilon: 1.0e-8
   difficulty_bins: 5
   # Exact strata; continuous question difficulty and prompt/target length are
-  # matched greedily inside each stratum.
-  group_keys: [dataset, backend, topk]
+  # matched greedily inside each stratum. Teacher policy and trajectory seed are
+  # exact controls so recovery is not confounded with who generated the query.
+  group_keys: [dataset, backend, topk, policy_tag, policy_seed]
 
 lora:
   rank: 16
