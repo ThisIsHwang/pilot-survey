@@ -4,10 +4,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 PROFILE=${PROFILE:-pilot}
 KEEP_SERVICES=${KEEP_SERVICES:-0}
+SERVICES_STARTED=0
 cleanup() {
   local status=$?
   trap - EXIT INT TERM
-  if [[ "$KEEP_SERVICES" != 1 ]]; then
+  if [[ "$SERVICES_STARTED" == 1 && "$KEEP_SERVICES" != 1 ]]; then
     bash "$ROOT/behavior_alias_pilot/stop_services.sh" || true
   fi
   exit "$status"
@@ -26,6 +27,7 @@ if [[ ${SKIP_PREPARE:-0} != 1 ]]; then
 fi
 if [[ ${SKIP_SERVICES:-0} != 1 ]]; then
   bash behavior_alias_pilot/launch_services.sh
+  SERVICES_STARTED=1
 fi
 PROFILE="$PROFILE" bash behavior_alias_pilot/run.sh
 PROFILE="$PROFILE" bash behavior_alias_pilot/report.sh
