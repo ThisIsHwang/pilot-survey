@@ -90,6 +90,14 @@
       "question": "Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?",
       "entrypoint": "experiments/EXP-013/run.sh",
       "parent": "EXP-012"
+    },
+    {
+      "id": "EXP-015",
+      "slug": "behavioral-alias-injection-pilot",
+      "status": "planned",
+      "question": "Does surface-query alias multiplicity reduce fixed-budget retrieval behavior coverage, and does quotient-class selection prevent that loss?",
+      "entrypoint": "experiments/EXP-015/run.sh",
+      "parent": "EXP-013"
     }
   ]
 }

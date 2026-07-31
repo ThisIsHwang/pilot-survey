@@ -1,0 +1,89 @@
+schema: 1
+work_dir: ./work/behavior_alias_pilot
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  served_model_name: Qwen/Qwen2.5-7B-Instruct
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+  api_base: http://127.0.0.1:9000/v1
+  api_key: EMPTY
+
+source:
+  # EXP-014 is reserved by the completed causal-query report artifact. This new
+  # pilot is registered as EXP-015 and consumes its completed pilot state bank.
+  causal_audit_root: ./work/causal_query_audit
+  causal_audit_profile: pilot
+  states_file: null
+  datasets: [2wikimultihopqa, musique, hotpotqa]
+  topks: [3]
+  intervention_turns: [2, 3]
+  maximum_prefix_support_recall: 0.5
+  selection_seed: 20260731
+
+retrieval:
+  bm25_port: 8101
+  e5_port: 8102
+  e5_gpu: 7
+
+agent:
+  observation_token_budget: 500
+
+validation:
+  recall_tolerance: 1.0e-8
+  minimum_prefix_title_jaccard: 0.95
+  minimum_factual_title_jaccard: 0.95
+
+generation:
+  include_factual: true
+  temperature: 1.0
+  max_tokens: 64
+  attempts: 8
+  samples_per_call: 8
+  minimum_tokens: 2
+  maximum_tokens: 24
+  request_timeout: 240
+  request_retries: 4
+
+injection:
+  # Select the naturally largest class whose reward is below the best available
+  # transition by at least this amount. This is an adversarial but predeclared
+  # test of alias-multiplicity sensitivity.
+  minimum_reward_gap: 0.10
+
+simulation:
+  methods: [surface, text-diverse, quotient]
+  multiplicities: [1, 2, 4, 8]
+  call_budget: 8
+
+analysis:
+  top_examples: 12
+
+profiles:
+  smoke:
+    states_per_backend: 6
+    candidate_pool_size: 8
+    workers: 4
+    simulation_draws: 100
+    bootstrap_samples: 200
+  pilot:
+    states_per_backend: 80
+    candidate_pool_size: 24
+    workers: 28
+    simulation_draws: 1000
+    bootstrap_samples: 5000
+  full:
+    states_per_backend: 160
+    candidate_pool_size: 32
+    workers: 48
+    simulation_draws: 5000
+    bootstrap_samples: 20000
+
+gate:
+  minimum_natural_alias_state_rate: 0.30
+  minimum_surface_coverage_drop: 0.20
+  maximum_quotient_coverage_drop: 0.05
+  minimum_quotient_coverage_gain: 0.20
+  minimum_quotient_union_gain: 0.03
