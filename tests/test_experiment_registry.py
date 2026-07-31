@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from stackpilot.experiment_registry import (
-    experiment_by_id,
-    load_registry,
-    make_run_id,
-)
+from stackpilot.experiment_registry import experiment_by_id, load_registry, make_run_id
 
 
 class ExperimentRegistryTest(unittest.TestCase):
@@ -16,17 +12,8 @@ class ExperimentRegistryTest(unittest.TestCase):
         self.assertEqual(
             identifiers,
             [
-                "EXP-001",
-                "EXP-002",
-                "EXP-003",
-                "EXP-004",
-                "EXP-005",
-                "EXP-006",
-                "EXP-009",
-                "EXP-010",
-                "EXP-011",
-                "EXP-012",
-                "EXP-013",
+                "EXP-001", "EXP-002", "EXP-003", "EXP-004", "EXP-005", "EXP-006",
+                "EXP-009", "EXP-010", "EXP-011", "EXP-012", "EXP-013", "EXP-014",
             ],
         )
 
@@ -45,6 +32,7 @@ class ExperimentRegistryTest(unittest.TestCase):
         self.assertEqual(experiment_by_id(registry, "EXP-011")["parent"], "EXP-009")
         self.assertEqual(experiment_by_id(registry, "EXP-012")["parent"], "EXP-010")
         self.assertEqual(experiment_by_id(registry, "EXP-013")["parent"], "EXP-012")
+        self.assertEqual(experiment_by_id(registry, "EXP-014")["parent"], "EXP-013")
 
     def test_unknown_experiment_is_rejected(self) -> None:
         with self.assertRaises(KeyError):
