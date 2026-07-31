@@ -13,9 +13,9 @@ model:
 
 source:
   # EXP-014 is reserved by the completed causal-query report artifact. This new
-  # pilot is registered as EXP-015 and consumes the causal-audit state bank.
+  # pilot is registered as EXP-015 and consumes its completed pilot state bank.
   causal_audit_root: ./work/causal_query_audit
-  causal_audit_profile: same
+  causal_audit_profile: pilot
   states_file: null
   datasets: [2wikimultihopqa, musique, hotpotqa]
   topks: [3]
