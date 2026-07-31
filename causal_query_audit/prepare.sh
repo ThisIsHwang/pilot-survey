@@ -13,4 +13,4 @@ if [[ -n ${CAUSAL_QUERY_INPUTS:-${TRACE_INPUTS:-}} ]]; then
   IFS=':' read -r -a patterns <<< "$normalized"
   ARGS+=(--inputs "${patterns[@]}")
 fi
-"$PYTHON" -m stackpilot.causal_query_prepare "${ARGS[@]}" "$@"
+"$PYTHON" -m stackpilot.causal_query_prepare_entrypoint "${ARGS[@]}" "$@"
