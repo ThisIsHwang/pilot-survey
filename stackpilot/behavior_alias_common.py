@@ -237,7 +237,10 @@ def choose_injection_class(
 def class_distribution(candidates: Sequence[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = defaultdict(int)
     for row in candidates:
-        counts[str(row["class_id"])] += 1
+        class_id = row.get("class_id", row.get("behavior_class_id"))
+        if class_id is None:
+            raise RuntimeError("Candidate is missing class_id/behavior_class_id")
+        counts[str(class_id)] += 1
     return dict(counts)
 
 
