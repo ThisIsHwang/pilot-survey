@@ -3,93 +3,17 @@
   "id_format": "EXP-###",
   "run_id_format": "EXP-###__seed-SSS__profile-NAME__variant-NAME",
   "experiments": [
-    {
-      "id": "EXP-001",
-      "slug": "rq0-easy-transfer",
-      "status": "completed",
-      "question": "Do BM25-, E5-, and ColBERT-connected agents differ in the original small-corpus HotpotQA pilot?",
-      "entrypoint": "scripts/run_all.sh",
-      "parent": null
-    },
-    {
-      "id": "EXP-002",
-      "slug": "rq0-hard-specialists",
-      "status": "active",
-      "question": "Do BM25 and E5 specialists show home-backend excess gain under full-wiki, low-top-k, multi-turn retrieval?",
-      "entrypoint": "hard_rq0/run_all.sh",
-      "parent": "EXP-001"
-    },
-    {
-      "id": "EXP-003",
-      "slug": "mixed-blind-grpo",
-      "status": "active",
-      "question": "Can one policy trained on episode-stable BM25/E5 mixtures match both specialists without backend metadata?",
-      "entrypoint": "experiments/EXP-003/run.sh",
-      "parent": "EXP-002"
-    },
-    {
-      "id": "EXP-004",
-      "slug": "mixed-backend-id-oracle",
-      "status": "active",
-      "question": "How much does explicit backend metadata improve a shared mixed-backend policy?",
-      "entrypoint": "experiments/EXP-004/run.sh",
-      "parent": "EXP-003"
-    },
-    {
-      "id": "EXP-005",
-      "slug": "evidence-aware-reward",
-      "status": "active",
-      "question": "Does adding terminal supporting-evidence recall to the GRPO reward reveal retriever-specific acquisition behavior hidden by answer-only reward?",
-      "entrypoint": "experiments/EXP-005/run.sh",
-      "parent": "EXP-002"
-    },
-    {
-      "id": "EXP-006",
-      "slug": "heldout-hybrid-rrf",
-      "status": "active",
-      "question": "How do base, specialist, and mixed policies transfer to a held-out BM25+E5 RRF backend?",
-      "entrypoint": "experiments/EXP-006/run.sh",
-      "parent": "EXP-003"
-    },
-    {
-      "id": "EXP-009",
-      "slug": "trace-recoverability-controls",
-      "status": "planned",
-      "question": "Does paired portable recoverability predict held-out reformulation gain beyond initial success, reward variance, search depth, and question difficulty?",
-      "entrypoint": "experiments/EXP-009/run.sh",
-      "parent": "EXP-002"
-    },
-    {
-      "id": "EXP-010",
-      "slug": "trace-recovery-versus-depth",
-      "status": "planned",
-      "question": "Do short evidence-recovery trajectories teach held-out reformulations better than matched deep trajectories with no evidence recovery?",
-      "entrypoint": "experiments/EXP-010/run.sh",
-      "parent": "EXP-009"
-    },
-    {
-      "id": "EXP-011",
-      "slug": "trace-paired-versus-unpaired",
-      "status": "planned",
-      "question": "Does same-question cross-view pairing improve transfer over marginally matched global recovery selection?",
-      "entrypoint": "experiments/EXP-011/run.sh",
-      "parent": "EXP-009"
-    },
-    {
-      "id": "EXP-012",
-      "slug": "positive-recovery-depth-factorial",
-      "status": "planned",
-      "question": "Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?",
-      "entrypoint": "experiments/EXP-012/run.sh",
-      "parent": "EXP-010"
-    },
-    {
-      "id": "EXP-013",
-      "slug": "causal-query-signal-audit",
-      "status": "planned",
-      "question": "Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?",
-      "entrypoint": "experiments/EXP-013/run.sh",
-      "parent": "EXP-012"
-    }
+    {"id":"EXP-001","slug":"rq0-easy-transfer","status":"completed","question":"Do BM25-, E5-, and ColBERT-connected agents differ in the original small-corpus HotpotQA pilot?","entrypoint":"scripts/run_all.sh","parent":null},
+    {"id":"EXP-002","slug":"rq0-hard-specialists","status":"active","question":"Do BM25 and E5 specialists show home-backend excess gain under full-wiki, low-top-k, multi-turn retrieval?","entrypoint":"hard_rq0/run_all.sh","parent":"EXP-001"},
+    {"id":"EXP-003","slug":"mixed-blind-grpo","status":"active","question":"Can one policy trained on episode-stable BM25/E5 mixtures match both specialists without backend metadata?","entrypoint":"experiments/EXP-003/run.sh","parent":"EXP-002"},
+    {"id":"EXP-004","slug":"mixed-backend-id-oracle","status":"active","question":"How much does explicit backend metadata improve a shared mixed-backend policy?","entrypoint":"experiments/EXP-004/run.sh","parent":"EXP-003"},
+    {"id":"EXP-005","slug":"evidence-aware-reward","status":"active","question":"Does adding terminal supporting-evidence recall to the GRPO reward reveal retriever-specific acquisition behavior hidden by answer-only reward?","entrypoint":"experiments/EXP-005/run.sh","parent":"EXP-002"},
+    {"id":"EXP-006","slug":"heldout-hybrid-rrf","status":"active","question":"How do base, specialist, and mixed policies transfer to a held-out BM25+E5 RRF backend?","entrypoint":"experiments/EXP-006/run.sh","parent":"EXP-003"},
+    {"id":"EXP-009","slug":"trace-recoverability-controls","status":"planned","question":"Does paired portable recoverability predict held-out reformulation gain beyond initial success, reward variance, search depth, and question difficulty?","entrypoint":"experiments/EXP-009/run.sh","parent":"EXP-002"},
+    {"id":"EXP-010","slug":"trace-recovery-versus-depth","status":"planned","question":"Do short evidence-recovery trajectories teach held-out reformulations better than matched deep trajectories with no evidence recovery?","entrypoint":"experiments/EXP-010/run.sh","parent":"EXP-009"},
+    {"id":"EXP-011","slug":"trace-paired-versus-unpaired","status":"planned","question":"Does same-question cross-view pairing improve transfer over marginally matched global recovery selection?","entrypoint":"experiments/EXP-011/run.sh","parent":"EXP-009"},
+    {"id":"EXP-012","slug":"positive-recovery-depth-factorial","status":"planned","question":"Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?","entrypoint":"experiments/EXP-012/run.sh","parent":"EXP-010"},
+    {"id":"EXP-013","slug":"causal-query-signal-audit","status":"planned","question":"Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?","entrypoint":"experiments/EXP-013/run.sh","parent":"EXP-012"},
+    {"id":"EXP-014","slug":"query-equivalence-credit","status":"planned","question":"Does distributing credit across functionally equivalent query wordings improve cross-retriever reformulation coverage over factual first-exposure one-hot credit?","entrypoint":"experiments/EXP-014/run.sh","parent":"EXP-013"}
   ]
 }

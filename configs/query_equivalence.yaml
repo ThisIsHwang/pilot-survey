@@ -1,0 +1,68 @@
+schema: 1
+experiment_id: EXP-014
+work_dir: ./work/query_equivalence
+
+inputs:
+  result_globs:
+    - ./work/causal_query_audit/results/full/states/*/*.json
+    - ./work/causal_query_audit/results/pilot/states/*/*.json
+
+equivalence:
+  direct_epsilon: 1.0e-8
+  support_recall_tolerance: 1.0e-8
+  answer_f1_tolerance: 0.05
+  search_count_tolerance: 0
+  require_same_support_set: true
+  require_same_answer_em: true
+  require_same_protocol_status: true
+
+split:
+  seed: 14014
+  train_ratio: 0.60
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  warmup_ratio: 0.10
+  max_grad_norm: 1.0
+  batch_size: 2
+  gradient_accumulation: 8
+  eval_batch_size: 4
+  gradient_checkpointing: true
+
+profiles:
+  smoke:
+    train_states_per_direction: 4
+    eval_classes_per_direction: 8
+    steps: 4
+    seeds: [13]
+    bootstrap_samples: 200
+  pilot:
+    train_states_per_direction: 24
+    eval_classes_per_direction: 32
+    steps: 24
+    seeds: [13, 42, 87]
+    bootstrap_samples: 5000
+  full:
+    train_states_per_direction: 48
+    eval_classes_per_direction: 64
+    steps: 48
+    seeds: [13, 42, 87, 101, 131]
+    bootstrap_samples: 10000
+
+gate:
+  minimum_replaceable_direct_rate: 0.40
+  minimum_mean_gain_advantage: 0.010
+  minimum_worst_gain_advantage: 0.005
+  minimum_random_gain_advantage: 0.005
