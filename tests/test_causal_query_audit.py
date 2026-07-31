@@ -37,7 +37,7 @@ class CausalQueryAuditTests(unittest.TestCase):
         valid = validate_alternatives(
             {
                 "lexical": "Ted Chiang birthplace",
-                "semantic": "Arrival director box office",  # known token but wrong intent is a later audit limitation
+                "semantic": "Story of Your Life writer location",
                 "entity": "completely unrelated bananas",
             },
             styles=["lexical", "semantic", "entity"],
