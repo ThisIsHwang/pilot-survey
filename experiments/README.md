@@ -5,7 +5,7 @@ Every scientific experiment receives an immutable `EXP-###` identifier. The iden
 ## Naming rules
 
 - experiment ID: `EXP-003`
-- run ID: `EXP-003__seed-013__profile-pilot__variant-blind`
+- run ID: `EXP-003__seed-013__profile-NAME__variant-NAME`
 - checkpoint root: `work/experiments/EXP-003/checkpoints/<run-id>`
 - merged model root: `work/experiments/EXP-003/merged/<run-id>`
 - results root: `work/experiments/EXP-003/results/<run-id>`
@@ -28,6 +28,7 @@ Experiment numbers are never reused or renumbered after results have been produc
 | EXP-011 | Paired versus unpaired | Test same-question paired recovery selection |
 | EXP-012 | Positive recovery × depth | Positive-only 2×2 recovery-depth factorial |
 | EXP-013 | Causal query signal audit | State-matched query interventions and suffix replay |
+| EXP-015 | Query equivalence credit | Pool credit across functionally interchangeable evidence queries |
 
 The canonical machine-readable registry is `experiments/registry.json`. Validate it with:
 
@@ -85,6 +86,9 @@ Truncated trajectories receive exactly zero reward in either mode.
 7. Run EXP-013 only before investing in query-level causal mediation modeling.
    A GO requires bridge and redundant query actions to be common and immediate
    evidence gain to be an incomplete proxy for total downstream query effect.
+8. Run EXP-015 only after the causal audit reports substantial counterfactual
+   replaceability. It tests whether the descriptive redundancy phenomenon
+   warrants equivalence-aware credit rather than action-specific provenance.
 
 The combined report requires an exact one-to-one question×seed×backend×top-k
 grid for every paired comparison; a missing or failed cell aborts reporting

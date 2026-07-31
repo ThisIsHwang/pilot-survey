@@ -1,0 +1,84 @@
+schema: 1
+work_dir: ./work/query_equivalence
+
+source:
+  # Override with QUERY_EQUIVALENCE_INPUTS. Inputs are EXP-014 state JSON files,
+  # not candidate_metrics.csv or the Markdown report.
+  input_globs:
+    - ./work/causal_query_audit/results/full/states/*/*.json
+    - ./work/causal_query_audit/results/pilot/states/*/*.json
+
+splits:
+  seed: 20260801
+  train_ratio: 0.65
+
+equivalence:
+  epsilon: 1.0e-8
+  minimum_class_size: 2
+  include_answer_in_signature: true
+  # At least one query pair in the class must differ substantially in wording.
+  maximum_nontrivial_query_jaccard: 0.80
+  require_nontrivial_class: true
+  require_factual_in_best_class: true
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  # One state group may contain four query targets. A one-state microbatch keeps
+  # peak activation memory predictable while accumulation preserves batch 16.
+  batch_size: 1
+  gradient_accumulation: 16
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 1
+  gradient_checkpointing: true
+
+profiles:
+  smoke:
+    seeds: [13]
+    train_states_per_direction: 4
+    eval_states_per_direction: 4
+    steps: 4
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    train_states_per_direction: 24
+    eval_states_per_direction: 24
+    steps: 24
+    bootstrap_samples: 3000
+  full:
+    seeds: [13, 42, 87]
+    train_states_per_direction: 48
+    eval_states_per_direction: 48
+    steps: 48
+    bootstrap_samples: 10000
+
+analysis:
+  baseline_tolerance: 1.0e-5
+
+gate:
+  # Project-selection thresholds, not confirmatory paper claims.
+  minimum_nontrivial_equivalence_rate: 0.20
+  minimum_mean_class_gain_advantage: 0.01
+  minimum_worst_class_gain_advantage: 0.005
+  minimum_all_direct_margin: 0.0
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
