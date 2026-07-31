@@ -1,5 +1,5 @@
 schema: 1
-experiment_id: EXP-015
+experiment_id: EXP-014
 work_dir: ./work/query_equivalence
 
 inputs:
@@ -17,7 +17,7 @@ equivalence:
   require_same_protocol_status: true
 
 split:
-  seed: 15015
+  seed: 14014
   train_ratio: 0.60
 
 model:
