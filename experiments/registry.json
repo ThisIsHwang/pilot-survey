@@ -82,6 +82,14 @@
       "question": "Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?",
       "entrypoint": "experiments/EXP-012/run.sh",
       "parent": "EXP-010"
+    },
+    {
+      "id": "EXP-013",
+      "slug": "causal-query-signal-audit",
+      "status": "planned",
+      "question": "Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?",
+      "entrypoint": "experiments/EXP-013/run.sh",
+      "parent": "EXP-012"
     }
   ]
 }

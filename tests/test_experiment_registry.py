@@ -26,6 +26,7 @@ class ExperimentRegistryTest(unittest.TestCase):
                 "EXP-010",
                 "EXP-011",
                 "EXP-012",
+                "EXP-013",
             ],
         )
 
@@ -43,6 +44,7 @@ class ExperimentRegistryTest(unittest.TestCase):
         self.assertEqual(experiment_by_id(registry, "EXP-010")["parent"], "EXP-009")
         self.assertEqual(experiment_by_id(registry, "EXP-011")["parent"], "EXP-009")
         self.assertEqual(experiment_by_id(registry, "EXP-012")["parent"], "EXP-010")
+        self.assertEqual(experiment_by_id(registry, "EXP-013")["parent"], "EXP-012")
 
     def test_unknown_experiment_is_rejected(self) -> None:
         with self.assertRaises(KeyError):

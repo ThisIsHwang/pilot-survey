@@ -1,0 +1,91 @@
+schema: 1
+work_dir: ./work/causal_query_audit
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  served_model_name: Qwen/Qwen2.5-7B-Instruct
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+  api_base: http://127.0.0.1:9000/v1
+  api_key: EMPTY
+
+source:
+  # Override with CAUSAL_QUERY_INPUTS. These must be raw episode JSONL files
+  # containing answers, support_titles, and turn-level query/evidence records.
+  input_globs:
+    - ./work/hard_rq0/runs/*/results/policies/*.jsonl
+    - ./work/experiments/EXP-002/results/**/*.jsonl
+    - ./work/experiments/EXP-008/results/**/*.jsonl
+  datasets: [2wikimultihopqa, musique, hotpotqa]
+  policy_tags: []
+  topks: [3]
+  intervention_turns: [2, 3]
+  require_protocol_success: true
+  one_state_per_question_backend: true
+  # Condition prevalence on states where substantial annotated evidence remains.
+  # For the common two-support-document case this admits prefix recall 0 or 0.5.
+  maximum_prefix_support_recall: 0.5
+
+retrieval:
+  bm25_port: 8101
+  e5_port: 8102
+  e5_gpu: 7
+
+agent:
+  max_search_turns: 4
+  observation_token_budget: 500
+  answer_weight: 0.25
+  search_cost: 0.01
+
+alternatives:
+  styles: [lexical, semantic, entity]
+  temperature: 0.7
+  max_tokens: 256
+  attempts: 3
+  minimum_tokens: 2
+  length_ratio_low: 0.45
+  length_ratio_high: 1.8
+
+continuation:
+  temperature: 0.0
+  max_tokens: 512
+  request_timeout: 240
+  request_retries: 4
+
+validation:
+  recall_tolerance: 1.0e-8
+  minimum_prefix_title_jaccard: 0.95
+  minimum_factual_title_jaccard: 0.95
+
+analysis:
+  epsilon: 1.0e-8
+  bridge_min_support_tqe: 0.05
+  top_examples: 12
+
+profiles:
+  smoke:
+    states_per_backend: 6
+    alternatives_per_state: 2
+    workers: 4
+    bootstrap_samples: 200
+  pilot:
+    states_per_backend: 120
+    alternatives_per_state: 3
+    workers: 28
+    bootstrap_samples: 5000
+  full:
+    states_per_backend: 300
+    alternatives_per_state: 3
+    workers: 48
+    bootstrap_samples: 20000
+
+gate:
+  # A causal query-credit project is justified only when immediate evidence gain
+  # is demonstrably incomplete and bridge/redundant actions are not rare.
+  maximum_direct_total_spearman: 0.40
+  minimum_bridge_rate_among_zero_direct: 0.15
+  minimum_redundant_direct_rate: 0.05
+  minimum_bridge_downstream_effect: 0.02
+  require_bridge_examples_in_both_backends: true

@@ -23,6 +23,11 @@ Experiment numbers are never reused or renumbered after results have been produc
 | EXP-004 | Mixed backend-ID oracle | Shared policy with explicit lexical/semantic metadata |
 | EXP-005 | Evidence-aware reward | Answer reward plus terminal supporting-evidence recall |
 | EXP-006 | Held-out hybrid RRF | Transfer to a BM25+E5 reciprocal-rank-fusion backend |
+| EXP-009 | TRACE recoverability controls | Test recoverability beyond generic difficulty |
+| EXP-010 | Recovery versus depth | Original signed-credit recovery diagnostic |
+| EXP-011 | Paired versus unpaired | Test same-question paired recovery selection |
+| EXP-012 | Positive recovery × depth | Positive-only 2×2 recovery-depth factorial |
+| EXP-013 | Causal query signal audit | State-matched query interventions and suffix replay |
 
 The canonical machine-readable registry is `experiments/registry.json`. Validate it with:
 
@@ -74,6 +79,12 @@ Truncated trajectories receive exactly zero reward in either mode.
 4. Run EXP-005 with the same three seeds. It is a reward-diagnostic experiment,
    not the main mixed-policy baseline.
 5. EXP-006 is evaluation-only and uses checkpoints from EXP-002 through EXP-004.
+6. EXP-009 through EXP-012 are project-selection diagnostics for recovery-based
+   curricula. EXP-013 is a separate signal audit and does not revive the failed
+   paired-recovery objective.
+7. Run EXP-013 only before investing in query-level causal mediation modeling.
+   A GO requires bridge and redundant query actions to be common and immediate
+   evidence gain to be an incomplete proxy for total downstream query effect.
 
 The combined report requires an exact one-to-one question×seed×backend×top-k
 grid for every paired comparison; a missing or failed cell aborts reporting
