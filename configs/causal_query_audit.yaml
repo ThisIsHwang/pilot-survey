@@ -24,6 +24,9 @@ source:
   intervention_turns: [2, 3]
   require_protocol_success: true
   one_state_per_question_backend: true
+  # Condition prevalence on states where substantial annotated evidence remains.
+  # For the common two-support-document case this admits prefix recall 0 or 0.5.
+  maximum_prefix_support_recall: 0.5
 
 retrieval:
   bm25_port: 8101
