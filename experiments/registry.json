@@ -90,6 +90,14 @@
       "question": "Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?",
       "entrypoint": "experiments/EXP-013/run.sh",
       "parent": "EXP-012"
+    },
+    {
+      "id": "EXP-015",
+      "slug": "query-equivalence-credit",
+      "status": "planned",
+      "question": "When distinct queries are functionally interchangeable, does state-normalized equivalence-class credit improve portable query supervision over exclusive action credit?",
+      "entrypoint": "experiments/EXP-015/run.sh",
+      "parent": "EXP-013"
     }
   ]
 }
