@@ -4,6 +4,7 @@ import unittest
 
 import pandas as pd
 
+from stackpilot.causal_query_model_contract import validate_parameter_count
 from stackpilot.causal_query_prepare_entrypoint import build_candidate_states
 from stackpilot.causal_query_report_entrypoint import (
     mean_stat,
@@ -111,6 +112,19 @@ class CausalQueryEntrypointTests(unittest.TestCase):
         combined = table[table["scope"] == "combined"].iloc[0]
         self.assertEqual(float(combined["redundant_direct_rate"]), 0.0)
         self.assertEqual(float(combined["mean_bridge_downstream_effect"]), 0.0)
+
+    def test_model_contract_rejects_stale_3b_checkpoint(self) -> None:
+        validate_parameter_count(
+            7_600_000_000,
+            minimum_parameters=6_000_000_000,
+            maximum_parameters=9_000_000_000,
+        )
+        with self.assertRaises(RuntimeError):
+            validate_parameter_count(
+                3_100_000_000,
+                minimum_parameters=6_000_000_000,
+                maximum_parameters=9_000_000_000,
+            )
 
 
 if __name__ == "__main__":
