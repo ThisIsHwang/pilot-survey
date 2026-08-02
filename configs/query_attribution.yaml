@@ -1,0 +1,78 @@
+schema: 1
+experiment_id: EXP-016
+work_dir: ./work/query_attribution
+prepared_root: ./work/query_equivalence/prepared
+source_prepare_config: ./configs/query_equivalence.yaml
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+
+selection:
+  targets_per_state: 2
+  require_outside_class_direct: true
+  require_outside_class_random: true
+  # All four curricula use the same state and exactly K target sequences. States
+  # are retained only when exact tokenizer counts stay close across every
+  # variant and every predeclared training seed.
+  maximum_relative_target_token_imbalance: 0.25
+  maximum_query_jaccard_for_random: 0.95
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  batch_size: 1
+  gradient_accumulation: 16
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 1
+  gradient_checkpointing: true
+
+profiles:
+  smoke:
+    seeds: [13]
+    train_states_per_direction: 4
+    eval_states_per_direction: 4
+    steps: 4
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    train_states_per_direction: 24
+    eval_states_per_direction: 32
+    steps: 24
+    bootstrap_samples: 5000
+  full:
+    seeds: [13, 42, 87, 101, 131]
+    train_states_per_direction: 48
+    eval_states_per_direction: 64
+    steps: 48
+    bootstrap_samples: 10000
+
+analysis:
+  baseline_tolerance: 1.0e-5
+  maximum_plan_token_imbalance: 0.25
+
+gate:
+  minimum_equivalence_vs_random_mean_gain: 0.020
+  minimum_equivalence_vs_all_direct_mean_gain: 0.010
+  minimum_equivalence_vs_random_worst_final_gain: 0.005
+  minimum_equivalence_vs_random_dispersion_reduction: 0.005
+  minimum_equivalence_vs_all_direct_dispersion_reduction: 0.000
+  require_direction_nonnegative: true
+  require_seed_std_not_worse_than_random: true
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
