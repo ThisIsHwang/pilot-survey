@@ -1,0 +1,206 @@
+schema: 2
+suite_id: QUERY-ATTRIBUTION-MATRIX
+work_dir: ./work/query_attribution
+source_prepared_root: ./work/query_equivalence/prepared
+source_config: ./configs/query_equivalence.yaml
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+  evaluate_seen: true
+  evaluate_cross: true
+
+selection:
+  targets_per_state: 2
+  maximum_relative_target_token_imbalance: 0.25
+  maximum_random_query_jaccard: 0.95
+  maximum_diversity_jaccard_error: 0.20
+  require_outside_strict_valid: true
+  require_outside_strict_direct: true
+  require_immediate_only_partner: true
+  require_final_only_partner: true
+  minimum_eval_class_size: 2
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  batch_size: 1
+  gradient_accumulation: 16
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 1
+  gradient_checkpointing: true
+
+objectives:
+  uniform:
+    kind: weighted_mean
+  hardmax:
+    kind: softmax
+    temperature: 0.20
+  consistency:
+    kind: mean_plus_variance
+    coefficient: 0.50
+
+experiments:
+  EXP-016:
+    name: attribution-controls
+    variants:
+      factual-replicated-k:
+        selector: factual_replicated
+        objective: uniform
+      random-k:
+        selector: random_outside_strict
+        objective: uniform
+      diversity-matched-k:
+        selector: diversity_matched_outside_strict
+        objective: uniform
+      all-direct-k:
+        selector: direct_outside_strict
+        objective: uniform
+      strict-uniform:
+        selector: strict
+        objective: uniform
+  EXP-017:
+    name: class-objectives
+    variants:
+      strict-hardmax:
+        selector: strict
+        objective: hardmax
+      strict-consistency:
+        selector: strict
+        objective: consistency
+  EXP-018:
+    name: equivalence-definition
+    variants:
+      immediate-only:
+        selector: immediate_only
+        objective: uniform
+      strict-immediate-control:
+        selector: strict
+        objective: uniform
+        pool: immediate
+      final-only:
+        selector: final_only
+        objective: uniform
+      strict-final-control:
+        selector: strict
+        objective: uniform
+        pool: final
+
+profiles:
+  smoke:
+    seeds: [13]
+    train_states_per_direction:
+      EXP-016: 4
+      EXP-017: 4
+      EXP-018: 4
+    eval_states_per_backend: 4
+    steps: 4
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    train_states_per_direction:
+      EXP-016: 24
+      EXP-017: 24
+      EXP-018: 20
+    eval_states_per_backend: 32
+    steps: 24
+    bootstrap_samples: 5000
+  full:
+    seeds: [13, 42, 87, 101, 131]
+    train_states_per_direction:
+      EXP-016: 48
+      EXP-017: 48
+      EXP-018: 40
+    eval_states_per_backend: 64
+    steps: 48
+    bootstrap_samples: 10000
+
+analysis:
+  baseline_tolerance: 1.0e-5
+  diversity_high_threshold: 0.50
+  class_large_threshold: 3
+
+hypothesis_gates:
+  H1_equivalence_beyond_random:
+    contrast: [strict-uniform, random-k]
+    metric: class_mean_gain
+    minimum: 0.020
+    ci_low_positive: true
+  H2_equivalence_beyond_direct:
+    contrast: [strict-uniform, all-direct-k]
+    metric: class_mean_gain
+    minimum: 0.010
+    ci_low_positive: true
+  H3_equivalence_beyond_diversity:
+    contrast: [strict-uniform, diversity-matched-k]
+    metric: class_mean_gain
+    minimum: 0.010
+    ci_low_positive: true
+  H4_multiquery_augmentation:
+    contrast: [strict-uniform, factual-replicated-k]
+    metric: class_mean_gain
+    minimum: 0.020
+    ci_low_positive: true
+  H5_hardmax_improves_worst_member:
+    contrast: [strict-hardmax, strict-uniform]
+    metric: class_worst_gain
+    minimum: 0.005
+    ci_low_positive: true
+  H6_consistency_reduces_dispersion:
+    contrast: [strict-consistency, strict-uniform]
+    metric: dispersion_reduction
+    minimum: 0.005
+    ci_low_positive: true
+  H7_immediate_definition_sufficient:
+    contrast: [immediate-only, strict-immediate-control]
+    metric: class_mean_gain
+    equivalence_margin: 0.010
+  H8_final_definition_sufficient:
+    contrast: [final-only, strict-final-control]
+    metric: class_mean_gain
+    equivalence_margin: 0.010
+
+interactive:
+  enabled_variants:
+    - factual-replicated-k
+    - diversity-matched-k
+    - all-direct-k
+    - strict-uniform
+    - strict-hardmax
+    - strict-consistency
+  scopes: [cross]
+  bm25_url: http://127.0.0.1:8101/retrieve
+  e5_url: http://127.0.0.1:8102/retrieve
+  generation_max_new_tokens: 64
+  generation_temperature: 0.0
+  eval_states_per_direction:
+    smoke: 8
+    pilot: 64
+    full: 128
+  bootstrap_samples:
+    smoke: 200
+    pilot: 5000
+    full: 10000
+  gate:
+    minimum_strict_vs_diversity_evidence_gain: 0.020
+    minimum_strict_vs_all_direct_evidence_gain: 0.010
+    maximum_invalid_rate_increase: 0.010
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
+  interactive_gpus: [0, 1, 2, 3, 4, 5, 6]
+  interactive_workers: 7
