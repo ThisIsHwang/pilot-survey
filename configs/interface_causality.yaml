@@ -1,0 +1,117 @@
+schema: 1
+suite_id: INTERFACE-CAUSALITY-SUITE
+work_dir: ./work/interface_causality
+
+source:
+  input_globs:
+    - ./work/causal_query_audit/results/full/states/*/*.json
+    - ./work/causal_query_audit/results/pilot/states/*/*.json
+
+reward:
+  support: 1.0
+  answer_f1: 0.5
+  immediate_gain: 0.25
+  search_cost: 0.02
+  protocol_cost: 1.0
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+
+gradient_probe:
+  rank: 4
+  alpha: 8
+  target_modules: [q_proj, v_proj]
+  max_length: 768
+  maximum_surface_cosine_at_max_alias: 0.95
+
+retrieval:
+  bm25_url: http://127.0.0.1:8101/retrieve
+  e5_url: http://127.0.0.1:8102/retrieve
+  timeout: 120
+  retries: 3
+
+alias_audit:
+  behavior_signature: ranked-transition
+  multiplicities: [1, 2, 4, 8, 16]
+  fixed_rollout_budget: 8
+
+credit_granularity:
+  behavior_signature: gold-transition
+  epsilon: 1.0e-8
+
+document_ctu:
+  maximum_documents_per_state: 3
+  weights:
+    support: 1.0
+    answer_f1: 0.5
+    search_efficiency: 0.05
+
+interface_audit:
+  maximum_prefix_titles: 4
+  maximum_menu_queries: 8
+  relation_tokens: 5
+
+# Pairwise labels are actual retrieval-induced equivalence labels. The response
+# feature family is an oracle-style upper bound; semantic/state/backend families
+# are deployable before executing the candidate queries.
+equivalence_predictor:
+  label_signature: ranked-transition
+  split_seed: 23023
+  train_ratio: 0.70
+  learning_rate: 0.10
+  l2: 0.001
+  steps: 2000
+  maximum_negative_ratio: 4.0
+
+profiles:
+  smoke:
+    alias_states: 24
+    alias_simulation_draws: 100
+    alias_gradient_states: 4
+    granularity_states: 24
+    document_ctu_states: 4
+    document_ctu_workers: 2
+    interface_states: 12
+    predictor_states: 48
+    retrieval_workers: 4
+    bootstrap_samples: 200
+  pilot:
+    alias_states: 300
+    alias_simulation_draws: 1000
+    alias_gradient_states: 32
+    granularity_states: 300
+    document_ctu_states: 60
+    document_ctu_workers: 12
+    interface_states: 120
+    predictor_states: 600
+    retrieval_workers: 16
+    bootstrap_samples: 5000
+  full:
+    alias_states: 600
+    alias_simulation_draws: 3000
+    alias_gradient_states: 96
+    granularity_states: 600
+    document_ctu_states: 200
+    document_ctu_workers: 24
+    interface_states: 300
+    predictor_states: 1800
+    retrieval_workers: 24
+    bootstrap_samples: 10000
+
+gates:
+  EXP-020:
+    minimum_surface_advantage_drift: 0.10
+    maximum_quotient_drift: 1.0e-8
+    minimum_quotient_coverage_gain: 0.10
+  EXP-021:
+    minimum_first_exposure_overattribution: 0.20
+    minimum_action_class_disagreement: 0.10
+    maximum_first_exposure_class_correlation: 0.60
+  EXP-022:
+    minimum_menu_behavior_miss_rate: 0.15
+    minimum_freeform_ood_gain_advantage: 0.02
+  EXP-023:
+    minimum_state_auc_gain: 0.05
+    minimum_response_auc: 0.85
+    maximum_cross_backend_relation_agreement: 0.80
+    minimum_paired_backend_states: 10
