@@ -1,206 +1,92 @@
-# EXP-016 — Attribution-controlled query-class supervision
+# EXP-016–019 — Attribution-controlled query-equivalence matrix
 
-EXP-015 found a large cross-retriever benefit from training on multiple members
-of a functional query-equivalence class, but the original comparison did not
-fully separate equivalence structure from generic multi-target augmentation,
-direct-evidence filtering, or target-token compute. EXP-016 is the attribution
-correction.
+EXP-015 showed a large benefit from training on multiple functionally equivalent query wordings, but did not isolate why that benefit appeared. This suite tests all plausible explanations in one controlled matrix before any full GRPO implementation.
 
-The scientific question is:
+## Hypotheses
 
-> Does functional equivalence itself improve portable query supervision after
-> the number of target sequences, state credit, source states, optimizer steps,
-> tokenizer-level target budget, and direct-evidence quality are controlled?
+| ID | Hypothesis | Primary comparison |
+|---|---|---|
+| H1 | Functional equivalence adds value beyond generic multi-query augmentation | `strict-uniform - random-k` |
+| H2 | Functional equivalence adds value beyond direct-evidence filtering | `strict-uniform - all-direct-k` |
+| H3 | Functional equivalence adds value beyond lexical diversity/length matching | `strict-uniform - diversity-matched-k` |
+| H4 | The EXP-015 gain is mostly generic multi-target augmentation | `strict-uniform - factual-replicated-k` |
+| H5 | Worst-member-focused training improves the weakest equivalent wording | `strict-hardmax - strict-uniform` |
+| H6 | Consistency regularization reduces final within-class NLL dispersion | `strict-consistency - strict-uniform` |
+| H7 | Immediate evidence equivalence is sufficient; suffix replay is unnecessary | `immediate-only ≈ strict-immediate-control` |
+| H8 | Final outcome equivalence is sufficient; immediate matching is unnecessary | `final-only ≈ strict-final-control` |
+| H9 | The effect transfers across retrievers rather than only fitting the source view | seen/cross portability |
+| H10 | The effect is not caused only by the synthetic alternative-query generator | factual/synthetic subgroup gain |
+| H11 | The effect is stronger for larger or more lexically diverse classes | class-size/diversity subgroups |
+| H12 | NLL improvements produce actual held-out evidence gain | EXP-019 interactive retrieval |
 
-This is a project-selection diagnostic for one CUDA 12.9 node with eight full
-H100 GPUs. It reuses EXP-015's strict counterfactual equivalence states and
-Qwen2.5-7B grouped LoRA runner. It does not yet train a full interactive search
-policy.
+## Compute and data controls
 
-## Four fixed-K curricula
+Within each hypothesis family, the suite fixes source states, held-out grids, two target sequences per state, total state credit one, tokenizer target-token imbalance at most 25%, model, LoRA rank, optimizer steps, seeds, and positive-only credit. Non-finite values and incomplete paired grids fail closed.
 
-Every source state contributes exactly `K=2` target sequences and exactly one
-unit of total state credit in every variant.
+`factual-replicated-k` matches target forwards without adding information. `diversity-matched-k` chooses a non-equivalent query with lexical distance and length closest to the strict partner. `all-direct-k` controls evidence quality without equivalence structure.
 
-| Variant | Targets from the same state |
-|---|---|
-| `factual-replicated-k` | factual query repeated K times |
-| `random-k` | factual query plus K-1 random valid non-equivalent alternatives |
-| `all-direct-k` | factual query plus K-1 direct-evidence queries outside the best equivalence class |
-| `equivalence-k` | factual query plus K-1 members of its functional equivalence class |
+## Class definitions
 
-All target weights equal `1/K`. Therefore:
+- strict: same immediate support set, final support set, and answer EM;
+- immediate: same immediate support set only;
+- final: same final support set and answer EM.
 
-- every state has the same number of target forward passes;
-- every state has the same total optimization weight;
-- factual replication controls target count and nominal compute;
-- random-K controls generic multi-query diversity;
-- all-direct-K controls evidence quality without using equivalence structure;
-- equivalence-K is the proposed attribution rule.
+## Objectives
 
-The planner uses the exact Qwen tokenizer, filters states whose target-token
-budgets differ too much across variants or seeds, and writes the final token
-budget into every job manifest.
+- `strict-uniform`: mean member NLL;
+- `strict-hardmax`: smooth maximum NLL;
+- `strict-consistency`: mean NLL plus within-class NLL variance.
 
-## State requirements
+Final wording sensitivity is `baseline class NLL std - adapted class NLL std`, not the standard deviation of gains.
 
-A training state must contain:
+## Run
 
-- one protocol-valid factual query that is direct and belongs to the best class;
-- at least one other best-class member;
-- at least one protocol-valid direct query outside the best class;
-- at least one protocol-valid non-equivalent alternative;
-- exact tokenizer target totals within the configured 25% state-level bound
-  across all variants and all predeclared seeds.
-
-The strict outside-class direct requirement ensures `all-direct-k` is not merely
-a relabeled equivalence curriculum.
-
-## Cross-retriever design
-
-```text
-BM25 source states -> E5 held-out states
-E5 source states   -> BM25 held-out states
-```
-
-Source and target question IDs are hash-split by EXP-015 before EXP-016 sees
-them. Every variant in a direction uses the same source states and exact same
-held-out target grid.
-
-## Corrected robustness metrics
-
-EXP-015 reported the standard deviation of **NLL gain** across class members.
-That statistic can increase even when final query likelihoods become more
-uniform. EXP-016 instead reports:
-
-```text
-baseline class NLL std
-adapted class NLL std
-final dispersion reduction = baseline std - adapted std
-```
-
-It also reports:
-
-- class-mean NLL gain;
-- worst final-class NLL improvement;
-- non-factual class-member gain;
-- positive member coverage;
-- class versus off-class direct-query margin;
-- style-specific gain;
-- actual target-count and tokenizer-token balance;
-- across-seed variability.
-
-## Primary contrasts
-
-The attribution claims depend on two comparisons:
-
-```text
-equivalence-k - random-k
-equivalence-k - all-direct-k
-```
-
-`equivalence-k - factual-replicated-k` is descriptive only: it confirms the
-multi-target effect but cannot isolate equivalence structure.
-
-## Project gate
-
-EXP-016 is a GO only when all of the following hold:
-
-1. equivalence-K beats random-K in class-mean gain by at least `0.020`
-   nats/token with a hierarchical-bootstrap lower bound above zero;
-2. equivalence-K beats all-direct-K in class-mean gain by at least `0.010`
-   with lower bound above zero;
-3. equivalence-K improves worst final-member NLL over random-K by at least
-   `0.005` with lower bound above zero;
-4. equivalence-K improves final within-class dispersion over random-K by at
-   least `0.005` with lower bound above zero;
-5. equivalence-K is not worse than all-direct-K on dispersion reduction;
-6. both transfer directions have non-negative point estimates for the two
-   primary mean-gain contrasts;
-7. equivalence-K has no greater seed variability than random-K;
-8. the final plan remains inside the preregistered target-token tolerance.
-
-A GO justifies independently generated query evaluation and an interactive
-held-out-retriever experiment. It does not by itself justify a full GRPO paper
-claim.
-
-## One-node execution
-
-This PR is stacked on EXP-015. First prepare the EXP-015 equivalence states from
-raw EXP-014 state JSON files:
+The branch is stacked on EXP-015, and EXP-015 prepared states must exist.
 
 ```bash
-git checkout agent/add-attribution-controlled-equivalence
-
-export QUERY_ATTRIBUTION_INPUTS='/absolute/path/to/causal_query_audit/results/full/states/*/*.json'
-export QUERY_ATTRIBUTION_BASE_MODEL='/absolute/path/to/Qwen2.5-7B-Instruct'
-
+export QUERY_ATTRIBUTION_BASE_MODEL=/absolute/path/to/Qwen2.5-7B-Instruct
 PROFILE=smoke bash query_attribution/run_all.sh
+PROFILE=pilot bash query_attribution/run_all.sh
 ```
 
-After smoke succeeds:
+To rebuild EXP-015 preparation from raw causal-audit state files:
 
 ```bash
-SKIP_BOOTSTRAP=1 \
-SKIP_PREPARE=1 \
-QUERY_ATTRIBUTION_BASE_MODEL='/absolute/path/to/Qwen2.5-7B-Instruct' \
-PROFILE=pilot \
-  bash query_attribution/run_all.sh
+export QUERY_ATTRIBUTION_INPUTS='/absolute/path/to/causal_query_audit/results/full/states/*/*.json'
+REFRESH_EQUIVALENCE_PREPARE=1 PROFILE=pilot bash query_attribution/run_all.sh
 ```
 
-Pilot geometry:
+Run one family:
 
-```text
-Directions: 2
-Variants: 4
-Seeds: 13, 42, 87
-Source states per direction: 24
-Held-out states per direction: 32
-Optimizer steps: 24
-Total one-GPU jobs: 24
+```bash
+PROFILE=pilot bash experiments/EXP-016/run.sh
+PROFILE=pilot bash experiments/EXP-017/run.sh
+PROFILE=pilot bash experiments/EXP-018/run.sh
 ```
 
-Full geometry:
+Interactive confirmation:
 
-```text
-Seeds: 13, 42, 87, 101, 131
-Source states per direction: 48
-Held-out states per direction: 64
-Optimizer steps: 48
-Total one-GPU jobs: 40
+```bash
+PROFILE=pilot bash experiments/EXP-019/run.sh
 ```
 
-Eight H100s execute up to eight independent Qwen2.5-7B LoRA jobs in parallel.
+Full sequence:
 
-## Outputs
-
-```text
-work/query_attribution/
-├── plans/<profile>/
-│   ├── jobs.jsonl
-│   ├── manifest.json
-│   ├── data/
-│   └── outputs/
-└── reports/<profile>/
-    ├── compute_budget.csv
-    ├── target_losses.csv
-    ├── state_metrics.csv
-    ├── variant_summary.csv
-    ├── style_summary.csv
-    ├── contrast_rows.csv
-    ├── contrasts.csv
-    ├── decision.json
-    └── EXP016_REPORT.md
+```bash
+PROFILE=pilot bash query_attribution/run_everything.sh
 ```
+
+## Scale
+
+There are 11 NLL variants. Pilot uses two directions and three seeds, for 66 one-GPU jobs. Full uses five seeds, for 110 jobs. EXP-019 evaluates six selected adapter variants and reserves GPU 7 for E5 FAISS.
 
 ## Interpretation
 
-- **GO:** equivalence structure contributes beyond matched target count,
-  generic query diversity, and direct-evidence filtering. Proceed to an
-  independent-generator and interactive retrieval confirmation.
-- **Equivalence beats factual only:** multi-query augmentation is useful, but
-  equivalence-aware credit is not uniquely supported.
-- **Equivalence equals all-direct:** evidence-quality filtering explains the
-  result; stop equivalence-specific method development.
-- **No dispersion advantage:** class-average likelihood can improve without
-  reducing wording sensitivity; do not claim robustness.
+- H1/H2/H3 pass: equivalence structure itself is supported.
+- H4 only: generic multi-query augmentation explains EXP-015.
+- H5: use a worst-member-aware objective.
+- H6: consistency regularization is the robustness mechanism.
+- H7: immediate support equivalence is enough; remove suffix replay.
+- H8: final outcome equivalence is enough; immediate matching is unnecessary.
+- NLL pass but EXP-019 fail: stop because the proxy does not improve real retrieval.
+- EXP-019 pass: proceed to full equivalence-aware query-token GRPO under matched search-call budgets.

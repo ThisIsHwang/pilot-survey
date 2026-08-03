@@ -10,13 +10,6 @@ JOBS=$ROOT/work/query_attribution/plans/$PROFILE/jobs.jsonl
 "$PYTHON" -m stackpilot.trace_model_contract --jobs "$JOBS"
 QUERY_ATTRIBUTION_GPUS=${QUERY_ATTRIBUTION_GPUS:-"0 1 2 3 4 5 6 7"}
 QUERY_ATTRIBUTION_WORKERS=${QUERY_ATTRIBUTION_WORKERS:-8}
-QUERY_ATTRIBUTION_LAUNCH_STAGGER=${QUERY_ATTRIBUTION_LAUNCH_STAGGER:-2}
 # shellcheck disable=SC2206
 GPU_ARGS=($QUERY_ATTRIBUTION_GPUS)
-"$PYTHON" -m stackpilot.query_attribution_scheduler \
-  --jobs "$JOBS" \
-  --python "$PYTHON" \
-  --gpus "${GPU_ARGS[@]}" \
-  --workers "$QUERY_ATTRIBUTION_WORKERS" \
-  --launch-stagger "$QUERY_ATTRIBUTION_LAUNCH_STAGGER" \
-  "$@"
+"$PYTHON" -m stackpilot.query_attribution_scheduler --jobs "$JOBS" --python "$PYTHON" --gpus "${GPU_ARGS[@]}" --workers "$QUERY_ATTRIBUTION_WORKERS" --launch-stagger "${QUERY_ATTRIBUTION_LAUNCH_STAGGER:-2}" "$@"
