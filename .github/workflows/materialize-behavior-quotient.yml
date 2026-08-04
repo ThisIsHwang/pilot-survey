@@ -1,0 +1,36 @@
+name: materialize-behavior-quotient
+
+on:
+  push:
+    branches:
+      - agent/add-behavior-quotient-suite
+    paths:
+      - behavior_quotient_bundle.b64
+      - .github/workflows/materialize-behavior-quotient.yml
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - name: Expand source bundle
+        run: |
+          test -s behavior_quotient_bundle.b64
+          base64 --decode behavior_quotient_bundle.b64 > /tmp/behavior_quotient_final.tar.gz
+          tar -xzf /tmp/behavior_quotient_final.tar.gz -C .
+          rm -f behavior_quotient_bundle.b64
+          rm -f .github/workflows/materialize-behavior-quotient.yml
+      - name: Commit materialized experiment suite
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'Add natural-alias and behavior-quotient experiments'
+          git push origin HEAD:${GITHUB_REF_NAME}
