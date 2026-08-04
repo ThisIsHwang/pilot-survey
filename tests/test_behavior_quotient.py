@@ -92,6 +92,14 @@ class BehaviorQuotientTests(unittest.TestCase):
             trainer.write_text(
                 "import os\nimport numpy as np\n"
                 "from search_r1.llm_agent.generation import LLMGenerationManager, GenerationConfig\n"
+                "                        final_gen_batch_output = generation_manager.run_llm_loop(\n"
+                "                            gen_batch=test_gen_batch,\n"
+                "                            initial_input_ids=first_input_ids,\n"
+                "                        )\n"
+                "                        final_gen_batch_output = generation_manager.run_llm_loop(\n"
+                "                            gen_batch=gen_batch,\n"
+                "                            initial_input_ids=first_input_ids,\n"
+                "                        )\n"
                 "        advantages, returns = core_algos.compute_grpo_outcome_advantage(token_level_rewards=token_level_rewards,\n"
                 "                                                                        eos_mask=response_mask,\n"
                 "                                                                        index=index)\n"
@@ -117,6 +125,7 @@ class BehaviorQuotientTests(unittest.TestCase):
             self.assertIn("compute_behavior_advantages", first_trainer)
             self.assertIn("stackpilot_bq_selected_mask", first_trainer)
             self.assertIn("update_actor(\n                                actor_batch", first_trainer)
+            self.assertIn("run_grouped_feedback_rollouts", first_trainer)
 
     def test_fixed_k_selection_returns_explicit_row_mask(self) -> None:
         try:
@@ -154,7 +163,7 @@ class BehaviorQuotientTests(unittest.TestCase):
             eos_mask=mask,
             index=["q", "q"],
             query_batches=[["one"], ["two"]],
-            title_batches=[[["A"]], [["B"]]],
+            title_batches=[[['A']], [['B']]],
             advantage_mode="surface",
             selection_mode="all",
         )

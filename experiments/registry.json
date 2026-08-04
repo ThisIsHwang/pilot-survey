@@ -3,30 +3,253 @@
   "id_format": "EXP-###",
   "run_id_format": "EXP-###__seed-SSS__profile-NAME__variant-NAME",
   "experiments": [
-    {"id":"EXP-001","slug":"rq0-easy-transfer","status":"completed","question":"Do BM25-, E5-, and ColBERT-connected agents differ in the original small-corpus HotpotQA pilot?","entrypoint":"scripts/run_all.sh","parent":null},
-    {"id":"EXP-002","slug":"rq0-hard-specialists","status":"active","question":"Do BM25 and E5 specialists show home-backend excess gain under full-wiki, low-top-k, multi-turn retrieval?","entrypoint":"hard_rq0/run_all.sh","parent":"EXP-001"},
-    {"id":"EXP-003","slug":"mixed-blind-grpo","status":"active","question":"Can one policy trained on episode-stable BM25/E5 mixtures match both specialists without backend metadata?","entrypoint":"experiments/EXP-003/run.sh","parent":"EXP-002"},
-    {"id":"EXP-004","slug":"mixed-backend-id-oracle","status":"active","question":"How much does explicit backend metadata improve a shared mixed-backend policy?","entrypoint":"experiments/EXP-004/run.sh","parent":"EXP-003"},
-    {"id":"EXP-005","slug":"evidence-aware-reward","status":"active","question":"Does adding terminal supporting-evidence recall to the GRPO reward reveal retriever-specific acquisition behavior hidden by answer-only reward?","entrypoint":"experiments/EXP-005/run.sh","parent":"EXP-002"},
-    {"id":"EXP-006","slug":"heldout-hybrid-rrf","status":"active","question":"How do base, specialist, and mixed policies transfer to a held-out BM25+E5 RRF backend?","entrypoint":"experiments/EXP-006/run.sh","parent":"EXP-003"},
-    {"id":"EXP-009","slug":"trace-recoverability-controls","status":"planned","question":"Does paired portable recoverability predict held-out reformulation gain beyond initial success, reward variance, search depth, and question difficulty?","entrypoint":"experiments/EXP-009/run.sh","parent":"EXP-002"},
-    {"id":"EXP-010","slug":"trace-recovery-versus-depth","status":"planned","question":"Do short evidence-recovery trajectories teach held-out reformulations better than matched deep trajectories with no evidence recovery?","entrypoint":"experiments/EXP-010/run.sh","parent":"EXP-009"},
-    {"id":"EXP-011","slug":"trace-paired-versus-unpaired","status":"planned","question":"Does same-question cross-view pairing improve transfer over marginally matched global recovery selection?","entrypoint":"experiments/EXP-011/run.sh","parent":"EXP-009"},
-    {"id":"EXP-012","slug":"positive-recovery-depth-factorial","status":"planned","question":"Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?","entrypoint":"experiments/EXP-012/run.sh","parent":"EXP-010"},
-    {"id":"EXP-013","slug":"causal-query-signal-audit","status":"planned","question":"Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?","entrypoint":"experiments/EXP-013/run.sh","parent":"EXP-012"},
-    {"id":"EXP-015","slug":"query-equivalence-credit","status":"planned","question":"When distinct queries are functionally interchangeable, does state-normalized equivalence-class credit improve portable query supervision over exclusive action credit?","entrypoint":"experiments/EXP-015/run.sh","parent":"EXP-013"},
-    {"id":"EXP-016","slug":"equivalence-attribution-controls","status":"planned","question":"Does strict functional equivalence improve portable query supervision beyond compute-matched repetition, random augmentation, lexical diversity, and direct-evidence filtering?","entrypoint":"experiments/EXP-016/run.sh","parent":"EXP-015"},
-    {"id":"EXP-017","slug":"equivalence-objective-ablation","status":"planned","question":"Do worst-member or consistency-aware class objectives improve weak-query likelihood and final wording robustness over uniform equivalence pooling?","entrypoint":"experiments/EXP-017/run.sh","parent":"EXP-016"},
-    {"id":"EXP-018","slug":"equivalence-definition-ablation","status":"planned","question":"Can immediate-only or final-only functional classes replace strict immediate-plus-final equivalence without losing transfer?","entrypoint":"experiments/EXP-018/run.sh","parent":"EXP-016"},
-    {"id":"EXP-019","slug":"interactive-equivalence-confirmation","status":"planned","question":"Do attribution-controlled equivalence curricula improve actual held-out retriever evidence gain under one matched query call?","entrypoint":"experiments/EXP-019/run.sh","parent":"EXP-016"},
-    {"id":"EXP-020","slug":"surface-alias-invariance","status":"planned","question":"Does duplicating natural-language aliases change surface-level GRPO credit and fixed-budget behavior coverage even when the underlying behavior rewards are unchanged?","entrypoint":"experiments/EXP-020/run.sh","parent":"EXP-019"},
-    {"id":"EXP-021","slug":"credit-granularity-audit","status":"planned","question":"Do first-exposure, query-action, behavior-class, and document-observation credit disagree on the same search states?","entrypoint":"experiments/EXP-021/run.sh","parent":"EXP-020"},
-    {"id":"EXP-022","slug":"interface-expressivity-audit","status":"planned","question":"How much behavior and evidence utility does a finite entity/title menu lose relative to free-form queries, especially when the required entity is absent from the prefix?","entrypoint":"experiments/EXP-022/run.sh","parent":"EXP-020"},
-    {"id":"EXP-023","slug":"environment-conditioned-equivalence","status":"planned","question":"Is behavioral query equivalence predictable from semantics alone, or must it be conditioned on the state, retriever, and observed response?","entrypoint":"experiments/EXP-023/run.sh","parent":"EXP-020"},
-    {"id":"EXP-024","slug":"natural-alias-dynamics","status":"planned","question":"Do natural retrieval aliases grow during real on-policy GRPO and reduce effective behavior count and non-zero advantage coverage?","entrypoint":"experiments/EXP-024/run.sh","parent":"EXP-020"},
-    {"id":"EXP-025","slug":"fixed-budget-behavior-selection","status":"planned","question":"Under the same cached query and retrieval budget, does post-retrieval behavior-balanced selection improve unique behavior coverage and union evidence over surface or text-diverse selection?","entrypoint":"experiments/EXP-025/run.sh","parent":"EXP-024"},
-    {"id":"EXP-026","slug":"response-signature-robustness","status":"planned","question":"Which inexpensive post-retrieval signature preserves exact ranked-transition behavior classes without harmful false merges or best-class changes?","entrypoint":"experiments/EXP-026/run.sh","parent":"EXP-023"},
-    {"id":"EXP-027","slug":"behavior-quotient-grpo-factorial","status":"planned","question":"Do behavior-balanced rollout selection and quotient-level GRPO normalization improve actual Search-R1 training under matched generation, retrieval, and update budgets?","entrypoint":"experiments/EXP-027/run.sh","parent":"EXP-024"},
-    {"id":"EXP-028","slug":"behavior-quotient-generalization","status":"planned","question":"Do behavior-quotient policies improve seen, cross-retriever, and held-out hybrid evidence acquisition per search call without answer regression?","entrypoint":"experiments/EXP-028/run.sh","parent":"EXP-027"}
+    {
+      "id": "EXP-001",
+      "slug": "rq0-easy-transfer",
+      "status": "completed",
+      "question": "Do BM25-, E5-, and ColBERT-connected agents differ in the original small-corpus HotpotQA pilot?",
+      "entrypoint": "scripts/run_all.sh",
+      "parent": null
+    },
+    {
+      "id": "EXP-002",
+      "slug": "rq0-hard-specialists",
+      "status": "active",
+      "question": "Do BM25 and E5 specialists show home-backend excess gain under full-wiki, low-top-k, multi-turn retrieval?",
+      "entrypoint": "hard_rq0/run_all.sh",
+      "parent": "EXP-001"
+    },
+    {
+      "id": "EXP-003",
+      "slug": "mixed-blind-grpo",
+      "status": "active",
+      "question": "Can one policy trained on episode-stable BM25/E5 mixtures match both specialists without backend metadata?",
+      "entrypoint": "experiments/EXP-003/run.sh",
+      "parent": "EXP-002"
+    },
+    {
+      "id": "EXP-004",
+      "slug": "mixed-backend-id-oracle",
+      "status": "active",
+      "question": "How much does explicit backend metadata improve a shared mixed-backend policy?",
+      "entrypoint": "experiments/EXP-004/run.sh",
+      "parent": "EXP-003"
+    },
+    {
+      "id": "EXP-005",
+      "slug": "evidence-aware-reward",
+      "status": "active",
+      "question": "Does adding terminal supporting-evidence recall to the GRPO reward reveal retriever-specific acquisition behavior hidden by answer-only reward?",
+      "entrypoint": "experiments/EXP-005/run.sh",
+      "parent": "EXP-002"
+    },
+    {
+      "id": "EXP-006",
+      "slug": "heldout-hybrid-rrf",
+      "status": "active",
+      "question": "How do base, specialist, and mixed policies transfer to a held-out BM25+E5 RRF backend?",
+      "entrypoint": "experiments/EXP-006/run.sh",
+      "parent": "EXP-003"
+    },
+    {
+      "id": "EXP-009",
+      "slug": "trace-recoverability-controls",
+      "status": "planned",
+      "question": "Does paired portable recoverability predict held-out reformulation gain beyond initial success, reward variance, search depth, and question difficulty?",
+      "entrypoint": "experiments/EXP-009/run.sh",
+      "parent": "EXP-002"
+    },
+    {
+      "id": "EXP-010",
+      "slug": "trace-recovery-versus-depth",
+      "status": "planned",
+      "question": "Do short evidence-recovery trajectories teach held-out reformulations better than matched deep trajectories with no evidence recovery?",
+      "entrypoint": "experiments/EXP-010/run.sh",
+      "parent": "EXP-009"
+    },
+    {
+      "id": "EXP-011",
+      "slug": "trace-paired-versus-unpaired",
+      "status": "planned",
+      "question": "Does same-question cross-view pairing improve transfer over marginally matched global recovery selection?",
+      "entrypoint": "experiments/EXP-011/run.sh",
+      "parent": "EXP-009"
+    },
+    {
+      "id": "EXP-012",
+      "slug": "positive-recovery-depth-factorial",
+      "status": "planned",
+      "question": "Does evidence recovery improve held-out query transfer after search depth is controlled in a positive-only 2x2 factorial?",
+      "entrypoint": "experiments/EXP-012/run.sh",
+      "parent": "EXP-010"
+    },
+    {
+      "id": "EXP-013",
+      "slug": "causal-query-signal-audit",
+      "status": "planned",
+      "question": "Do state-matched query interventions reveal frequent bridge and redundant search actions that immediate evidence gain cannot explain?",
+      "entrypoint": "experiments/EXP-013/run.sh",
+      "parent": "EXP-012"
+    },
+    {
+      "id": "EXP-015",
+      "slug": "query-equivalence-credit",
+      "status": "planned",
+      "question": "When distinct queries are functionally interchangeable, does state-normalized equivalence-class credit improve portable query supervision over exclusive action credit?",
+      "entrypoint": "experiments/EXP-015/run.sh",
+      "parent": "EXP-013"
+    },
+    {
+      "id": "EXP-016",
+      "slug": "equivalence-attribution-controls",
+      "status": "planned",
+      "question": "Does strict functional equivalence improve portable query supervision beyond compute-matched repetition, random augmentation, lexical diversity, and direct-evidence filtering?",
+      "entrypoint": "experiments/EXP-016/run.sh",
+      "parent": "EXP-015"
+    },
+    {
+      "id": "EXP-017",
+      "slug": "equivalence-objective-ablation",
+      "status": "planned",
+      "question": "Do worst-member or consistency-aware class objectives improve weak-query likelihood and final wording robustness over uniform equivalence pooling?",
+      "entrypoint": "experiments/EXP-017/run.sh",
+      "parent": "EXP-016"
+    },
+    {
+      "id": "EXP-018",
+      "slug": "equivalence-definition-ablation",
+      "status": "planned",
+      "question": "Can immediate-only or final-only functional classes replace strict immediate-plus-final equivalence without losing transfer?",
+      "entrypoint": "experiments/EXP-018/run.sh",
+      "parent": "EXP-016"
+    },
+    {
+      "id": "EXP-019",
+      "slug": "interactive-equivalence-confirmation",
+      "status": "planned",
+      "question": "Do attribution-controlled equivalence curricula improve actual held-out retriever evidence gain under one matched query call?",
+      "entrypoint": "experiments/EXP-019/run.sh",
+      "parent": "EXP-016"
+    },
+    {
+      "id": "EXP-020",
+      "slug": "surface-alias-invariance",
+      "status": "planned",
+      "question": "Does duplicating natural-language aliases change surface-level GRPO credit and fixed-budget behavior coverage even when the underlying behavior rewards are unchanged?",
+      "entrypoint": "experiments/EXP-020/run.sh",
+      "parent": "EXP-019"
+    },
+    {
+      "id": "EXP-021",
+      "slug": "credit-granularity-audit",
+      "status": "planned",
+      "question": "Do first-exposure, query-action, behavior-class, and document-observation credit disagree on the same search states?",
+      "entrypoint": "experiments/EXP-021/run.sh",
+      "parent": "EXP-020"
+    },
+    {
+      "id": "EXP-022",
+      "slug": "interface-expressivity-audit",
+      "status": "planned",
+      "question": "How much behavior and evidence utility does a finite entity/title menu lose relative to free-form queries, especially when the required entity is absent from the prefix?",
+      "entrypoint": "experiments/EXP-022/run.sh",
+      "parent": "EXP-020"
+    },
+    {
+      "id": "EXP-023",
+      "slug": "environment-conditioned-equivalence",
+      "status": "planned",
+      "question": "Is behavioral query equivalence predictable from semantics alone, or must it be conditioned on the state, retriever, and observed response?",
+      "entrypoint": "experiments/EXP-023/run.sh",
+      "parent": "EXP-020"
+    },
+    {
+      "id": "EXP-024",
+      "slug": "natural-alias-dynamics",
+      "status": "planned",
+      "question": "Do natural retrieval aliases grow during real on-policy GRPO and reduce effective behavior count and non-zero advantage coverage?",
+      "entrypoint": "experiments/EXP-024/run.sh",
+      "parent": "EXP-020"
+    },
+    {
+      "id": "EXP-025",
+      "slug": "fixed-budget-behavior-selection",
+      "status": "planned",
+      "question": "Under the same cached query and retrieval budget, does post-retrieval behavior-balanced selection improve unique behavior coverage and union evidence over surface or text-diverse selection?",
+      "entrypoint": "experiments/EXP-025/run.sh",
+      "parent": "EXP-024"
+    },
+    {
+      "id": "EXP-026",
+      "slug": "response-signature-robustness",
+      "status": "planned",
+      "question": "Which inexpensive post-retrieval signature preserves exact ranked-transition behavior classes without harmful false merges or best-class changes?",
+      "entrypoint": "experiments/EXP-026/run.sh",
+      "parent": "EXP-023"
+    },
+    {
+      "id": "EXP-027",
+      "slug": "behavior-quotient-grpo-factorial",
+      "status": "planned",
+      "question": "Do behavior-balanced rollout selection and quotient-level GRPO normalization improve actual Search-R1 training under matched generation, retrieval, and update budgets?",
+      "entrypoint": "experiments/EXP-027/run.sh",
+      "parent": "EXP-024"
+    },
+    {
+      "id": "EXP-028",
+      "slug": "behavior-quotient-generalization",
+      "status": "planned",
+      "question": "Do behavior-quotient policies improve seen, cross-retriever, and held-out hybrid evidence acquisition per search call without answer regression?",
+      "entrypoint": "experiments/EXP-028/run.sh",
+      "parent": "EXP-027"
+    },
+    {
+      "id": "EXP-029",
+      "slug": "natural-alias-lagged-effects",
+      "status": "planned",
+      "question": "Does natural alias growth or effective-behavior decline predict weaker next-step GRPO learning progress after run and step controls?",
+      "entrypoint": "experiments/EXP-029/run.sh",
+      "parent": "EXP-024"
+    },
+    {
+      "id": "EXP-030",
+      "slug": "response-feedback-rollout-audit",
+      "status": "planned",
+      "question": "Under the same eight target-retriever calls, does visible response feedback increase unique behavior coverage and union evidence beyond IID and text-only diversity prompts?",
+      "entrypoint": "experiments/EXP-030/run.sh",
+      "parent": "EXP-029"
+    },
+    {
+      "id": "EXP-031",
+      "slug": "response-feedback-grpo-factorial",
+      "status": "planned",
+      "question": "Do response-feedback rollout sampling and behavior-quotient normalization independently or jointly improve real Search-R1 training in a matched 3x2 factorial?",
+      "entrypoint": "experiments/EXP-031/run.sh",
+      "parent": "EXP-030"
+    },
+    {
+      "id": "EXP-032",
+      "slug": "adaptive-hybrid-interface-router",
+      "status": "planned",
+      "question": "Can a state-only router retain free-form evidence utility while using the finite menu when its constrained interface is sufficient?",
+      "entrypoint": "experiments/EXP-032/run.sh",
+      "parent": "EXP-022"
+    },
+    {
+      "id": "EXP-033",
+      "slug": "fully-paired-multiretriever-grid",
+      "status": "planned",
+      "question": "Do behavior relations and behavior-aware sampling gains persist when identical query banks are fully paired across BM25, E5, hybrid RRF, and optional ColBERT?",
+      "entrypoint": "experiments/EXP-033/run.sh",
+      "parent": "EXP-030"
+    },
+    {
+      "id": "EXP-034",
+      "slug": "document-action-credit-closure",
+      "status": "planned",
+      "question": "How often is a causally useful document observation produced by a query and behavior class with non-positive counterfactual utility on the same state?",
+      "entrypoint": "experiments/EXP-034/run.sh",
+      "parent": "EXP-021"
+    }
   ]
 }

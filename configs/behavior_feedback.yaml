@@ -1,0 +1,187 @@
+schema: 1
+suite_id: RESPONSE-FEEDBACK-SEARCH
+work_dir: ./work/behavior_feedback
+
+source:
+  input_globs:
+    - ./work/causal_query_audit/results/full/states/*/*.json
+    - ./work/causal_query_audit/results/pilot/states/*/*.json
+  telemetry_globs:
+    - ./work/behavior_quotient/telemetry/{profile}/*/telemetry.jsonl
+  episode_globs:
+    - ./work/experiments/EXP-024/results/**/episodes.jsonl
+    - ./work/experiments/EXP-031/results/**/episodes.jsonl
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  trust_remote_code: false
+  dtype: bfloat16
+  max_new_tokens: 64
+  temperature: 0.9
+  top_p: 0.95
+
+retrieval:
+  bm25_url: http://127.0.0.1:8101/retrieve
+  e5_url: http://127.0.0.1:8102/retrieve
+  colbert_url: ""
+  topk: 3
+  timeout: 120
+  retries: 4
+  rrf_k: 60
+
+response_feedback:
+  total_queries: 8
+  first_phase_queries: 4
+  maximum_feedback_titles: 24
+  maximum_feedback_chars: 1800
+  prompt_token_budget: 2048
+  generation_batch_size: 8
+  modes:
+    - iid
+    - text-feedback
+    - response-feedback
+
+router:
+  train_fraction: 0.70
+  l2: 0.01
+  learning_rate: 0.08
+  iterations: 1200
+  tie_break: finite-menu
+  random_seed: 31031
+
+paired_grid:
+  query_limit_per_state: 8
+  required_backends: 3
+  optional_colbert: true
+  budgets: [2, 4, 8]
+
+ctu_closure:
+  document_ctu_globs:
+    - ./work/interface_causality/document_ctu/{profile}/document_ctu.jsonl
+  minimum_positive_document_ctu: 0.001
+
+training:
+  experiment_id: EXP-031
+  n_agent: 8
+  update_per_prompt: 4
+  feedback_first_count: 4
+  feedback_max_titles: 24
+  feedback_max_chars: 1800
+  feedback_prompt_token_budget: 2048
+  train_gpus: "0,1,2,3,4,5,6"
+  n_gpus: 7
+  e5_gpu: 7
+  topk: 3
+  max_turns: 4
+  max_prompt_length: 4096
+  max_response_length: 500
+  max_start_length: 2048
+  max_obs_length: 500
+  learning_rate: 1.0e-6
+  rollout_gpu_memory: 0.55
+  variants:
+    iid-surface:
+      rollout_mode: iid
+      advantage_mode: surface
+      selection_mode: surface-random
+      update_per_prompt: 4
+    posthoc-surface:
+      rollout_mode: iid
+      advantage_mode: surface
+      selection_mode: behavior-balanced
+      update_per_prompt: 4
+    feedback-surface:
+      rollout_mode: response-feedback
+      advantage_mode: surface
+      selection_mode: surface-random
+      update_per_prompt: 4
+    iid-quotient:
+      rollout_mode: iid
+      advantage_mode: quotient
+      selection_mode: surface-random
+      update_per_prompt: 4
+    posthoc-quotient:
+      rollout_mode: iid
+      advantage_mode: quotient
+      selection_mode: behavior-balanced
+      update_per_prompt: 4
+    feedback-quotient:
+      rollout_mode: response-feedback
+      advantage_mode: quotient
+      selection_mode: surface-random
+      update_per_prompt: 4
+
+profiles:
+  smoke:
+    states: 18
+    router_states: 24
+    paired_states: 12
+    ctu_states: 12
+    bootstrap_samples: 200
+    seeds: [13]
+    total_updates: 10
+    train_batch: 14
+    val_batch: 14
+    mini_batch: 14
+    micro_batch: 7
+    save_freq: 10
+    test_freq: 10
+    eval_limit: 20
+  pilot:
+    states: 240
+    router_states: 300
+    paired_states: 120
+    ctu_states: 100
+    bootstrap_samples: 5000
+    seeds: [13, 42, 87]
+    total_updates: 100
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 100
+    test_freq: 50
+    eval_limit: 500
+  full:
+    states: 600
+    router_states: 600
+    paired_states: 300
+    ctu_states: 200
+    bootstrap_samples: 10000
+    seeds: [13, 42, 87, 101, 202]
+    total_updates: 300
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 100
+    test_freq: 100
+    eval_limit: 1000
+
+gates:
+  EXP-029:
+    minimum_alias_growth: 0.02
+    minimum_behavior_count_decline: 0.10
+    maximum_standardized_alias_to_next_reward: -0.05
+    minimum_standardized_behavior_to_next_reward: 0.05
+  EXP-030:
+    minimum_feedback_coverage_gain: 0.10
+    minimum_feedback_union_recall_gain: 0.02
+    maximum_invalid_increase: 0.01
+  EXP-031:
+    minimum_support_gain: 0.02
+    maximum_answer_f1_regression: 0.01
+    maximum_search_call_increase: 0.0
+  EXP-032:
+    minimum_router_vs_menu_gain: 0.05
+    maximum_router_vs_free_regression: 0.01
+    maximum_free_usage_rate: 0.85
+  EXP-033:
+    minimum_backends: 3
+    minimum_positive_backends: 3
+    minimum_average_coverage_gain: 0.02
+    minimum_worst_backend_gain: 0.01
+  EXP-034:
+    closure_threshold: 0.10
+    reopening_threshold: 0.20
