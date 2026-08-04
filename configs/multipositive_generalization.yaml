@@ -1,0 +1,131 @@
+schema: 1
+suite_id: MULTIPOSITIVE-GENERALIZATION
+work_dir: ./work/multipositive_generalization
+source_prepared_root: ./work/query_attribution/prepared
+
+views:
+  directions:
+    - [bm25, e5]
+    - [e5, bm25]
+  eval_scope: cross
+
+selection:
+  targets_per_state: 2
+  styles: [lexical, semantic, entity]
+  maximum_random_query_jaccard: 0.95
+  maximum_relative_target_token_imbalance: 0.25
+  minimum_eval_strict_class_size: 2
+
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  max_length: 768
+  trust_remote_code: false
+  minimum_parameters: 6000000000
+  maximum_parameters: 9000000000
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+  learning_rate: 2.0e-5
+  weight_decay: 0.0
+  batch_size: 1
+  gradient_accumulation: 16
+  warmup_ratio: 0.05
+  max_grad_norm: 1.0
+  eval_batch_size: 1
+  gradient_checkpointing: true
+
+objectives:
+  uniform:
+    kind: weighted_mean
+  consistency:
+    kind: mean_plus_variance
+    coefficient: 0.50
+  hardmax:
+    kind: softmax
+    temperature: 0.20
+  setmass:
+    kind: set_mass
+    temperature: 1.00
+  setmass_consistency:
+    kind: set_mass_plus_variance
+    temperature: 1.00
+    coefficient: 0.50
+
+profiles:
+  smoke:
+    seeds: [13]
+    train_states_per_direction: 4
+    eval_states_per_backend: 4
+    steps: 4
+    bootstrap_samples: 200
+  pilot:
+    seeds: [13, 42, 87]
+    train_states_per_direction: 24
+    eval_states_per_backend: 32
+    steps: 24
+    bootstrap_samples: 5000
+  full:
+    seeds: [13, 42, 87, 101, 131]
+    train_states_per_direction: 48
+    eval_states_per_backend: 64
+    steps: 48
+    bootstrap_samples: 10000
+
+hypothesis_gates:
+  style_heldout_consistency:
+    minimum_gain: 0.02
+  consistency_beyond_equivalence:
+    minimum_direct_minus_strict_margin: -0.01
+  generic_consistency_dispersion:
+    minimum_reduction: 0.005
+  setmass_mean_gain:
+    minimum_gain: 0.01
+  setmass_consistency_worst_final:
+    minimum_improvement: 0.005
+  independent_generator_gain:
+    minimum_gain: 0.02
+
+external_generator:
+  enabled: false
+  input_jsonl: ""
+  api_base: http://127.0.0.1:9100/v1
+  api_key: EMPTY
+  model: independent-query-generator
+  temperature: 0.7
+  max_tokens: 96
+
+interactive:
+  variants:
+    - factual-replicated-uniform
+    - all-direct-uniform
+    - all-direct-consistency
+    - strict-consistency
+    - all-direct-setmass
+    - all-direct-setmass-consistency
+  sample_budgets: [1, 4]
+  bm25_url: http://127.0.0.1:8101/retrieve
+  e5_url: http://127.0.0.1:8102/retrieve
+  temperature: 0.7
+  max_new_tokens: 64
+  eval_states_per_direction:
+    smoke: 4
+    pilot: 32
+    full: 64
+  bootstrap_samples:
+    smoke: 200
+    pilot: 5000
+    full: 10000
+  gate:
+    minimum_consistency_evidence_gain: 0.02
+    minimum_consistency_union_gain: 0.02
+    minimum_unique_behavior_gain: 0.10
+    maximum_invalid_rate_increase: 0.01
+
+scheduler:
+  gpus: [0, 1, 2, 3, 4, 5, 6, 7]
+  workers: 8
+  interactive_gpus: [0, 1, 2, 3, 4, 5, 6]
+  interactive_workers: 7

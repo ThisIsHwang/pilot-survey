@@ -9,15 +9,12 @@ class ExperimentRegistryTest(unittest.TestCase):
     def test_registry_contains_numbered_followup_experiments(self) -> None:
         registry = load_registry()
         identifiers = [entry["id"] for entry in registry["experiments"]]
-        self.assertEqual(
-            identifiers,
-            [
-                "EXP-001", "EXP-002", "EXP-003", "EXP-004", "EXP-005", "EXP-006",
-                "EXP-009", "EXP-010", "EXP-011", "EXP-012", "EXP-013", "EXP-015",
-                "EXP-016", "EXP-017", "EXP-018", "EXP-019", "EXP-020", "EXP-021",
-                "EXP-022", "EXP-023",
-            ],
-        )
+        self.assertEqual(identifiers, [
+            "EXP-001", "EXP-002", "EXP-003", "EXP-004", "EXP-005", "EXP-006",
+            "EXP-009", "EXP-010", "EXP-011", "EXP-012", "EXP-013", "EXP-015",
+            "EXP-016", "EXP-017", "EXP-018", "EXP-019", "EXP-020", "EXP-021",
+            "EXP-022", "EXP-023", "EXP-024", "EXP-025", "EXP-026", "EXP-027",
+        ])
 
     def test_run_id_is_stable_and_seed_is_zero_padded(self) -> None:
         self.assertEqual(
@@ -28,22 +25,13 @@ class ExperimentRegistryTest(unittest.TestCase):
     def test_parent_chain_is_registered(self) -> None:
         registry = load_registry()
         expected = {
-            "EXP-003": "EXP-002",
-            "EXP-006": "EXP-003",
-            "EXP-009": "EXP-002",
-            "EXP-010": "EXP-009",
-            "EXP-011": "EXP-009",
-            "EXP-012": "EXP-010",
-            "EXP-013": "EXP-012",
-            "EXP-015": "EXP-013",
-            "EXP-016": "EXP-015",
-            "EXP-017": "EXP-016",
-            "EXP-018": "EXP-016",
-            "EXP-019": "EXP-016",
-            "EXP-020": "EXP-019",
-            "EXP-021": "EXP-020",
-            "EXP-022": "EXP-020",
-            "EXP-023": "EXP-020",
+            "EXP-003": "EXP-002", "EXP-006": "EXP-003", "EXP-009": "EXP-002",
+            "EXP-010": "EXP-009", "EXP-011": "EXP-009", "EXP-012": "EXP-010",
+            "EXP-013": "EXP-012", "EXP-015": "EXP-013", "EXP-016": "EXP-015",
+            "EXP-017": "EXP-016", "EXP-018": "EXP-016", "EXP-019": "EXP-016",
+            "EXP-020": "EXP-019", "EXP-021": "EXP-020", "EXP-022": "EXP-020",
+            "EXP-023": "EXP-020", "EXP-024": "EXP-016", "EXP-025": "EXP-024",
+            "EXP-026": "EXP-025", "EXP-027": "EXP-025",
         }
         for experiment_id, parent in expected.items():
             self.assertEqual(experiment_by_id(registry, experiment_id)["parent"], parent)
