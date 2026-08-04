@@ -34,3 +34,5 @@ jobs:
           git diff --cached --check
           git commit -m 'Add natural-alias and behavior-quotient experiments'
           git push origin HEAD:${GITHUB_REF_NAME}
+
+# This second push intentionally triggers materialization after the workflow exists.
