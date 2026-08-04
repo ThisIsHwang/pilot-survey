@@ -15,7 +15,8 @@ class ExperimentRegistryTest(unittest.TestCase):
                 "EXP-001", "EXP-002", "EXP-003", "EXP-004", "EXP-005", "EXP-006",
                 "EXP-009", "EXP-010", "EXP-011", "EXP-012", "EXP-013", "EXP-015",
                 "EXP-016", "EXP-017", "EXP-018", "EXP-019", "EXP-020", "EXP-021",
-                "EXP-022", "EXP-023",
+                "EXP-022", "EXP-023", "EXP-024", "EXP-025", "EXP-026", "EXP-027",
+                "EXP-028",
             ],
         )
 
@@ -44,6 +45,11 @@ class ExperimentRegistryTest(unittest.TestCase):
             "EXP-021": "EXP-020",
             "EXP-022": "EXP-020",
             "EXP-023": "EXP-020",
+            "EXP-024": "EXP-020",
+            "EXP-025": "EXP-024",
+            "EXP-026": "EXP-023",
+            "EXP-027": "EXP-024",
+            "EXP-028": "EXP-027",
         }
         for experiment_id, parent in expected.items():
             self.assertEqual(experiment_by_id(registry, experiment_id)["parent"], parent)
