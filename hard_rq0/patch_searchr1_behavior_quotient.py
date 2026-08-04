@@ -137,6 +137,9 @@ TRAINER_CALL_REPLACEMENT = TRAINER_CALL_ANCHOR + """                        bq_m
                                     'seed': int(
                                         os.environ.get('STACKPILOT_BQ_RUN_SEED', '0')
                                     ),
+                                    'rollout_mode': os.environ.get(
+                                        'STACKPILOT_RF_ROLLOUT_MODE', 'iid'
+                                    ),
                                 },
                             )
                         actor_batch = select_behavior_rows(batch)
@@ -229,6 +232,9 @@ def patch_trainer(root: Path) -> None:
 def patch(search_r1_root: Path) -> None:
     patch_generation(search_r1_root)
     patch_trainer(search_r1_root)
+    from hard_rq0.patch_searchr1_response_feedback import patch as patch_feedback
+
+    patch_feedback(search_r1_root)
 
 
 if __name__ == "__main__":
