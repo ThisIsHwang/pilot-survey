@@ -1,0 +1,157 @@
+schema: 1
+suite_id: CREDIT-ROUTING
+work_dir: ./work/credit_routing
+
+source:
+  state_globs:
+    - ./work/causal_query_audit/results/full/states/*/*.json
+    - ./work/causal_query_audit/results/pilot/states/*/*.json
+  label_globs:
+    - ./work/credit_routing/labels/*/budgeted_document_utility.jsonl
+  episode_globs:
+    - ./work/experiments/EXP-048/results/**/*.jsonl
+
+labeling:
+  design: exact-matched-swaps
+  upstream_topk: 8
+  observation_k: 3
+  maximum_document_chars: 5000
+  weights:
+    support: 1.0
+    answer_f1: 0.5
+    search_efficiency: 0.05
+    invalid_action: 0.10
+
+estimator:
+  train_fraction: 0.60
+  validation_fraction: 0.20
+  split_salt: credit-routing-v1
+  ridge_l2: 10.0
+  positive_threshold: 0.000001
+
+endpoint:
+  split: test
+  data_file: ./work/hard_rq0/data/final_eval.jsonl
+
+routing:
+  action_aggregation: mean-topk
+  action_aggregation_k: 3
+  trajectory_aggregation: mean
+  action_coefficient: 0.25
+  action_clip: 2.0
+  proxy_ports:
+    bm25: 8101
+    e5: 8102
+  upstream_ports:
+    bm25: 8201
+    e5: 8202
+  variants:
+    outcome-only:
+      action_route: off
+      observation_route: rank
+    action-route:
+      action_route: document-utility
+      observation_route: rank
+    observation-route:
+      action_route: off
+      observation_route: utility
+    both:
+      action_route: document-utility
+      observation_route: utility
+
+training:
+  experiment_id: EXP-047
+  n_agent: 8
+  update_per_prompt: 0
+  topk: 3
+  max_turns: 4
+  max_prompt_length: 4096
+  max_response_length: 500
+  max_start_length: 2048
+  max_obs_length: 500
+  learning_rate: 1.0e-6
+  rollout_gpu_memory: 0.55
+  variants:
+    outcome-only:
+      advantage_mode: surface
+      selection_mode: all
+      update_per_prompt: 0
+    action-route:
+      advantage_mode: surface
+      selection_mode: all
+      update_per_prompt: 0
+    observation-route:
+      advantage_mode: surface
+      selection_mode: all
+      update_per_prompt: 0
+    both:
+      advantage_mode: surface
+      selection_mode: all
+      update_per_prompt: 0
+
+profiles:
+  smoke:
+    label_states: 12
+    label_workers: 2
+    estimator_seeds: [13, 42]
+    bootstrap_samples: 200
+    seeds: [13]
+    total_updates: 10
+    train_batch: 14
+    val_batch: 14
+    mini_batch: 14
+    micro_batch: 7
+    save_freq: 10
+    test_freq: 10
+    eval_limit: 20
+  pilot:
+    label_states: 300
+    label_workers: 8
+    estimator_seeds: [13, 42, 87]
+    bootstrap_samples: 5000
+    seeds: [13, 42, 87]
+    total_updates: 100
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 100
+    test_freq: 50
+    eval_limit: 500
+  full:
+    label_states: 1200
+    label_workers: 16
+    estimator_seeds: [13, 42, 87, 101, 202]
+    bootstrap_samples: 10000
+    seeds: [13, 42, 87, 101, 202]
+    total_updates: 300
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 100
+    test_freq: 100
+    eval_limit: 1000
+
+gates:
+  EXP-045:
+    minimum_states: 200
+    minimum_positive_document_rate: 0.05
+    minimum_state_utility_range: 0.03
+    minimum_informative_state_rate: 0.10
+  EXP-046:
+    minimum_mean_utility_gain: 0.005
+    minimum_positive_auc: 0.65
+  EXP-047:
+    minimum_observation_main_support_gain: 0.01
+    maximum_action_main_support_gain: 0.005
+    maximum_answer_f1_regression: 0.01
+  EXP-048:
+    minimum_observation_over_action_support_gain: 0.02
+    minimum_observation_over_outcome_support_gain: 0.01
+    maximum_action_over_outcome_support_gain: 0.005
+    maximum_answer_f1_regression: 0.01
+    maximum_search_call_increase: 0.0
+    maximum_protocol_failure_increase: 0.0
+  EXP-049:
+    minimum_nonconservation_evidence: 0.20

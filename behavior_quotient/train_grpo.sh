@@ -102,7 +102,9 @@ if (( BQ_UPDATE_PER_PROMPT > N_AGENT )); then
 fi
 
 export E5_GPU
-bash hard_rq0/launch_retrievers.sh
+if [[ ${SKIP_RETRIEVER_LAUNCH:-0} != 1 ]]; then
+  bash hard_rq0/launch_retrievers.sh
+fi
 bash experiments/reset_searchr1_experiment_files.sh
 "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_seed.py --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_worker_cuda.py --search-r1-root "$SEARCH_R1"
@@ -111,6 +113,9 @@ bash experiments/reset_searchr1_experiment_files.sh
 "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_observation_geometry.py --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_reward_protocol.py --search-r1-root "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_behavior_quotient.py --search-r1-root "$SEARCH_R1"
+if [[ ${STACKPILOT_CR_PATCH:-0} == 1 ]]; then
+  "$SEARCH_R1_PYTHON" hard_rq0/patch_searchr1_credit_routing.py --search-r1-root "$SEARCH_R1"
+fi
 
 TRAIN_DATA=$ROOT/work/hard_rq0/searchr1/train.parquet
 VAL_DATA=$ROOT/work/hard_rq0/searchr1/dev.parquet
@@ -255,6 +260,7 @@ export STACKPILOT_BQ_SIGNATURE_MODE=trajectory-ranked
 export STACKPILOT_BQ_SELECTION_SEED="$SEED"
 export STACKPILOT_BQ_TELEMETRY_PATH="$TELEMETRY_PATH"
 export SEARCH_R1_REWARD_MODE=answer
+RETRIEVER_URL=${RETRIEVER_URL_OVERRIDE:-http://127.0.0.1:${RETRIEVER_PORT}/retrieve}
 
 cd "$SEARCH_R1"
 "$SEARCH_R1_PYTHON" -m verl.trainer.main_ppo \
@@ -298,7 +304,7 @@ cd "$SEARCH_R1"
   trainer.total_training_steps="$TOTAL_UPDATES" \
   trainer.default_local_dir="$CHECKPOINT_DIR" \
   max_turns="$MAX_TURNS" \
-  retriever.url="http://127.0.0.1:${RETRIEVER_PORT}/retrieve" \
+  retriever.url="$RETRIEVER_URL" \
   retriever.topk="$TOPK" \
   2>&1 | tee "$LOG_FILE"
 

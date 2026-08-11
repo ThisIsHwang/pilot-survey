@@ -250,6 +250,46 @@
       "question": "How often is a causally useful document observation produced by a query and behavior class with non-positive counterfactual utility on the same state?",
       "entrypoint": "experiments/EXP-034/run.sh",
       "parent": "EXP-021"
+    },
+    {
+      "id": "EXP-045",
+      "slug": "budgeted-document-utility",
+      "status": "planned",
+      "question": "Under a fixed top-eight/keep-three budget, which documents have positive downstream utility under an exact matched-swap context design?",
+      "entrypoint": "experiments/EXP-045/run.sh",
+      "parent": "EXP-034"
+    },
+    {
+      "id": "EXP-046",
+      "slug": "shared-document-utility-estimator",
+      "status": "planned",
+      "question": "Can one held-out query-only estimator predict the document utility signal shared by action routing and observation routing?",
+      "entrypoint": "experiments/EXP-046/run.sh",
+      "parent": "EXP-045"
+    },
+    {
+      "id": "EXP-047",
+      "slug": "ctu-credit-routing-factorial",
+      "status": "planned",
+      "question": "Does routing the same predicted document utility to the producing trajectory reward or to document selection produce different Search-R1 learning outcomes in a matched 2x2 factorial?",
+      "entrypoint": "experiments/EXP-047/run.sh",
+      "parent": "EXP-046"
+    },
+    {
+      "id": "EXP-048",
+      "slug": "credit-routing-endpoint",
+      "status": "planned",
+      "question": "Does observation routing outperform action routing on seen, cross-retriever, and hybrid QA endpoints under identical search and context budgets?",
+      "entrypoint": "experiments/EXP-048/run.sh",
+      "parent": "EXP-047"
+    },
+    {
+      "id": "EXP-049",
+      "slug": "credit-routing-paper-gate",
+      "status": "planned",
+      "question": "Do document-action mismatch, utility predictability, and end-to-end routing effects jointly support a credit-routing method paper?",
+      "entrypoint": "experiments/EXP-049/run.sh",
+      "parent": "EXP-048"
     }
   ]
 }
