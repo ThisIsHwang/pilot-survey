@@ -1,0 +1,9 @@
+source_backend,method,seed,checkpoint_role,model_ref
+bm25,outcome-only,13,validation-best,/absolute/path/to/bm25-outcome-only-seed13
+bm25,action-route,13,validation-best,/absolute/path/to/bm25-action-route-seed13
+bm25,observation-route,13,validation-best,/absolute/path/to/bm25-observation-route-seed13
+bm25,both,13,validation-best,/absolute/path/to/bm25-both-seed13
+e5,outcome-only,13,validation-best,/absolute/path/to/e5-outcome-only-seed13
+e5,action-route,13,validation-best,/absolute/path/to/e5-action-route-seed13
+e5,observation-route,13,validation-best,/absolute/path/to/e5-observation-route-seed13
+e5,both,13,validation-best,/absolute/path/to/e5-both-seed13
