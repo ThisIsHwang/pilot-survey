@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "experiments": [
+    {
+      "id": "EXP-050",
+      "slug": "query-document-counterfactual-labels",
+      "status": "planned",
+      "question": "On the same search states, how do best-replacement query indispensability and document-omission utility differ?",
+      "entrypoint": "experiments/EXP-050/run.sh",
+      "parent": "EXP-034"
+    },
+    {
+      "id": "EXP-051",
+      "slug": "retrieval-derived-query-credit-validity",
+      "status": "planned",
+      "question": "Does document-derived query credit over-praise replaceable actions, especially in large retrieval-equivalence classes?",
+      "entrypoint": "experiments/EXP-051/run.sh",
+      "parent": "EXP-050"
+    },
+    {
+      "id": "EXP-052",
+      "slug": "query-credit-gradient-audit",
+      "status": "planned",
+      "question": "Do document-derived and query-intervention search-span gradients disagree and respond differently to alias multiplicity?",
+      "entrypoint": "experiments/EXP-052/run.sh",
+      "parent": "EXP-051"
+    },
+    {
+      "id": "EXP-053",
+      "slug": "matched-query-credit-micro-update",
+      "status": "planned",
+      "question": "Under the same examples and model initialization, which credit signal teaches the model to prefer higher-utility held-out queries?",
+      "entrypoint": "experiments/EXP-053/run.sh",
+      "parent": "EXP-052"
+    },
+    {
+      "id": "EXP-054",
+      "slug": "document-utility-estimator",
+      "status": "planned",
+      "question": "Can post-retrieval features predict document-omission utility on question-heldout states without future information?",
+      "entrypoint": "experiments/EXP-054/run.sh",
+      "parent": "EXP-050"
+    },
+    {
+      "id": "EXP-055",
+      "slug": "query-credit-searchr1-factorial",
+      "status": "planned",
+      "question": "Does raw or alias-normalized document-derived search-span credit improve real Search-R1 training over outcome-only and shuffled controls?",
+      "entrypoint": "experiments/EXP-055/run.sh",
+      "parent": "EXP-054"
+    },
+    {
+      "id": "EXP-056",
+      "slug": "query-credit-heldout-endpoint",
+      "status": "planned",
+      "question": "Do query-credit policies improve seen and cross-retriever evidence acquisition without answer or search-cost regression?",
+      "entrypoint": "experiments/EXP-056/run.sh",
+      "parent": "EXP-055"
+    }
+  ]
+}

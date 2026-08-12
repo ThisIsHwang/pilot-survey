@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -15,9 +16,22 @@ def default_registry_path() -> Path:
     return Path(__file__).resolve().parents[1] / "experiments" / "registry.json"
 
 
+def _overlay_paths() -> list[Path]:
+    raw = os.environ.get("STACKPILOT_EXPERIMENT_REGISTRY_OVERLAY", "").strip()
+    if not raw:
+        return []
+    return [Path(value).resolve() for value in raw.split(os.pathsep) if value]
+
+
 def load_registry(path: str | Path | None = None) -> dict[str, Any]:
     registry_path = Path(path) if path is not None else default_registry_path()
     payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    if path is None:
+        for overlay_path in _overlay_paths():
+            overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+            if overlay.get("schema") != 1 or not isinstance(overlay.get("experiments"), list):
+                raise ValueError(f"Invalid experiment registry overlay: {overlay_path}")
+            payload.setdefault("experiments", []).extend(overlay["experiments"])
     validate_registry(payload)
     return payload
 
@@ -120,7 +134,9 @@ def main() -> None:
     run_parser.add_argument("--variant")
     args = parser.parse_args()
 
-    payload = load_registry(args.registry)
+    # Explicit --registry intentionally bypasses overlays; normal callers use
+    # load_registry() without a path and can opt into a stacked experiment suite.
+    payload = load_registry(args.registry if args.registry != str(default_registry_path()) else None)
     if args.command == "validate":
         print(f"valid: {len(payload['experiments'])} experiments")
     elif args.command == "list":
