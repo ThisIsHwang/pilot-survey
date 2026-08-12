@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 MARKER = "# STACKPILOT_RESPONSE_FEEDBACK_ROLLOUT_V1"
@@ -99,22 +100,26 @@ def patch(search_r1_root: Path) -> None:
     if MARKER in text:
         validate(text, target)
         print(f"Response-feedback rollout patch already present: {target}")
-        return
-    if "# STACKPILOT_BEHAVIOR_QUOTIENT_TRAINER_V1" not in text:
-        raise RuntimeError(
-            "Apply patch_searchr1_behavior_quotient.py before response-feedback"
+    else:
+        if "# STACKPILOT_BEHAVIOR_QUOTIENT_TRAINER_V1" not in text:
+            raise RuntimeError(
+                "Apply patch_searchr1_behavior_quotient.py before response-feedback"
+            )
+        text = replace_once(text, IMPORT_ANCHOR, IMPORT_REPLACEMENT, "runtime import")
+        text = replace_once(text, TRAIN_CALL_ANCHOR, TRAIN_CALL_REPLACEMENT, "training rollout")
+        text = replace_once(
+            text,
+            VALIDATION_CALL_ANCHOR,
+            VALIDATION_CALL_REPLACEMENT,
+            "validation rollout",
         )
-    text = replace_once(text, IMPORT_ANCHOR, IMPORT_REPLACEMENT, "runtime import")
-    text = replace_once(text, TRAIN_CALL_ANCHOR, TRAIN_CALL_REPLACEMENT, "training rollout")
-    text = replace_once(
-        text,
-        VALIDATION_CALL_ANCHOR,
-        VALIDATION_CALL_REPLACEMENT,
-        "validation rollout",
-    )
-    validate(text, target)
-    target.write_text(text, encoding="utf-8")
-    print(f"Applied response-feedback rollout patch: {target}")
+        validate(text, target)
+        target.write_text(text, encoding="utf-8")
+        print(f"Applied response-feedback rollout patch: {target}")
+    if os.environ.get("STACKPILOT_QUERY_CREDIT_PATCH", "0") == "1":
+        from hard_rq0.patch_searchr1_query_credit import patch as patch_query_credit
+
+        patch_query_credit(search_r1_root)
 
 
 if __name__ == "__main__":
