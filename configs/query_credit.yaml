@@ -1,0 +1,151 @@
+schema: 1
+work_dir: work/query_credit
+source:
+  state_globs:
+    - work/causal_query_audit/results/full/states/*/*.json
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  trust_remote_code: true
+labeling:
+  maximum_candidates_per_state: 8
+  minimum_candidates_per_state: 3
+  maximum_documents_per_query: 3
+  replacement_epsilon: 0.02
+  continuation_seeds: [13, 42, 87]
+  reward_weights:
+    support: 1.0
+    answer_f1: 0.5
+    search_cost: 0.05
+    invalid_action: 0.1
+  document_credit_aggregations:
+    - positive-sum
+    - signed-sum
+    - max
+    - mean
+    - top2-sum
+estimator:
+  ridge_alphas: [0.1, 1.0, 10.0]
+  positive_threshold: 0.01
+  split_salt: query-credit-estimator-v1
+gradient:
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  maximum_length: 2048
+  batch_size: 4
+  signals:
+    - query-oracle
+    - doc-positive-sum
+    - doc-alias-normalized
+    - shuffled-doc
+    - outcome
+  alias_multiplicities: [1, 2, 4, 8, 16]
+micro_update:
+  methods:
+    - outcome
+    - query-oracle
+    - doc-positive-sum
+    - doc-alias-normalized
+    - shuffled-doc
+  learning_rate: 0.0001
+  epochs: 1
+  maximum_length: 2048
+  batch_size: 4
+  split_salt: query-credit-micro-update-v1
+training:
+  topk: 3
+  max_turns: 4
+  n_agent: 8
+  max_prompt_length: 4096
+  max_response_length: 1024
+  max_start_length: 2048
+  max_obs_length: 500
+  learning_rate: 0.000001
+  rollout_gpu_memory: 0.55
+  action_bonus_weight: 0.25
+  document_credit_aggregation: positive-sum
+  methods:
+    outcome:
+      query_credit_mode: outcome
+    doc-to-action:
+      query_credit_mode: doc-to-action
+    alias-normalized:
+      query_credit_mode: alias-normalized
+    shuffled-doc:
+      query_credit_mode: shuffled-doc
+profiles:
+  smoke:
+    states: 8
+    maximum_candidates_per_state: 4
+    continuation_seeds: [13]
+    workers: 2
+    bootstrap_samples: 200
+    gradient_states: 4
+    micro_train_states: 4
+    micro_test_states: 4
+    total_updates: 10
+    train_batch: 14
+    val_batch: 14
+    mini_batch: 14
+    micro_batch: 7
+    save_freq: 5
+    test_freq: 5
+    seeds: [13]
+    eval_limit: 20
+  pilot:
+    states: 300
+    maximum_candidates_per_state: 8
+    continuation_seeds: [13, 42]
+    workers: 24
+    bootstrap_samples: 5000
+    gradient_states: 64
+    micro_train_states: 160
+    micro_test_states: 100
+    total_updates: 100
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 25
+    test_freq: 25
+    seeds: [13, 42, 87]
+    eval_limit: 500
+  full:
+    states: 1200
+    maximum_candidates_per_state: 8
+    continuation_seeds: [13, 42, 87]
+    workers: 64
+    bootstrap_samples: 10000
+    gradient_states: 160
+    micro_train_states: 700
+    micro_test_states: 400
+    total_updates: 300
+    train_batch: 112
+    val_batch: 112
+    mini_batch: 112
+    micro_batch: 7
+    save_freq: 50
+    test_freq: 50
+    seeds: [13, 42, 87, 101, 202]
+    eval_limit: 1000
+gates:
+  EXP-051:
+    maximum_doc_query_spearman: 0.5
+    minimum_false_positive_rate: 0.25
+    minimum_alias_high_excess: 0.1
+  EXP-052:
+    maximum_doc_oracle_gradient_cosine: 0.8
+    minimum_alias_gradient_drift: 0.1
+    minimum_normalization_recovery: 0.05
+  EXP-053:
+    minimum_query_oracle_over_doc_reward: 0.01
+    minimum_query_oracle_over_doc_iqu: 0.01
+  EXP-054:
+    minimum_test_spearman: 0.2
+    minimum_positive_auc: 0.65
+  EXP-056:
+    minimum_alias_normalized_support_gain: 0.01
+    maximum_answer_f1_regression: 0.01
+    maximum_search_increase: 0.0
