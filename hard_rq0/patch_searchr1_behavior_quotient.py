@@ -5,13 +5,22 @@ from pathlib import Path
 
 GENERATION_MARKER = "# STACKPILOT_BEHAVIOR_QUOTIENT_GENERATION_V1"
 TRAINER_MARKER = "# STACKPILOT_BEHAVIOR_QUOTIENT_TRAINER_V1"
+OBSERVATION_MARKER = "# STACKPILOT_OBSERVATION_GEOMETRY_V1"
 
 GENERATION_STATE_ANCHOR = """        self._stackpilot_retrieved_titles = [
             [] for _ in range(protocol_batch_size)
         ]
 
 """
-GENERATION_STATE_REPLACEMENT = GENERATION_STATE_ANCHOR + """        # STACKPILOT_BEHAVIOR_QUOTIENT_GENERATION_V1
+GENERATION_OBSERVATION_STATE_ANCHOR = """        self._stackpilot_retrieved_titles = [
+            [] for _ in range(protocol_batch_size)
+        ]
+        self._stackpilot_observed_titles = [
+            [] for _ in range(protocol_batch_size)
+        ]
+
+"""
+GENERATION_BEHAVIOR_STATE = """        # STACKPILOT_BEHAVIOR_QUOTIENT_GENERATION_V1
         self._stackpilot_search_queries = [
             [] for _ in range(protocol_batch_size)
         ]
@@ -20,6 +29,10 @@ GENERATION_STATE_REPLACEMENT = GENERATION_STATE_ANCHOR + """        # STACKPILOT
         ]
 
 """
+GENERATION_STATE_REPLACEMENT = GENERATION_STATE_ANCHOR + GENERATION_BEHAVIOR_STATE
+GENERATION_OBSERVATION_STATE_REPLACEMENT = (
+    GENERATION_OBSERVATION_STATE_ANCHOR + GENERATION_BEHAVIOR_STATE
+)
 
 GENERATION_SEARCH_ANCHOR = """                    self._stackpilot_executed_search_counts[i] += 1
                     self._stackpilot_retrieved_titles[i].extend(
@@ -192,7 +205,20 @@ def patch_generation(root: Path) -> None:
         raise RuntimeError(
             "Apply patch_searchr1_action_protocol.py before behavior-quotient telemetry"
         )
-    text = replace_once(text, GENERATION_STATE_ANCHOR, GENERATION_STATE_REPLACEMENT, "protocol state")
+    if OBSERVATION_MARKER in text:
+        text = replace_once(
+            text,
+            GENERATION_OBSERVATION_STATE_ANCHOR,
+            GENERATION_OBSERVATION_STATE_REPLACEMENT,
+            "observation-aware protocol state",
+        )
+    else:
+        text = replace_once(
+            text,
+            GENERATION_STATE_ANCHOR,
+            GENERATION_STATE_REPLACEMENT,
+            "protocol state",
+        )
     text = replace_once(text, GENERATION_SEARCH_ANCHOR, GENERATION_SEARCH_REPLACEMENT, "search metadata")
     text = replace_once(text, GENERATION_OUTPUT_ANCHOR, GENERATION_OUTPUT_REPLACEMENT, "protocol output")
     target.write_text(text, encoding="utf-8")
@@ -232,7 +258,7 @@ def patch_trainer(root: Path) -> None:
 def patch(search_r1_root: Path) -> None:
     patch_generation(search_r1_root)
     patch_trainer(search_r1_root)
-    from hard_rq0.patch_searchr1_response_feedback import patch as patch_feedback
+    from hard_rq0.patch_searchr1_response_feedback import patch as patch_fedback
 
     patch_feedback(search_r1_root)
 
