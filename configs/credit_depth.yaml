@@ -1,0 +1,118 @@
+schema: 1
+work_dir: work/credit_depth
+
+benchmark:
+  split_salt: credit-depth-family-v1
+  matched_display_documents: true
+  depth_varies_hidden_index_access_only: true
+  distractors_per_family: 6
+
+retrieval:
+  bm25_port: 8201
+  e5_port: 8202
+  e5_model: intfloat/e5-base-v2
+  e5_revision: f52bf8ec8c7124536f0efb74aca902b2995e5bcd
+  topk: 3
+
+agent:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  served_model_name: Qwen/Qwen2.5-7B-Instruct
+  api_base: http://127.0.0.1:9000/v1
+  api_key: EMPTY
+  maximum_turns: 4
+  maximum_tokens: 512
+  temperature: 0.7
+
+label_audit:
+  k_values: [2, 4, 6, 8]
+  sources: [immediate, verifiable, rollout]
+
+training:
+  topk: 3
+  max_turns: 4
+  n_agent: 8
+  max_prompt_length: 4096
+  max_response_length: 1024
+  max_start_length: 2048
+  max_obs_length: 500
+  learning_rate: 0.000001
+  rollout_gpu_memory: 0.55
+  process_bonus_weight: 0.25
+  methods:
+    outcome:
+      credit_mode: outcome
+    immediate:
+      credit_mode: immediate
+    verifiable:
+      credit_mode: verifiable
+    necessity-gated:
+      credit_mode: necessity-gated
+    reliability-gated:
+      credit_mode: reliability-gated
+    creditability-gated:
+      credit_mode: creditability-gated
+
+profiles:
+  smoke:
+    families: 12
+    audit_states: 12
+    label_repeats: [13, 42, 87, 101]
+    bootstrap_samples: 200
+    total_updates: 10
+    train_batch: 14
+    val_batch: 14
+    mini_batch: 14
+    micro_batch: 7
+    save_freq: 5
+    test_freq: 5
+    seeds: [13]
+    eval_limit: 12
+  pilot:
+    families: 120
+    audit_states: 180
+    label_repeats: [13, 42, 87, 101, 202, 303]
+    bootstrap_samples: 5000
+    total_updates: 100
+    train_batch: 56
+    val_batch: 56
+    mini_batch: 56
+    micro_batch: 7
+    save_freq: 25
+    test_freq: 25
+    seeds: [13, 42, 87]
+    eval_limit: 120
+  full:
+    families: 600
+    audit_states: 1200
+    label_repeats: [13, 42, 87, 101, 202, 303, 404, 505]
+    bootstrap_samples: 10000
+    total_updates: 300
+    train_batch: 112
+    val_batch: 112
+    mini_batch: 112
+    micro_batch: 7
+    save_freq: 50
+    test_freq: 50
+    seeds: [13, 42, 87, 101, 202]
+    eval_limit: 360
+
+gates:
+  benchmark:
+    depth0_max_delayed_benefit: 0.05
+    depth0_min_immediate_top1: 0.90
+    depth1_min_delayed_benefit: 0.20
+    depth1_max_immediate_top1: 0.75
+    depth2_min_delayed_benefit: 0.35
+    depth2_max_immediate_top1: 0.60
+    depth1_max_direct_bypass: 0.20
+    depth2_max_direct_bypass: 0.10
+    min_oracle_solvability: 0.75
+  label:
+    minimum_rank_spearman: 0.80
+    minimum_sign_agreement: 0.85
+  interaction:
+    minimum_depth_interaction: 0.03
+    minimum_gated_interaction: 0.03
+    maximum_search_increase: 0.20
+    maximum_protocol_failure_increase: 0.005
