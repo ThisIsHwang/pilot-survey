@@ -1,0 +1,5 @@
+family,variant,offline_proxy,offline_value,online_metric,online_value,source
+trace-recovery,baseline,nll_gain,0.0,evidence_gain,0.0,replace-with-EXP012/013-values
+trace-recovery,recovery,nll_gain,1.0,evidence_gain,0.0,replace-with-EXP012/013-values
+equivalence,first-exposure,class_gain,0.0,interactive_evidence_gain,0.0,replace-with-EXP016/020-values
+equivalence,equivalence-pool,class_gain,1.0,interactive_evidence_gain,0.0,replace-with-EXP016/020-values
