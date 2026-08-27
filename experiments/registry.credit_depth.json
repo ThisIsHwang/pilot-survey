@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "experiments": [
+    {
+      "id": "EXP-061",
+      "slug": "offline-to-online-process-credit-audit",
+      "status": "planned",
+      "question": "Do offline process-credit proxies rank methods consistently with interactive search endpoints within each experiment family?",
+      "entrypoint": "experiments/EXP-061/run.sh",
+      "parent": "EXP-056"
+    },
+    {
+      "id": "EXP-062",
+      "slug": "natural-credit-necessity-census",
+      "status": "planned",
+      "question": "How often do standard multi-hop QA states actually require delayed, non-myopic search credit?",
+      "entrypoint": "experiments/EXP-062/run.sh",
+      "parent": "EXP-061"
+    },
+    {
+      "id": "EXP-063",
+      "slug": "controlled-creditdepth-benchmark",
+      "status": "planned",
+      "question": "Can matched question families vary only retrieval access depth while preserving questions, answers, and displayed documents?",
+      "entrypoint": "experiments/EXP-063/run.sh",
+      "parent": "EXP-062"
+    },
+    {
+      "id": "EXP-064",
+      "slug": "process-label-estimability-audit",
+      "status": "planned",
+      "question": "Which process labels remain rank- and sign-stable across repeated continuations at each credit depth?",
+      "entrypoint": "experiments/EXP-064/run.sh",
+      "parent": "EXP-063"
+    },
+    {
+      "id": "EXP-065",
+      "slug": "process-reward-by-creditdepth-interaction",
+      "status": "planned",
+      "question": "Do process rewards outperform outcome-only training specifically in credit-deep rather than credit-shallow regimes?",
+      "entrypoint": "experiments/EXP-065/run.sh",
+      "parent": "EXP-064"
+    },
+    {
+      "id": "EXP-066",
+      "slug": "creditability-gated-grpo",
+      "status": "planned",
+      "question": "Can necessity- and reliability-gated process rewards capture high-depth gains without harming shallow states?",
+      "entrypoint": "experiments/EXP-066/run.sh",
+      "parent": "EXP-065"
+    },
+    {
+      "id": "EXP-067",
+      "slug": "creditdepth-heldout-endpoint",
+      "status": "planned",
+      "question": "Do method-by-depth interactions and gated gains survive held-out families, seeds, and retrievers?",
+      "entrypoint": "experiments/EXP-067/run.sh",
+      "parent": "EXP-066"
+    }
+  ]
+}
