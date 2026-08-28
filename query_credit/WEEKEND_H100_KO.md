@@ -72,8 +72,9 @@
 | 단계 | 최대 시간 | 목적 |
 |---|---:|---|
 | 반사실적 수집 | 44시간 | 행동 결과와 문서 교체 결과 저장 |
+| 정보이득 기준선 | 4시간 | 실제 문서와 길이 맞춤 무작위 문서에서 정답 확률 비교 |
 | 그래디언트 감사 | 8시간 | 학습 방향이 얼마나 달라지는지 측정 |
-| 일치 LoRA 학습 | 16시간 | 같은 학습량에서 보조점수 효과 비교 |
+| 일치 LoRA 학습 | 12시간 | 같은 학습량에서 보조점수 효과 비교 |
 | 예비 시간 | 4시간 | 보고서 생성·재시작 여유 |
 
 **그래디언트(gradient)**는 모델 파라미터를 어느 방향으로 바꿀지 정하는 학습 화살표입니다.
@@ -115,6 +116,7 @@ SKIP_COLLECTION=1 PROFILE=node8 bash query_credit/run_weekend_h100.sh
 특정 단계를 생략할 수도 있습니다.
 
 ```bash
+SKIP_IG=1 PROFILE=node8 bash query_credit/run_weekend_h100.sh
 SKIP_GRADIENT=1 PROFILE=node8 bash query_credit/run_weekend_h100.sh
 SKIP_MICRO=1 PROFILE=node8 bash query_credit/run_weekend_h100.sh
 ```
@@ -165,6 +167,15 @@ work/query_credit_weekend/<profile>/reports/audit/decision.json
 - `reliability_gap`: 위 두 값의 차이. 문서와 행동이 같은 생성 잡음을 공유해 생기는 가짜 일치를 피하도록 교차평가합니다.
 - `normalized_regret`: 문서 점수로 고른 검색어가 실제 최선 검색어보다 잃는 보상 비율
 
+### 정보이득 기준선
+
+```text
+work/query_credit_weekend/<profile>/reports/ig/IG_REPORT_KO.md
+work/query_credit_weekend/<profile>/reports/ig/ig_scores.csv
+```
+
+이 점수는 실제 검색 문서를 본 조건과, 다른 질문에서 가져온 길이 맞춤 무작위 문서를 본 조건에서 정답 문자열의 로그확률 차이를 계산합니다. IG-Search의 핵심 아이디어를 후보 기반 오프라인 실험에 옮긴 기준선이며, 원 논문의 전체 온라인 GRPO 학습을 정확히 복제한 것은 아닙니다.
+
 ### 그래디언트 감사
 
 ```text
@@ -184,7 +195,8 @@ work/query_credit_weekend/<profile>/reports/micro/micro_effects.csv
 1. `outcome-only`: 최종 결과 점수만 사용
 2. `outcome-plus-swap`: 최종 결과 + 부호를 유지한 문서 교체 점수
 3. `outcome-plus-positive`: 최종 결과 + 양수 문서 점수만 합친 값
-4. `outcome-plus-shuffled`: 문서 점수의 분포는 유지하되 검색어와의 연결만 섞은 대조군
+4. `outcome-plus-ig`: 실제 문서가 길이 맞춤 무작위 문서보다 정답 확률을 얼마나 높였는지 사용
+5. `outcome-plus-shuffled`: 문서 점수의 분포는 유지하되 검색어와의 연결만 섞은 대조군
 
 모든 조건은 같은 초기화, 예시, 미니배치 순서, 업데이트 횟수를 사용합니다. 보조점수의 크기도 결과 점수와 같은 RMS로 맞춥니다. **RMS**는 점수의 전형적인 크기를 나타내는 값입니다.
 
