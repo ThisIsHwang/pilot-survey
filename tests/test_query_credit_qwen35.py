@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import yaml
 
@@ -14,6 +15,7 @@ from stackpilot.query_credit_qwen35_runtime import (
     assert_non_thinking_message,
     build_request_options,
 )
+from stackpilot.query_credit_weekend_collect_support import _candidate_bank
 
 
 class Qwen35NoThinkRuntimeTest(unittest.TestCase):
@@ -89,7 +91,46 @@ class Qwen35WeekendContractTest(unittest.TestCase):
         self.assertEqual(sum(cfg["budget"].values()), 120)
         targets = set(cfg["gradient"]["target_modules"])
         self.assertTrue({"q_proj", "in_proj_qkv", "in_proj_a", "out_proj"} <= targets)
-        self.assertEqual(len(cfg["profiles"]["node8"]["continuation_seeds"]), 6)
+        node8 = cfg["profiles"]["node8"]
+        self.assertEqual(len(node8["continuation_seeds"]), 6)
+        self.assertIs(node8["include_source_factual"], False)
+        self.assertIs(node8["allow_controlled_fallback"], False)
+        self.assertEqual(
+            cfg["gates"]["audit"]["minimum_direct_policy_candidate_fraction"],
+            1.0,
+        )
+
+    def test_candidate_bank_excludes_legacy_factual_query(self) -> None:
+        state = {"state_id": "s", "factual_query": "legacy qwen2.5 query"}
+        prefix = {"messages": [{"role": "user", "content": "Question: x"}]}
+        profile = {
+            "candidates_per_state": 2,
+            "minimum_candidates_per_state": 2,
+            "include_source_factual": False,
+            "allow_controlled_fallback": False,
+            "sibling_generation": {
+                "attempts": 2,
+                "temperature": 0.7,
+                "max_tokens": 96,
+            },
+        }
+        with patch(
+            "stackpilot.query_credit_weekend_collect_support._complete",
+            side_effect=[
+                "<search>qwen35 direct query one</search>",
+                "<search>qwen35 direct query two</search>",
+            ],
+        ):
+            rows = _candidate_bank(
+                {"candidates": []},
+                state=state,
+                prefix=prefix,
+                causal_cfg={},
+                profile=profile,
+            )
+        self.assertEqual(len(rows), 2)
+        self.assertNotIn(state["factual_query"], [row["query"] for row in rows])
+        self.assertEqual({row["origin"] for row in rows}, {"direct-policy-sibling"})
 
     def test_vllm_launcher_is_text_only_nonthinking_and_unbatched(self) -> None:
         text = (self.root / "query_credit/launch_qwen35_vllm.sh").read_text()
