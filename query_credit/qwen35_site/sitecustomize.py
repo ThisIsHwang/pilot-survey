@@ -1,7 +1,7 @@
-"""Fail-closed local chat-template defaults for the Qwen3.5 weekend run.
+"""Fail-closed local chat-template defaults for the Qwen3.5 five-day run.
 
 Python imports ``sitecustomize`` automatically when this directory is placed at
-front of ``PYTHONPATH``. The patch is deliberately gated by an environment
+the front of ``PYTHONPATH``. The patch is deliberately gated by an environment
 variable so normal repository jobs remain unchanged.
 """
 
@@ -22,9 +22,15 @@ if _enabled():
         _original_apply_chat_template = PreTrainedTokenizerBase.apply_chat_template
 
         def _apply_chat_template_no_think(self, conversation, *args, **kwargs):
-            # Qwen3.5 requires the chat-template boolean rather than a prompt
-            # suffix. Keep the setting local to this experiment environment.
-            kwargs.setdefault("enable_thinking", False)
+            # Qwen3.5 uses the chat-template boolean rather than a prompt suffix.
+            # Reject an explicit request for thinking instead of silently
+            # producing mixed-mode prompts inside the scientific run.
+            requested = kwargs.get("enable_thinking")
+            if requested not in (None, False):
+                raise RuntimeError(
+                    "Qwen3.5 five-day experiment forbids enable_thinking=True"
+                )
+            kwargs["enable_thinking"] = False
             return _original_apply_chat_template(self, conversation, *args, **kwargs)
 
         _apply_chat_template_no_think._stackpilot_no_think = True
