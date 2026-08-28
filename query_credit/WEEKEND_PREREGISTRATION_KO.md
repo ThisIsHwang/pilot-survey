@@ -21,7 +21,7 @@ Qwen3.5 GDN 계층은 vLLM batch-invariant 커널을 지원하지 않으므로, 
 1. 같은 시드의 동시 검사 요청이 글자 단위로 동일하지 않음
 2. 응답의 `reasoning_content` 또는 `reasoning` 필드가 비어 있지 않음
 3. 응답에 `<think>` 또는 `</think>`가 나타남
-4. 수집 오류 파일에 `ThinkingLeakError`가 한 건 이상 있음
+4. 실행별 누출 원장 `thinking_leaks.jsonl`에 한 건 이상 기록됨
 5. 로컬 학습 토크나이저가 `enable_thinking=false` 가드를 설치하지 못함
 
 ## 주 가설
