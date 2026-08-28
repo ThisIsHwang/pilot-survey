@@ -16,7 +16,6 @@ def apply_model_override(cfg: dict[str, Any]) -> dict[str, Any]:
     value = os.environ.get("BASE_MODEL", "").strip()
     if value:
         cfg.setdefault("model", {})["base_model"] = value
-        # A local snapshot has already pinned its revision in the directory.
         if os.path.isdir(value):
             cfg["model"]["revision"] = None
     return cfg
@@ -30,12 +29,7 @@ def stable_balanced_sample(
     per_cell: int,
     salt: str,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Choose paired, result-blind questions across dataset/backend cells.
-
-    When more than one retriever backend is requested, the same question IDs
-    are selected for every backend within a dataset. Sampling uses no outcome,
-    reward, or document-credit field.
-    """
+    """Choose paired, result-blind questions across dataset/backend cells."""
     wanted_datasets = sorted({str(value).lower() for value in datasets})
     wanted_backends = sorted({str(value).lower() for value in backends})
     indexed: dict[tuple[str, str], dict[str, list[dict[str, Any]]]] = defaultdict(
@@ -116,11 +110,7 @@ def choose_length_matched_replacements(
     pool_end_rank: int,
     tokenizer: Any,
 ) -> list[dict[str, Any]]:
-    """Precommit one fixed-cardinality replacement per visible slot.
-
-    Ranks are one-based. Selection uses document length and retrieval rank only;
-    gold answers, support labels, and downstream rewards are never inspected.
-    """
+    """Precommit one fixed-cardinality replacement per visible slot."""
     if visible_documents < 1:
         raise ValueError("visible_documents must be positive")
     if len(results) < visible_documents:
@@ -132,7 +122,6 @@ def choose_length_matched_replacements(
         raise ValueError(
             f"Need at least {visible_documents} replacement documents, found {len(pool)}"
         )
-
     visible_titles = {
         normalize_text(_document_parts(results[index])[0])
         for index in range(visible_documents)
@@ -144,7 +133,6 @@ def choose_length_matched_replacements(
     ]
     if len(available) < visible_documents:
         raise ValueError("Replacement pool has too few title-distinct documents")
-
     lengths = [document_token_length(item, tokenizer) for item in results]
     chosen: list[dict[str, Any]] = []
     used: set[int] = set()
@@ -152,10 +140,7 @@ def choose_length_matched_replacements(
         candidates = [index for index in available if index not in used]
         replacement_index = min(
             candidates,
-            key=lambda index: (
-                abs(lengths[index] - lengths[slot]),
-                index,
-            ),
+            key=lambda index: (abs(lengths[index] - lengths[slot]), index),
         )
         used.add(replacement_index)
         replacement_title, _ = _document_parts(results[replacement_index])
@@ -304,9 +289,6 @@ def state_audit_metrics(
     action_self = pairwise_preference_accuracy(
         action_half_a, action_half_b, epsilon=epsilon
     )
-    # Cross halves so the action and document estimators do not reuse the same
-    # stochastic continuations. This prevents shared noise from inflating their
-    # apparent agreement.
     cross_a = pairwise_preference_accuracy(
         action_half_a, document_half_b, epsilon=epsilon
     )
@@ -416,3 +398,62 @@ def cluster_mean_bootstrap(
         "ci_high": float(high),
         "clusters": float(len(cluster_values)),
     }
+
+
+def two_way_paired_bootstrap(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    seed_key: str,
+    item_key: str,
+    value_key: str,
+    samples: int,
+    seed: int,
+) -> dict[str, float]:
+    by_seed_item: dict[tuple[str, str], list[float]] = defaultdict(list)
+    for row in rows:
+        value = float(row[value_key])
+        if math.isfinite(value):
+            by_seed_item[(str(row[seed_key]), str(row[item_key]))].append(value)
+    seeds = sorted({key[0] for key in by_seed_item})
+    items = sorted({key[1] for key in by_seed_item})
+    if not seeds or not items:
+        return {
+            "estimate": float("nan"),
+            "ci_low": float("nan"),
+            "ci_high": float("nan"),
+            "seeds": float(len(seeds)),
+            "items": float(len(items)),
+        }
+    matrix = np.full((len(seeds), len(items)), np.nan, dtype=np.float64)
+    seed_index = {value: index for index, value in enumerate(seeds)}
+    item_index = {value: index for index, value in enumerate(items)}
+    for (run_seed, item), values in by_seed_item.items():
+        matrix[seed_index[run_seed], item_index[item]] = float(np.mean(values))
+    observed = float(np.nanmean(matrix))
+    rng = np.random.default_rng(seed)
+    draws = np.empty(int(samples), dtype=np.float64)
+    for index in range(int(samples)):
+        sampled_seed = rng.integers(0, len(seeds), size=len(seeds))
+        sampled_item = rng.integers(0, len(items), size=len(items))
+        draws[index] = float(np.nanmean(matrix[np.ix_(sampled_seed, sampled_item)]))
+    finite_draws = draws[np.isfinite(draws)]
+    if finite_draws.size == 0:
+        return {
+            "estimate": observed,
+            "ci_low": float("nan"),
+            "ci_high": float("nan"),
+            "seeds": float(len(seeds)),
+            "items": float(len(items)),
+        }
+    low, high = np.quantile(finite_draws, [0.025, 0.975])
+    return {
+        "estimate": observed,
+        "ci_low": float(low),
+        "ci_high": float(high),
+        "seeds": float(len(seeds)),
+        "items": float(len(items)),
+    }
+
+
+def flatten(values: Iterable[Iterable[Any]]) -> list[Any]:
+    return [item for group in values for item in group]
