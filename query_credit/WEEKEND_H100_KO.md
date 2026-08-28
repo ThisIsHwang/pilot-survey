@@ -1,8 +1,8 @@
-# 5일 H100 Qwen3.5 비사고 모드 행동–문서 크레딧 실험 가이드
+# 5일 H100 Qwen3.5 비추론 모드 행동–문서 크레딧 실험 가이드
 
 ## 이번 버전에서 바뀐 것
 
-모델을 `Qwen/Qwen2.5-7B-Instruct`에서 **`Qwen/Qwen3.5-9B`**로 바꿨습니다. Qwen3.5의 **thinking(사고 모드)**은 답을 내기 전에 긴 내부 추론을 생성하는 모드입니다. 이 실험에서는 사고 모드를 완전히 끕니다.
+모델을 `Qwen/Qwen2.5-7B-Instruct`에서 **`Qwen/Qwen3.5-9B`**로 바꿨습니다. Qwen3.5의 **thinking(추론 모드)**은 답을 내기 전에 별도 추론 내용을 생성하는 모드입니다. 이 실험에서는 추론 모드를 완전히 끕니다.
 
 Qwen3.5는 `/nothink` 문자열로 모드를 바꾸는 방식을 지원하지 않으므로, 다음 네 곳에서 모두 `enable_thinking=false`를 강제합니다.
 
@@ -11,7 +11,7 @@ Qwen3.5는 `/nothink` 문자열로 모드를 바꾸는 방식을 지원하지 �
 3. 그래디언트·LoRA 학습용 로컬 토크나이저
 4. 시작 전 동시 요청 재현성 검사
 
-응답에 `<think>` 태그나 별도 reasoning 필드가 한 번이라도 나타나면 **사고 모드 누출(thinking leakage)**로 간주합니다. 누출은 실행별 원장에 즉시 추가되며, 한 건이라도 있으면 분석을 중단하여 사고 모드와 비사고 모드 결과가 섞이지 않게 합니다.
+응답에 `<think>` 태그나 별도 reasoning 필드가 한 번이라도 나타나면 **추론 모드 누출(thinking leakage)**로 간주합니다. 누출은 실행별 원장에 즉시 추가되며, 한 건이라도 있으면 분석을 중단하여 추론 모드와 비추론 모드 결과가 섞이지 않게 합니다.
 
 ## 이 실험이 묻는 질문
 
@@ -45,7 +45,7 @@ Qwen3.5는 `/nothink` 문자열로 모드를 바꾸는 방식을 지원하지 �
 
 ## Qwen3.5 서빙 방식
 
-Qwen3.5의 **GDN(Gated DeltaNet: 일부 토큰 정보를 순환 상태로 처리하는 계층)**은 현재 vLLM의 batch-invariant 모드를 지원하지 않습니다. 그래서 해당 모드를 켜지 않습니다.
+Qwen3.5의 **GDN(Gated DeltaNet: 일부 토큰 정보를 순환 상태로 처리하는 계층)**은 현재 사용하는 vLLM 설정에서 batch-invariant 모드를 사용하지 않습니다.
 
 대신 각 데이터 병렬 모델이 한 번에 요청 하나만 처리하게 `--max-num-seqs 1`을 사용합니다.
 
@@ -54,7 +54,7 @@ GPU 0~6: Qwen3.5-9B 사본 7개, 각 사본은 동시에 요청 1개 처리
 GPU 7: E5 검색기
 ```
 
-서버가 뜨면 같은 시드의 동일 요청을 여러 GPU에 동시에 보냅니다. 모든 응답이 글자 단위로 같고 사고 모드가 없어야 본실험이 시작됩니다.
+서버가 뜨면 같은 시드의 동일 요청을 여러 GPU에 동시에 보냅니다. 모든 응답이 글자 단위로 같고 추론 모드가 없어야 본실험이 시작됩니다.
 
 ## 환경 준비
 
@@ -71,14 +71,35 @@ Qwen3.5 전용 로컬 학습 환경을 별도로 준비합니다.
 bash scripts/bootstrap_qwen35.sh
 ```
 
-별도 환경을 쓰는 이유는 Qwen3.5가 Transformers 5 계열을 요구하지만, 기존 검색기 환경의 일부 패키지는 Transformers 4 계열에 고정되어 있기 때문입니다.
+별도 환경을 쓰는 이유는 Qwen3.5가 새 Transformers 계열을 요구하지만, 기존 검색기 환경의 일부 패키지는 이전 Transformers 계열에 고정되어 있기 때문입니다.
+
+## Qwen2.5 결과 재사용 규칙
+
+**캐시(cache)**는 이미 계산한 결과를 저장한 파일입니다. Qwen3.5 결과는 다음 전용 경로에 저장합니다.
+
+```text
+work/query_credit_weekend_qwen35
+```
+
+이전 Qwen2.5 결과 경로와 물리적으로 분리되므로 라벨, 정보이득, 그래디언트 또는 학습 결과가 섞이지 않습니다.
+
+Qwen3.5에서 반드시 다시 계산하는 항목은 다음입니다.
+
+- Qwen3.5가 직접 생성한 검색어 후보
+- 원본·문서 교체·문서 제거 후속 실행
+- 행동–문서 크레딧 감사
+- 정보이득 점수
+- LoRA 그래디언트
+- 12개 시드 미세학습과 최종 보고서
+
+Wiki-18 말뭉치와 BM25/E5 인덱스처럼 모델 출력과 무관한 공통 자산만 무결성 검사를 통과한 뒤 재사용합니다. 자세한 범위는 `query_credit/QWEN35_RERUN_MATRIX_KO.md`에 정리되어 있습니다.
 
 ## 자동 하드웨어 모드
 
 ### H100 8장 노드
 
 - 프로필: `node8`
-- 모델: Qwen3.5-9B, 사고 모드 끔
+- 모델: Qwen3.5-9B, 추론 모드 끔
 - GPU 0~6: 텍스트 전용 vLLM 데이터 병렬 사본 7개
 - GPU 7: E5 검색기
 - 검색기: BM25와 E5
@@ -132,13 +153,13 @@ export QUERY_CREDIT_INPUTS='/absolute/path/to/causal_query_audit/results/full/st
 
 ```bash
 FORCE_CONTINUE=1 PROFILE=smoke \
-  bash query_credit/run_weekend_h100.sh
+  bash query_credit/run_qwen35_five_day.sh
 ```
 
-사고 모드가 꺼졌다는 계약 파일을 확인합니다.
+추론 모드가 꺼졌다는 계약 파일을 확인합니다.
 
 ```bash
-cat work/query_credit_weekend/runtime/qwen35_runtime_contract.json
+cat work/query_credit_weekend_qwen35/runtime/qwen35_runtime_contract.json
 ```
 
 다음 항목이 있어야 합니다.
@@ -155,7 +176,7 @@ unique_probe_outputs: 1
 
 ```bash
 mkdir -p logs
-PROFILE=auto bash query_credit/run_weekend_h100.sh \
+PROFILE=auto bash query_credit/run_qwen35_five_day.sh \
   > logs/query_credit_qwen35_driver.log 2>&1
 ```
 
@@ -163,37 +184,37 @@ PROFILE=auto bash query_credit/run_weekend_h100.sh \
 
 ## 재시작
 
-같은 명령을 다시 실행하면 완료된 상태와 GPU 작업을 건너뜁니다.
+같은 명령을 다시 실행하면 완료된 Qwen3.5 상태를 이어서 처리합니다.
 
 ```bash
-PROFILE=auto bash query_credit/run_weekend_h100.sh
+PROFILE=auto bash query_credit/run_qwen35_five_day.sh
 ```
 
-이미 수집을 끝냈고 뒤 단계만 다시 실행할 때는 다음을 사용합니다.
+이미 Qwen3.5 수집을 끝냈고 뒤 단계만 다시 실행할 때는 다음을 사용합니다.
 
 ```bash
 SKIP_COLLECTION=1 PROFILE=node8 \
-  bash query_credit/run_weekend_h100.sh
+  bash query_credit/run_qwen35_five_day.sh
 ```
 
 수집 결과가 사전 기준을 통과하지 못하면 비싼 학습 단계는 자동으로 생략됩니다. `FORCE_CONTINUE=1` 결과는 논문 주장 근거로 사용하면 안 됩니다.
 
 ## 주요 출력
 
-### 사고 모드와 런타임 계약
+### 추론 모드와 런타임 계약
 
 ```text
-work/query_credit_weekend/runtime/qwen35_runtime_contract.json
-work/query_credit_weekend/runtime/run_manifest.txt
-work/query_credit_weekend/runtime/thinking_leaks.jsonl
+work/query_credit_weekend_qwen35/runtime/qwen35_runtime_contract.json
+work/query_credit_weekend_qwen35/runtime/run_manifest.txt
+work/query_credit_weekend_qwen35/runtime/thinking_leaks.jsonl
 ```
 
 ### 평균 전 원자료
 
 ```text
-work/query_credit_weekend/<profile>/data/raw_replays.jsonl
-work/query_credit_weekend/<profile>/data/candidate_credits.jsonl
-work/query_credit_weekend/<profile>/data/collection_errors.jsonl
+work/query_credit_weekend_qwen35/<profile>/data/raw_replays.jsonl
+work/query_credit_weekend_qwen35/<profile>/data/candidate_credits.jsonl
+work/query_credit_weekend_qwen35/<profile>/data/collection_errors.jsonl
 ```
 
 `thinking_leaks.jsonl`에 한 줄이라도 생기면 파이프라인이 중단됩니다. 같은 설정과 코드로 재시작해도 이 원장은 유지됩니다.
@@ -201,11 +222,11 @@ work/query_credit_weekend/<profile>/data/collection_errors.jsonl
 ### 최종 보고서
 
 ```text
-work/query_credit_weekend/<profile>/reports/audit/AUDIT_REPORT_KO.md
-work/query_credit_weekend/<profile>/reports/ig/IG_REPORT_KO.md
-work/query_credit_weekend/<profile>/reports/gradient/GRADIENT_REPORT_KO.md
-work/query_credit_weekend/<profile>/reports/micro/MICRO_REPORT_KO.md
-work/query_credit_weekend/<profile>/reports/WEEKEND_DECISION_KO.md
+work/query_credit_weekend_qwen35/<profile>/reports/audit/AUDIT_REPORT_KO.md
+work/query_credit_weekend_qwen35/<profile>/reports/ig/IG_REPORT_KO.md
+work/query_credit_weekend_qwen35/<profile>/reports/gradient/GRADIENT_REPORT_KO.md
+work/query_credit_weekend_qwen35/<profile>/reports/micro/MICRO_REPORT_KO.md
+work/query_credit_weekend_qwen35/<profile>/reports/WEEKEND_DECISION_KO.md
 ```
 
 ## 비교하는 학습 조건
@@ -221,6 +242,8 @@ work/query_credit_weekend/<profile>/reports/WEEKEND_DECISION_KO.md
 ## 이 실험이 하지 않는 것
 
 이번 학습은 이미 수집한 검색어 후보를 대상으로 한 **오프라인 미세 학습**입니다. 업데이트된 모델이 새 검색어를 만들고 다시 검색하는 완전한 폐루프 강화학습은 포함하지 않습니다.
+
+기존 상태 파일은 고정 평가 문맥으로 사용할 수 있지만, 주 분석의 검색 행동은 모두 Qwen3.5가 새로 생성합니다. 따라서 이번 실험은 고정 상태에서의 Qwen3.5 행동 비교이며, 질문 처음부터 끝까지 Qwen3.5가 직접 방문한 상태만 사용하는 완전한 온폴리시 실험은 아닙니다.
 
 따라서 다음은 주장하지 않습니다.
 
