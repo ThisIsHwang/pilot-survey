@@ -33,6 +33,11 @@ import sys,yaml
 print(yaml.safe_load(open(sys.argv[1]))['budget']['collection_hours'])
 PY
 )
+IG_HOURS=$("$PYTHON" - "$CONFIG" <<'PY'
+import sys,yaml
+print(yaml.safe_load(open(sys.argv[1]))['budget']['ig_hours'])
+PY
+)
 GRADIENT_HOURS=$("$PYTHON" - "$CONFIG" <<'PY'
 import sys,yaml
 print(yaml.safe_load(open(sys.argv[1]))['budget']['gradient_hours'])
@@ -173,6 +178,18 @@ run_partitioned_jobs() {
   done
   return "$failed"
 }
+
+if [[ ${SKIP_IG:-0} != 1 ]]; then
+  IG_JOBS=$RUNTIME_ROOT/ig_jobs.tsv
+  : > "$IG_JOBS"
+  for ((shard=0; shard<WORKER_GPUS; shard++)); do
+    printf '%s\t%s\n' "$shard" "$WORKER_GPUS" >> "$IG_JOBS"
+  done
+  echo "[weekend] Running the teacher-forced information-gain baseline."
+  run_partitioned_jobs ig "$IG_HOURS" "$IG_JOBS" || true
+  "$PYTHON" -m stackpilot.query_credit_weekend_ig \
+    --config "$CONFIG" --profile "$PROFILE" --report || true
+fi
 
 if [[ ${SKIP_GRADIENT:-0} != 1 ]]; then
   GRADIENT_JOBS=$RUNTIME_ROOT/gradient_jobs.tsv
