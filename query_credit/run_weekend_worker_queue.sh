@@ -7,6 +7,7 @@ python=$4
 config=$5
 profile=$6
 export CUDA_VISIBLE_DEVICES=$gpu
+export STACKPILOT_QWEN35_NO_THINK=${STACKPILOT_QWEN35_NO_THINK:-1}
 status=0
 failure_log="${queue%.txt}.failures.tsv"
 : > "$failure_log"
