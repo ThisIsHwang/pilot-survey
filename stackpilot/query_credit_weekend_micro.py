@@ -200,7 +200,6 @@ def run_worker(cfg: dict[str, Any], profile_name: str, run_seed: int, method: st
     )
     update_count = 0
     for epoch in range(int(cfg["micro_update"]["epochs"])):
-        # Method-independent ordering makes the optimization dose identical.
         for indices in batch_indices(len(train_examples), batch_size, int(run_seed) + epoch):
             batch = collate_examples(
                 tokenizer,
@@ -315,7 +314,7 @@ def run_report(cfg: dict[str, Any], profile_name: str) -> dict[str, Any]:
         )
         for method in cfg["micro_update"]["methods"]
     }
-    core_methods = [str(value) for value in cfg["micro_update"]["core_methods"]
+    core_methods = [str(value) for value in cfg["micro_update"]["core_methods"]]
     core_seed_sets = [seed_sets[method] for method in core_methods]
     complete_seed_set = (
         set.intersection(*core_seed_sets) if core_seed_sets else set()
