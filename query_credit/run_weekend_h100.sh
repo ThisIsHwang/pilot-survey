@@ -3,15 +3,19 @@ set -Eeuo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
-PYTHON=$ROOT/.venv-pilot/bin/python
-[[ -x "$PYTHON" ]] || { echo "Run scripts/bootstrap.sh first." >&2; exit 1; }
+PYTHON=$ROOT/.venv-qwen35/bin/python
+[[ -x "$PYTHON" ]] || {
+  echo "Run scripts/bootstrap_qwen35.sh first." >&2
+  exit 1
+}
 CONFIG=${WEEKEND_CONFIG:-configs/query_credit_weekend.yaml}
-CAUSAL_CONFIG=${CAUSAL_QUERY_CONFIG:-configs/causal_query_audit.yaml}
+CAUSAL_CONFIG=${CAUSAL_QUERY_CONFIG:-configs/causal_query_weekend_qwen35.yaml}
 RUNTIME_ROOT=${STACKPILOT_RUNTIME_ROOT:-$ROOT/work/query_credit_weekend/runtime}
 LOG_ROOT=${STACKPILOT_LOG_ROOT:-$ROOT/logs/query_credit_weekend}
 mkdir -p "$RUNTIME_ROOT" "$LOG_ROOT"
 export STACKPILOT_RUNTIME_ROOT=$RUNTIME_ROOT STACKPILOT_LOG_ROOT=$LOG_ROOT
-export PYTHONPATH=$ROOT${PYTHONPATH:+:$PYTHONPATH}
+export STACKPILOT_QWEN35_NO_THINK=1
+export PYTHONPATH=$ROOT/query_credit/qwen35_site:$ROOT${PYTHONPATH:+:$PYTHONPATH}
 
 command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is required." >&2; exit 1; }
 GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d ' ')
@@ -27,6 +31,26 @@ if [[ "$PROFILE" == node8 && $GPU_COUNT -lt 8 ]]; then
   echo "PROFILE=node8 requires at least 8 visible GPUs; found $GPU_COUNT." >&2
   exit 2
 fi
+
+"$PYTHON" - "$CONFIG" "$CAUSAL_CONFIG" <<'PY'
+import sys
+import yaml
+
+weekend = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
+causal = yaml.safe_load(open(sys.argv[2], encoding="utf-8"))
+for name, cfg in (("weekend", weekend), ("causal", causal)):
+    model = cfg["model"]
+    if model.get("served_model_name", model.get("base_model")) != "Qwen/Qwen3.5-9B":
+        raise SystemExit(f"{name} config does not target Qwen/Qwen3.5-9B: {model}")
+    if model.get("enable_thinking") is not False:
+        raise SystemExit(f"{name} config must set enable_thinking: false")
+    if model.get("chat_template_kwargs", {}).get("enable_thinking") is not False:
+        raise SystemExit(f"{name} config must disable thinking in the chat template")
+budget = weekend["budget"]
+if sum(int(value) for value in budget.values()) != 120:
+    raise SystemExit(f"The declared five-day budget must sum to 120 hours: {budget}")
+print("Qwen3.5-9B non-thinking configuration contract passed.")
+PY
 
 COLLECTION_HOURS=$("$PYTHON" - "$CONFIG" <<'PY'
 import sys,yaml
@@ -60,12 +84,51 @@ write_manifest() {
     echo "started_at_utc=$(date -u +%FT%TZ)"
     echo "profile=$PROFILE"
     echo "gpu_count=$GPU_COUNT"
+    echo "model=Qwen/Qwen3.5-9B"
+    echo "enable_thinking=false"
+    echo "vllm_batch_invariant=false"
+    echo "vllm_max_num_seqs=1"
+    echo "declared_budget_hours=120"
     echo "git_commit=$(git rev-parse HEAD 2>/dev/null || echo unknown)"
     echo "config_sha256=$(sha256sum "$CONFIG" | awk '{print $1}')"
+    echo "causal_config_sha256=$(sha256sum "$CAUSAL_CONFIG" | awk '{print $1}')"
+    "$PYTHON" - <<'PY'
+import accelerate, peft, torch, transformers
+print(f"torch={torch.__version__}")
+print(f"transformers={transformers.__version__}")
+print(f"peft={peft.__version__}")
+print(f"accelerate={accelerate.__version__}")
+PY
     nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader || true
   } > "$RUNTIME_ROOT/run_manifest.txt"
 }
 write_manifest
+
+LEAK_FINGERPRINT=$(printf '%s:%s:%s' \
+  "$(sha256sum "$CONFIG" | awk '{print $1}')" \
+  "$(sha256sum "$CAUSAL_CONFIG" | awk '{print $1}')" \
+  "$PROFILE:$(git rev-parse HEAD 2>/dev/null || echo unknown)" | sha256sum | awk '{print $1}')
+LEAK_MARKER=$RUNTIME_ROOT/thinking_leaks.fingerprint
+export STACKPILOT_THINKING_LEAK_LOG=$RUNTIME_ROOT/thinking_leaks.jsonl
+if [[ ! -f "$LEAK_MARKER" || "$(cat "$LEAK_MARKER")" != "$LEAK_FINGERPRINT" ]]; then
+  : > "$STACKPILOT_THINKING_LEAK_LOG"
+  printf '%s\n' "$LEAK_FINGERPRINT" > "$LEAK_MARKER"
+fi
+
+assert_no_thinking_leaks() {
+  local leaks
+  leaks=$("$PYTHON" - "$STACKPILOT_THINKING_LEAK_LOG" <<'PY'
+import sys
+from pathlib import Path
+path = Path(sys.argv[1])
+print(sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip()) if path.is_file() else 0)
+PY
+)
+  if (( leaks > 0 )); then
+    echo "Detected $leaks thinking-leak errors; refusing to analyze a mixed-mode run." >&2
+    return 3
+  fi
+}
 
 if [[ ${SKIP_COLLECTION:-0} != 1 ]]; then
   INPUT_COUNT=$("$PYTHON" - "$CONFIG" <<'PY'
@@ -78,10 +141,10 @@ print(len(paths))
 PY
 )
   if (( INPUT_COUNT == 0 )); then
-    echo "No causal-query state files found. Set QUERY_CREDIT_INPUTS to the completed state JSON glob before reserving the H100 node." >&2
+    echo "No causal-query state files found. Set QUERY_CREDIT_INPUTS before reserving the H100 node." >&2
     exit 2
   fi
-  echo "[weekend] Found $INPUT_COUNT causal-query state files."
+  echo "[qwen35] Found $INPUT_COUNT causal-query state files."
 fi
 
 services_started=0
@@ -102,18 +165,19 @@ if [[ ${SKIP_COLLECTION:-0} != 1 ]]; then
     export BASE_MODEL=$(cat "$RUNTIME_ROOT/model_path")
   fi
   export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-  echo "[weekend] Collecting fixed-cardinality counterfactuals (soft limit ${COLLECTION_HOURS}h)."
+  echo "[qwen35] Collecting non-thinking fixed-cardinality counterfactuals (soft limit ${COLLECTION_HOURS}h)."
   set +e
   timeout --signal=TERM --kill-after=10m "${COLLECTION_HOURS}h" \
-    "$PYTHON" -m stackpilot.query_credit_weekend_collect \
+    "$PYTHON" -m stackpilot.query_credit_weekend_collect_qwen35 \
       --config "$CONFIG" --causal-config "$CAUSAL_CONFIG" --profile "$PROFILE"
   collection_status=$?
   set -e
   if [[ $collection_status -ne 0 && $collection_status -ne 124 && $collection_status -ne 143 ]]; then
     echo "Collection exited with status $collection_status; cached states will still be finalized." >&2
   fi
-  "$PYTHON" -m stackpilot.query_credit_weekend_collect \
+  "$PYTHON" -m stackpilot.query_credit_weekend_collect_qwen35 \
     --config "$CONFIG" --profile "$PROFILE" --finalize-only
+  assert_no_thinking_leaks
   "$PYTHON" -m stackpilot.query_credit_weekend_report \
     --config "$CONFIG" --profile "$PROFILE"
   bash "$ROOT/query_credit/stop_weekend_services.sh" || true
@@ -121,6 +185,8 @@ if [[ ${SKIP_COLLECTION:-0} != 1 ]]; then
 else
   [[ -f "$RUNTIME_ROOT/model_path" ]] && export BASE_MODEL=$(cat "$RUNTIME_ROOT/model_path")
 fi
+
+assert_no_thinking_leaks
 
 AUDIT_DECISION=$WORK_DIR/$PROFILE/reports/audit/decision.json
 AUDIT_GO=$("$PYTHON" - "$AUDIT_DECISION" <<'PY'
@@ -132,14 +198,14 @@ except Exception:
 PY
 )
 if [[ "$AUDIT_GO" != 1 && ${FORCE_CONTINUE:-0} != 1 ]]; then
-  echo "[weekend] Audit gate did not pass. Expensive gradient/training stages are skipped."
+  echo "[qwen35] Audit gate did not pass. Expensive gradient/training stages are skipped."
   "$PYTHON" -m stackpilot.query_credit_weekend_summary --config "$CONFIG" --profile "$PROFILE"
   exit 0
 fi
 
 if [[ -z ${BASE_MODEL:-} ]]; then
-  MODEL_SOURCE=${CAUSAL_QUERY_BASE_MODEL:-Qwen/Qwen2.5-7B-Instruct}
-  MODEL_REVISION=${MODEL_REVISION:-a09a35458c702b33eeacc393d103063234e8bc28}
+  MODEL_SOURCE=${CAUSAL_QUERY_BASE_MODEL:-Qwen/Qwen3.5-9B}
+  MODEL_REVISION=${MODEL_REVISION:-28a1d5547fecc4172665ca0ee26ea6c6dc8d3127}
   export BASE_MODEL=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
     bash "$ROOT/scripts/resolve_hf_model.sh" "$MODEL_SOURCE" "$MODEL_REVISION" "$PYTHON")
 fi
@@ -185,7 +251,7 @@ if [[ ${SKIP_IG:-0} != 1 ]]; then
   for ((shard=0; shard<WORKER_GPUS; shard++)); do
     printf '%s\t%s\n' "$shard" "$WORKER_GPUS" >> "$IG_JOBS"
   done
-  echo "[weekend] Running the teacher-forced information-gain baseline."
+  echo "[qwen35] Running the teacher-forced information-gain baseline."
   run_partitioned_jobs ig "$IG_HOURS" "$IG_JOBS" || true
   "$PYTHON" -m stackpilot.query_credit_weekend_ig \
     --config "$CONFIG" --profile "$PROFILE" --report || true
@@ -199,7 +265,7 @@ cfg=yaml.safe_load(open(sys.argv[1]))
 for seed in cfg['gradient']['init_seeds']:
     print(f"{seed}\t_")
 PY
-  echo "[weekend] Running state-level gradient audit on up to $WORKER_GPUS GPUs."
+  echo "[qwen35] Running state-level gradient audit on up to $WORKER_GPUS GPUs."
   run_partitioned_jobs gradient "$GRADIENT_HOURS" "$GRADIENT_JOBS" || true
   "$PYTHON" -m stackpilot.query_credit_weekend_gradient \
     --config "$CONFIG" --profile "$PROFILE" --report || true
@@ -214,11 +280,11 @@ for seed in cfg['micro_update']['seeds']:
     for method in cfg['micro_update']['methods']:
         print(f"{seed}\t{method}")
 PY
-  echo "[weekend] Running dose-matched LoRA micro-updates on up to $WORKER_GPUS GPUs."
+  echo "[qwen35] Running dose-matched LoRA micro-updates on up to $WORKER_GPUS GPUs."
   run_partitioned_jobs micro "$MICRO_HOURS" "$MICRO_JOBS" || true
   "$PYTHON" -m stackpilot.query_credit_weekend_micro \
     --config "$CONFIG" --profile "$PROFILE" --report || true
 fi
 
 "$PYTHON" -m stackpilot.query_credit_weekend_summary --config "$CONFIG" --profile "$PROFILE"
-echo "[weekend] Finished. Read $WORK_DIR/$PROFILE/reports/WEEKEND_DECISION_KO.md"
+echo "[qwen35] Finished. Read $WORK_DIR/$PROFILE/reports/WEEKEND_DECISION_KO.md"
