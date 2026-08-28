@@ -8,7 +8,9 @@ source "$ROOT/scripts/lib/bootstrap_java.sh"
 ensure_local_no_proxy
 
 PILOT_PYTHON=$ROOT/.venv-pilot/bin/python
+QWEN_PYTHON=$ROOT/.venv-qwen35/bin/python
 [[ -x "$PILOT_PYTHON" ]] || { echo "Run scripts/bootstrap.sh first." >&2; exit 1; }
+[[ -x "$QWEN_PYTHON" ]] || { echo "Run scripts/bootstrap_qwen35.sh first." >&2; exit 1; }
 [[ -x "$ROOT/.venv-vllm/bin/vllm" ]] || { echo "Run scripts/bootstrap_vllm.sh first." >&2; exit 1; }
 command -v nvidia-smi >/dev/null 2>&1 || { echo "nvidia-smi is required." >&2; exit 1; }
 GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l | tr -d ' ')
@@ -19,14 +21,18 @@ export HARD_ASSET_ROOT=${HARD_ASSET_ROOT:-$ROOT/work/hard_rq0/assets/wiki18}
 export BM25_PORT=${BM25_PORT:-8101}
 export E5_PORT=${E5_PORT:-8102}
 export LLM_PORT=${LLM_PORT:-9000}
+export STACKPILOT_QWEN35_NO_THINK=1
 mkdir -p "$STACKPILOT_RUNTIME_ROOT" "$STACKPILOT_LOG_ROOT"
 
-MODEL_SOURCE=${BASE_MODEL:-${CAUSAL_QUERY_BASE_MODEL:-Qwen/Qwen2.5-7B-Instruct}}
-MODEL_REVISION=${MODEL_REVISION:-a09a35458c702b33eeacc393d103063234e8bc28}
+MODEL_SOURCE=${BASE_MODEL:-${CAUSAL_QUERY_BASE_MODEL:-Qwen/Qwen3.5-9B}}
+MODEL_REVISION=${MODEL_REVISION:-28a1d5547fecc4172665ca0ee26ea6c6dc8d3127}
 MODEL_PATH=$(unset HF_HUB_OFFLINE TRANSFORMERS_OFFLINE; \
   bash "$ROOT/scripts/resolve_hf_model.sh" "$MODEL_SOURCE" "$MODEL_REVISION" "$PILOT_PYTHON")
-export MODEL_PATH BASE_MODEL=$MODEL_PATH MODEL_REVISION
+export MODEL_PATH MODEL_REVISION
+export BASE_MODEL=$MODEL_PATH
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen3.5-9B}
 printf '%s\n' "$MODEL_PATH" > "$STACKPILOT_RUNTIME_ROOT/model_path"
+printf '%s\n' "$SERVED_MODEL_NAME" > "$STACKPILOT_RUNTIME_ROOT/served_model_name"
 
 if (( GPU_COUNT >= 8 )); then
   export E5_GPU=${E5_GPU:-7}
@@ -38,12 +44,15 @@ if (( GPU_COUNT >= 8 )); then
   export VLLM_API_SERVER_COUNT=${VLLM_API_SERVER_COUNT:-7}
   export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
   export MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
-  export VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}
+  # Qwen3.5 GDN rejects batch-invariant kernels. max-num-seqs=1 provides
+  # deterministic unbatched decoding while seven DP replicas preserve throughput.
+  export VLLM_BATCH_INVARIANT=0
+  export VLLM_MAX_NUM_SEQS=1
   export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
-  export CAUSAL_QUERY_BASE_MODEL=$MODEL_PATH
-  bash "$ROOT/causal_query_audit/launch_services.sh"
+  bash "$ROOT/hard_rq0/launch_retrievers.sh"
+  bash "$ROOT/query_credit/launch_qwen35_vllm.sh"
   printf 'node8\n' > "$STACKPILOT_RUNTIME_ROOT/hardware_profile"
-  echo "Weekend services ready in node8 mode: 7 GPUs for vLLM, GPU 7 for E5."
+  echo "Weekend services ready: 7 Qwen3.5 non-thinking replicas, GPU 7 for E5."
   exit 0
 fi
 
@@ -82,10 +91,10 @@ wait_for_http "$BM25_PID" "http://127.0.0.1:${BM25_PORT}/health" \
 export LLM_GPUS=0 TP=1 DP=1 VLLM_API_SERVER_COUNT=1
 export GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.88}
 export MAX_MODEL_LEN=${MAX_MODEL_LEN:-8192}
-export VLLM_BATCH_INVARIANT=${VLLM_BATCH_INVARIANT:-1}
+export VLLM_BATCH_INVARIANT=0
+export VLLM_MAX_NUM_SEQS=1
 export VLLM_ATTENTION_BACKEND=${VLLM_ATTENTION_BACKEND:-FLASH_ATTN}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-Qwen/Qwen2.5-7B-Instruct}
-bash "$ROOT/scripts/launch_vllm_bg.sh"
+bash "$ROOT/query_credit/launch_qwen35_vllm.sh"
 printf 'single\n' > "$STACKPILOT_RUNTIME_ROOT/hardware_profile"
-echo "Weekend services ready in single-GPU BM25 mode."
+echo "Weekend services ready in single-GPU Qwen3.5 non-thinking/BM25 mode."
 echo "BASE_MODEL=$BASE_MODEL"
