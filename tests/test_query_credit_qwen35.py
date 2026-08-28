@@ -85,6 +85,7 @@ class Qwen35WeekendContractTest(unittest.TestCase):
         )
         self.assertEqual(cfg["model"]["base_model"], "Qwen/Qwen3.5-9B")
         self.assertIs(cfg["model"]["enable_thinking"], False)
+        self.assertIs(cfg["model"]["require_non_thinking"], True)
         self.assertIs(
             cfg["model"]["chat_template_kwargs"]["enable_thinking"], False
         )
@@ -99,6 +100,18 @@ class Qwen35WeekendContractTest(unittest.TestCase):
             cfg["gates"]["audit"]["minimum_direct_policy_candidate_fraction"],
             1.0,
         )
+
+    def test_qwen35_results_cannot_share_qwen25_output_namespace(self) -> None:
+        cfg = yaml.safe_load(
+            (self.root / "configs/query_credit_weekend.yaml").read_text()
+        )
+        self.assertEqual(cfg["work_dir"], "work/query_credit_weekend_qwen35")
+        self.assertEqual(
+            cfg["source"]["cross_model_artifact_policy"],
+            "reject",
+        )
+        self.assertIn("qwen35", cfg["collection"]["selection_salt"])
+        self.assertIn("qwen35", cfg["micro_update"]["split_salt"])
 
     def test_candidate_bank_excludes_legacy_factual_query(self) -> None:
         state = {"state_id": "s", "factual_query": "legacy qwen2.5 query"}
