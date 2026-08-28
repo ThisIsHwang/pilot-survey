@@ -1,0 +1,18 @@
+# Text-only Qwen3.5 analysis/training environment for the weekend credit audit.
+# Keep this separate from requirements-pilot.txt because the retrieval stack
+# still depends on an older Transformers/Sentence-Transformers combination.
+torch==2.11.0
+transformers==5.16.1
+huggingface-hub==1.28.0
+peft==0.20.0
+accelerate==1.14.0
+
+numpy==2.5.1
+pandas==2.3.3
+scikit-learn==1.9.0
+openai==1.109.1
+requests==2.34.2
+pyyaml==6.0.3
+tqdm==4.69.0
+tabulate==0.10.0
+safetensors>=0.6.2
