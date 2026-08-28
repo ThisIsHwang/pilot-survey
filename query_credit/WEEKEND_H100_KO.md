@@ -11,7 +11,7 @@ Qwen3.5는 `/nothink` 문자열로 모드를 바꾸는 방식을 지원하지 �
 3. 그래디언트·LoRA 학습용 로컬 토크나이저
 4. 시작 전 동시 요청 재현성 검사
 
-응답에 `<think>` 태그나 별도 reasoning 필드가 한 번이라도 나타나면 **사고 모드 누출(thinking leakage)**로 간주합니다. 이런 오류가 수집 중 하나라도 기록되면 분석을 중단하여 사고 모드와 비사고 모드 결과가 섞이지 않게 합니다.
+응답에 `<think>` 태그나 별도 reasoning 필드가 한 번이라도 나타나면 **사고 모드 누출(thinking leakage)**로 간주합니다. 누출은 실행별 원장에 즉시 추가되며, 한 건이라도 있으면 분석을 중단하여 사고 모드와 비사고 모드 결과가 섞이지 않게 합니다.
 
 ## 이 실험이 묻는 질문
 
@@ -185,6 +185,7 @@ SKIP_COLLECTION=1 PROFILE=node8 \
 ```text
 work/query_credit_weekend/runtime/qwen35_runtime_contract.json
 work/query_credit_weekend/runtime/run_manifest.txt
+work/query_credit_weekend/runtime/thinking_leaks.jsonl
 ```
 
 ### 평균 전 원자료
@@ -195,7 +196,7 @@ work/query_credit_weekend/<profile>/data/candidate_credits.jsonl
 work/query_credit_weekend/<profile>/data/collection_errors.jsonl
 ```
 
-`work/query_credit_weekend/runtime/thinking_leaks.jsonl`에 한 줄이라도 생기면 파이프라인이 중단됩니다.
+`thinking_leaks.jsonl`에 한 줄이라도 생기면 파이프라인이 중단됩니다. 같은 설정과 코드로 재시작해도 이 원장은 유지됩니다.
 
 ### 최종 보고서
 
