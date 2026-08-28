@@ -3,6 +3,9 @@ work_dir: work/query_credit_weekend
 source:
   state_globs:
     - work/causal_query_audit/results/full/states/*/*.json
+  # Frozen prefixes may come from earlier policy runs. They define evaluation
+  # contexts only; no source-policy query is counted as a Qwen3.5 action.
+  state_regime: frozen-prefix-cross-policy
 model:
   base_model: Qwen/Qwen3.5-9B
   revision: 28a1d5547fecc4172665ca0ee26ea6c6dc8d3127
@@ -44,7 +47,6 @@ gradient:
   lora_rank: 8
   lora_alpha: 16
   lora_dropout: 0.0
-  # Qwen3.5 alternates full-attention layers and Gated DeltaNet layers.
   target_modules:
     - q_proj
     - k_proj
@@ -79,11 +81,12 @@ profiles:
     minimum_completed_states: 3
     candidates_per_state: 4
     minimum_candidates_per_state: 3
+    include_source_factual: false
     sibling_generation:
-      attempts: 8
+      attempts: 16
       temperature: 0.7
       max_tokens: 96
-    allow_controlled_fallback: true
+    allow_controlled_fallback: false
     continuation_seeds: [13, 42, 87, 101]
     retrieval_depth: 8
     visible_documents: 3
@@ -101,11 +104,12 @@ profiles:
     minimum_completed_states: 36
     candidates_per_state: 6
     minimum_candidates_per_state: 5
+    include_source_factual: false
     sibling_generation:
-      attempts: 24
+      attempts: 48
       temperature: 0.7
       max_tokens: 96
-    allow_controlled_fallback: true
+    allow_controlled_fallback: false
     continuation_seeds: [13, 42, 87, 101, 202, 303]
     retrieval_depth: 10
     visible_documents: 3
@@ -123,11 +127,12 @@ profiles:
     minimum_completed_states: 144
     candidates_per_state: 6
     minimum_candidates_per_state: 5
+    include_source_factual: false
     sibling_generation:
-      attempts: 24
+      attempts: 48
       temperature: 0.7
       max_tokens: 96
-    allow_controlled_fallback: true
+    allow_controlled_fallback: false
     continuation_seeds: [13, 42, 87, 101, 202, 303]
     retrieval_depth: 10
     visible_documents: 3
@@ -146,7 +151,7 @@ gates:
     minimum_robust_reward_views: 2
     minimum_corpus_coverage_at_100: 0.90
     maximum_mean_relative_replacement_length_difference: 0.35
-    minimum_direct_policy_candidate_fraction: 0.65
+    minimum_direct_policy_candidate_fraction: 1.0
   ig:
     minimum_candidate_coverage: 0.90
     maximum_mean_relative_random_length_difference: 0.35
@@ -159,8 +164,6 @@ gates:
     maximum_relative_weight_rms_spread: 0.05
     maximum_nonzero_rate_spread: 0.10
 budget:
-  # Five-day allocation. Qwen3.5 GDN does not support vLLM batch-invariant
-  # kernels, so serving uses one sequence per data-parallel engine instead.
   collection_hours: 80
   ig_hours: 8
   gradient_hours: 10
