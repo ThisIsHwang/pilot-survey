@@ -22,8 +22,8 @@ if _enabled():
         _original_apply_chat_template = PreTrainedTokenizerBase.apply_chat_template
 
         def _apply_chat_template_no_think(self, conversation, *args, **kwargs):
-            # Qwen3.5 does not support the old /nothink soft switch. Its local
-            # tokenizer template reads this boolean directly.
+            # Qwen3.5 requires the chat-template boolean rather than a prompt
+            # suffix. Keep the setting local to this experiment environment.
             kwargs.setdefault("enable_thinking", False)
             return _original_apply_chat_template(self, conversation, *args, **kwargs)
 
