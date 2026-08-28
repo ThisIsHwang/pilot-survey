@@ -1,16 +1,20 @@
-schema: 1
+schema: 2
 work_dir: work/query_credit_weekend
 source:
   state_globs:
     - work/causal_query_audit/results/full/states/*/*.json
 model:
-  base_model: Qwen/Qwen2.5-7B-Instruct
-  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  base_model: Qwen/Qwen3.5-9B
+  revision: 28a1d5547fecc4172665ca0ee26ea6c6dc8d3127
+  served_model_name: Qwen/Qwen3.5-9B
   trust_remote_code: true
+  enable_thinking: false
+  chat_template_kwargs:
+    enable_thinking: false
 collection:
   datasets: [2wikimultihopqa, hotpotqa, musique]
-  selection_salt: query-credit-weekend-balanced-v1
-  omission_selection_salt: query-credit-weekend-omission-v1
+  selection_salt: query-credit-weekend-balanced-qwen35-v1
+  omission_selection_salt: query-credit-weekend-omission-qwen35-v1
   reward_views:
     task:
       support: 1.0
@@ -40,7 +44,17 @@ gradient:
   lora_rank: 8
   lora_alpha: 16
   lora_dropout: 0.0
-  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  # Qwen3.5 alternates full-attention layers and Gated DeltaNet layers.
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - in_proj_qkv
+    - in_proj_z
+    - in_proj_b
+    - in_proj_a
+    - out_proj
   maximum_length: 2048
   batch_size: 8
   init_seeds: [13, 42, 87]
@@ -54,7 +68,7 @@ micro_update:
   maximum_length: 2048
   batch_size: 8
   alpha: 0.5
-  split_salt: query-credit-weekend-micro-v1
+  split_salt: query-credit-weekend-micro-qwen35-v1
   seeds: [13, 42, 87, 101, 202, 303, 404, 505, 606, 707, 808, 909]
   bootstrap_samples: 10000
 profiles:
@@ -67,7 +81,7 @@ profiles:
     minimum_candidates_per_state: 3
     sibling_generation:
       attempts: 8
-      temperature: 0.9
+      temperature: 0.7
       max_tokens: 96
     allow_controlled_fallback: true
     continuation_seeds: [13, 42, 87, 101]
@@ -89,10 +103,10 @@ profiles:
     minimum_candidates_per_state: 5
     sibling_generation:
       attempts: 24
-      temperature: 0.9
+      temperature: 0.7
       max_tokens: 96
     allow_controlled_fallback: true
-    continuation_seeds: [13, 42, 87, 101]
+    continuation_seeds: [13, 42, 87, 101, 202, 303]
     retrieval_depth: 10
     visible_documents: 3
     replacement_pool_start_rank: 4
@@ -111,10 +125,10 @@ profiles:
     minimum_candidates_per_state: 5
     sibling_generation:
       attempts: 24
-      temperature: 0.9
+      temperature: 0.7
       max_tokens: 96
     allow_controlled_fallback: true
-    continuation_seeds: [13, 42, 87, 101]
+    continuation_seeds: [13, 42, 87, 101, 202, 303]
     retrieval_depth: 10
     visible_documents: 3
     replacement_pool_start_rank: 4
@@ -145,8 +159,10 @@ gates:
     maximum_relative_weight_rms_spread: 0.05
     maximum_nonzero_rate_spread: 0.10
 budget:
-  collection_hours: 44
-  ig_hours: 4
-  gradient_hours: 8
-  micro_hours: 12
+  # Five-day allocation. Qwen3.5 GDN does not support vLLM batch-invariant
+  # kernels, so serving uses one sequence per data-parallel engine instead.
+  collection_hours: 80
+  ig_hours: 8
+  gradient_hours: 10
+  micro_hours: 18
   reserve_hours: 4
