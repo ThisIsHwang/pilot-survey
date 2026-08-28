@@ -154,12 +154,19 @@ class Qwen35WeekendContractTest(unittest.TestCase):
         self.assertIn("VLLM_BATCH_INVARIANT=0", text)
         self.assertIn("--max-num-seqs", text)
 
-    def test_local_template_guard_does_not_use_nothink_token(self) -> None:
+    def test_local_template_guard_forces_false_and_rejects_true(self) -> None:
         text = (
             self.root / "query_credit/qwen35_site/sitecustomize.py"
         ).read_text()
-        self.assertIn('kwargs.setdefault("enable_thinking", False)', text)
+        self.assertIn('kwargs["enable_thinking"] = False', text)
+        self.assertIn("forbids enable_thinking=True", text)
         self.assertNotIn("/nothink", text.lower())
+
+    def test_isolated_qwen35_entrypoint_checks_fresh_namespace(self) -> None:
+        text = (self.root / "query_credit/run_qwen35_five_day.sh").read_text()
+        self.assertIn("work/query_credit_weekend_qwen35", text)
+        self.assertIn("cross_model_artifact_policy", text)
+        self.assertIn("require_non_thinking", text)
 
 
 if __name__ == "__main__":
