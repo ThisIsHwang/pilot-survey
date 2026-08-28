@@ -1,0 +1,139 @@
+schema: 1
+work_dir: work/query_credit_weekend
+source:
+  state_globs:
+    - work/causal_query_audit/results/full/states/*/*.json
+model:
+  base_model: Qwen/Qwen2.5-7B-Instruct
+  revision: a09a35458c702b33eeacc393d103063234e8bc28
+  trust_remote_code: true
+collection:
+  datasets: [2wikimultihopqa, hotpotqa, musique]
+  selection_salt: query-credit-weekend-balanced-v1
+  omission_selection_salt: query-credit-weekend-omission-v1
+  reward_views:
+    task:
+      support: 1.0
+      answer_f1: 0.5
+      search_cost: 0.0
+      invalid_action: 0.0
+    composite:
+      support: 1.0
+      answer_f1: 0.5
+      search_cost: 0.05
+      invalid_action: 0.1
+analysis:
+  primary_reward_view: task
+  reward_views: [task, answer_f1, support_recall, composite]
+  primary_document_signal: signed_mean
+  document_signals: [signed_mean, positive_sum]
+  preference_epsilon: 0.000001
+  bootstrap_samples: 5000
+  bootstrap_seed: 61001
+gradient:
+  lora_rank: 8
+  lora_alpha: 16
+  lora_dropout: 0.0
+  target_modules: [q_proj, k_proj, v_proj, o_proj]
+  maximum_length: 2048
+  batch_size: 8
+  init_seeds: [13, 42, 87]
+  signals: [action-half-a, action-half-b, swap-half-a, swap-half-b, shuffled-half-a, shuffled-half-b]
+  bootstrap_samples: 5000
+micro_update:
+  methods: [outcome-only, outcome-plus-swap, outcome-plus-positive, outcome-plus-shuffled]
+  learning_rate: 0.0001
+  epochs: 1
+  maximum_length: 2048
+  batch_size: 8
+  alpha: 0.5
+  split_salt: query-credit-weekend-micro-v1
+  seeds: [13, 42, 87, 101, 202, 303, 404, 505, 606, 707, 808, 909]
+  bootstrap_samples: 10000
+profiles:
+  smoke:
+    backends: [bm25]
+    states_per_cell: 2
+    minimum_states_per_cell: 1
+    minimum_completed_states: 3
+    candidates_per_state: 4
+    minimum_candidates_per_state: 3
+    sibling_generation:
+      attempts: 8
+      temperature: 0.9
+      max_tokens: 96
+    allow_controlled_fallback: true
+    continuation_seeds: [13, 42, 87, 101]
+    retrieval_depth: 8
+    visible_documents: 3
+    replacement_pool_start_rank: 4
+    replacement_pool_end_rank: 8
+    omission_states_per_cell: 1
+    workers: 2
+    gradient_states: 3
+    micro_train_states: 3
+    micro_test_states: 3
+  single:
+    backends: [bm25]
+    states_per_cell: 15
+    minimum_states_per_cell: 12
+    minimum_completed_states: 36
+    candidates_per_state: 6
+    minimum_candidates_per_state: 5
+    sibling_generation:
+      attempts: 24
+      temperature: 0.9
+      max_tokens: 96
+    allow_controlled_fallback: true
+    continuation_seeds: [13, 42, 87, 101]
+    retrieval_depth: 10
+    visible_documents: 3
+    replacement_pool_start_rank: 4
+    replacement_pool_end_rank: 10
+    omission_states_per_cell: 3
+    workers: 12
+    gradient_states: 24
+    micro_train_states: 24
+    micro_test_states: 15
+  node8:
+    backends: [bm25, e5]
+    states_per_cell: 30
+    minimum_states_per_cell: 24
+    minimum_completed_states: 144
+    candidates_per_state: 6
+    minimum_candidates_per_state: 5
+    sibling_generation:
+      attempts: 24
+      temperature: 0.9
+      max_tokens: 96
+    allow_controlled_fallback: true
+    continuation_seeds: [13, 42, 87, 101]
+    retrieval_depth: 10
+    visible_documents: 3
+    replacement_pool_start_rank: 4
+    replacement_pool_end_rank: 10
+    omission_states_per_cell: 5
+    workers: 48
+    gradient_states: 48
+    micro_train_states: 90
+    micro_test_states: 60
+gates:
+  audit:
+    minimum_action_self_pairwise: 0.65
+    minimum_reliability_gap_ci_low: 0.0
+    minimum_normalized_regret: 0.08
+    minimum_robust_reward_views: 2
+    minimum_corpus_coverage_at_100: 0.90
+    maximum_mean_relative_replacement_length_difference: 0.35
+    minimum_direct_policy_candidate_fraction: 0.65
+  gradient:
+    minimum_alignment_gap: 0.05
+    maximum_shuffled_alignment: 0.30
+  micro:
+    minimum_seeds: 10
+    material_reward_effect: 0.01
+budget:
+  collection_hours: 44
+  gradient_hours: 8
+  micro_hours: 16
+  reserve_hours: 4
