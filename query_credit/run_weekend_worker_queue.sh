@@ -13,6 +13,12 @@ failure_log="${queue%.txt}.failures.tsv"
 while IFS=$'\t' read -r first second; do
   [[ -z "$first" ]] && continue
   case "$stage" in
+    ig)
+      "$python" -m stackpilot.query_credit_weekend_ig \
+        --config "$config" --profile "$profile" \
+        --shard-index "$first" --shard-count "$second"
+      job_status=$?
+      ;;
     gradient)
       "$python" -m stackpilot.query_credit_weekend_gradient \
         --config "$config" --profile "$profile" --init-seed "$first"
