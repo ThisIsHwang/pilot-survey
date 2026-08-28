@@ -1,4 +1,4 @@
-schema: 3
+schema: 1
 work_dir: work/query_credit_weekend_qwen35
 source:
   state_globs:
