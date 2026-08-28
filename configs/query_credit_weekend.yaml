@@ -30,6 +30,12 @@ analysis:
   preference_epsilon: 0.000001
   bootstrap_samples: 5000
   bootstrap_seed: 61001
+ig:
+  observation_token_budget: 500
+  maximum_length: 4096
+  batch_size: 8
+  maximum_answer_aliases: 3
+  bootstrap_samples: 5000
 gradient:
   lora_rank: 8
   lora_alpha: 16
@@ -38,10 +44,11 @@ gradient:
   maximum_length: 2048
   batch_size: 8
   init_seeds: [13, 42, 87]
-  signals: [action-half-a, action-half-b, swap-half-a, swap-half-b, shuffled-half-a, shuffled-half-b]
+  signals: [action-half-a, action-half-b, swap-half-a, swap-half-b, ig, shuffled-half-a, shuffled-half-b]
   bootstrap_samples: 5000
 micro_update:
-  methods: [outcome-only, outcome-plus-swap, outcome-plus-positive, outcome-plus-shuffled]
+  methods: [outcome-only, outcome-plus-swap, outcome-plus-positive, outcome-plus-ig, outcome-plus-shuffled]
+  core_methods: [outcome-only, outcome-plus-swap, outcome-plus-shuffled]
   learning_rate: 0.0001
   epochs: 1
   maximum_length: 2048
@@ -126,14 +133,20 @@ gates:
     minimum_corpus_coverage_at_100: 0.90
     maximum_mean_relative_replacement_length_difference: 0.35
     minimum_direct_policy_candidate_fraction: 0.65
+  ig:
+    minimum_candidate_coverage: 0.90
+    maximum_mean_relative_random_length_difference: 0.35
   gradient:
     minimum_alignment_gap: 0.05
     maximum_shuffled_alignment: 0.30
   micro:
     minimum_seeds: 10
     material_reward_effect: 0.01
+    maximum_relative_weight_rms_spread: 0.05
+    maximum_nonzero_rate_spread: 0.10
 budget:
   collection_hours: 44
+  ig_hours: 4
   gradient_hours: 8
-  micro_hours: 16
+  micro_hours: 12
   reserve_hours: 4
