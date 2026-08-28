@@ -1,23 +1,27 @@
-schema: 2
-work_dir: work/query_credit_weekend
+schema: 3
+work_dir: work/query_credit_weekend_qwen35
 source:
   state_globs:
     - work/causal_query_audit/results/full/states/*/*.json
   # Frozen prefixes may come from earlier policy runs. They define evaluation
   # contexts only; no source-policy query is counted as a Qwen3.5 action.
   state_regime: frozen-prefix-cross-policy
+  # Results produced by another model are never reused as labels, gradients,
+  # information-gain scores, or training outcomes.
+  cross_model_artifact_policy: reject
 model:
   base_model: Qwen/Qwen3.5-9B
   revision: 28a1d5547fecc4172665ca0ee26ea6c6dc8d3127
   served_model_name: Qwen/Qwen3.5-9B
   trust_remote_code: true
   enable_thinking: false
+  require_non_thinking: true
   chat_template_kwargs:
     enable_thinking: false
 collection:
   datasets: [2wikimultihopqa, hotpotqa, musique]
-  selection_salt: query-credit-weekend-balanced-qwen35-v1
-  omission_selection_salt: query-credit-weekend-omission-qwen35-v1
+  selection_salt: query-credit-weekend-balanced-qwen35-v2
+  omission_selection_salt: query-credit-weekend-omission-qwen35-v2
   reward_views:
     task:
       support: 1.0
@@ -70,7 +74,7 @@ micro_update:
   maximum_length: 2048
   batch_size: 8
   alpha: 0.5
-  split_salt: query-credit-weekend-micro-qwen35-v1
+  split_salt: query-credit-weekend-micro-qwen35-v2
   seeds: [13, 42, 87, 101, 202, 303, 404, 505, 606, 707, 808, 909]
   bootstrap_samples: 10000
 profiles:
